@@ -13,7 +13,7 @@ use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
 use crate::callback_wrappers::Wrapper;
 use crate::index::{
     AliasDef, ClassDef, Element, EnumTable, EventDef, EventFamily, EventKind, FileId, FileIndex, Index, Member,
-    Metatable, NuiCallbackDef, Symbol, SymbolKind,
+    Metatable, NuiCallbackDef, Read, Symbol, SymbolKind,
 };
 use crate::infer::{metatable_args, table_elements, table_fields, FileContext, Infer};
 use crate::luacats::{own_type, parse_doc_lines, DocGroup};
@@ -84,31 +84,45 @@ pub fn index_file(
     index: &Index,
     side: Option<Side>,
 ) -> FileIndex {
-    let ctx = FileContext::new(file, source, chunk, resolution);
-    // The index may not hold this file yet, so its side is passed along.
-    let infer = Infer::with_side(&ctx, index, side);
-    let lines = LineIndex::new(source);
-    let mut indexer = Indexer {
-        file,
-        source,
-        lines: &lines,
-        ctx: &ctx,
-        infer: &infer,
-        side,
-        regions: SideRegions::of(source, chunk),
-        nui_globals: crate::nui_callbacks::NuiGlobals::of(&ctx),
-        out: FileIndex::default(),
-        depth: 0,
-    };
-    indexer.doc_comments(&chunk.comments);
-    indexer.block(&chunk.block);
-    if let Some(stmt @ Stmt { kind: StmtKind::Return(exprs), .. }) = chunk.block.stmts.last() {
-        indexer.module_return(stmt.span.start, exprs);
-    }
-    let mut out = indexer.out;
+    let (mut out, reads) = index.reads_while(|| {
+        let ctx = FileContext::new(file, source, chunk, resolution);
+        // The index may not hold this file yet, so its side is passed along.
+        let infer = Infer::with_side(&ctx, index, side);
+        let lines = LineIndex::new(source);
+        let mut indexer = Indexer {
+            file,
+            source,
+            lines: &lines,
+            ctx: &ctx,
+            infer: &infer,
+            side,
+            regions: SideRegions::of(source, chunk),
+            nui_globals: crate::nui_callbacks::NuiGlobals::of(&ctx),
+            out: FileIndex::default(),
+            depth: 0,
+        };
+        indexer.doc_comments(&chunk.comments);
+        indexer.block(&chunk.block);
+        if let Some(stmt @ Stmt { kind: StmtKind::Return(exprs), .. }) = chunk.block.stmts.last() {
+            indexer.module_return(stmt.span.start, exprs);
+        }
+        indexer.out
+    });
     out.summary = summarize(source, chunk, resolution);
     out.meta = is_meta_file(source, chunk);
+    // The globals the file reads anywhere, natives aside, count too: the code that uses them is
+    // checked again when they change, even where its index entry does not hold their types.
+    out.reads = reads;
+    out.reads.extend(global_reads(resolution).into_iter().map(Read::Global));
+    out.reads.sort_unstable();
+    out.reads.dedup();
     out
+}
+
+/// The globals a file reads, natives aside.
+fn global_reads(resolution: &Resolution) -> Vec<SmolStr> {
+    let reads = resolution.globals.iter().filter(|global| !global.is_definition()).map(|global| global.name.clone());
+    reads.filter(|name| qbx_fivem_data::native(name).is_none()).collect()
 }
 
 struct Indexer<'a> {

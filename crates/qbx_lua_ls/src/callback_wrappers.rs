@@ -7,7 +7,7 @@ use std::sync::Arc;
 use qbx_fivem_data::Side;
 use smol_str::SmolStr;
 
-use crate::index::{EventDef, EventFamily, EventKind, FileId, Index};
+use crate::index::{EventDef, EventFamily, FileId, Index};
 use crate::types::{CallbackRole, CallbackTag, FunType, Param, Type};
 
 /// Where a call to a `@callback` wrapper passes each part, as indexes into the wrapper's parameters
@@ -101,8 +101,9 @@ pub fn handlers<'i>(
     target: Option<Side>,
 ) -> Vec<(FileId, &'i EventDef)> {
     index
-        .events()
-        .filter(|(_, e)| e.name == name && e.family == *family && e.kind == EventKind::Callback && e.handler.is_some())
+        .callbacks_named(name)
+        .into_iter()
+        .filter(|(_, e)| e.family == *family && e.handler.is_some())
         .filter(|(_, e)| !matches!((target, e.side), (Some(target), Some(side)) if !side.is_available_on(target)))
         .collect()
 }

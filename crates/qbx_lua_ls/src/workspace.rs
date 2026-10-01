@@ -14,11 +14,26 @@ use qbx_lua_syntax::{parse, SmolStr};
 use rustc_hash::FxHashSet;
 
 use crate::index::{
-    normalize_path, DefinitionScope, FileEntry, FileId, FileIndex, FileOrigin, Index, ResourceEntry, ResourceId,
+    normalize_path, Changes, DefinitionScope, FileEntry, FileId, FileIndex, FileOrigin, Index, Read, ResourceEntry,
+    ResourceId,
 };
 use crate::indexer::index_file;
 
 const MAX_INDEXED_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// How often one change may index the same files again, so that globals typed from each other
+/// cannot keep it going.
+pub const MAX_INDEX_PASSES: usize = 4;
+
+/// A file just indexed, with the entry the index held for it before.
+type Indexed = (FileId, Option<FileEntry>);
+
+/// The files that `refresh_readers` reached, open ones included.
+#[derive(Default)]
+pub struct Refreshed {
+    pub reached: FxHashSet<FileId>,
+    /// Those of them that now declare something differently.
+    pub changed: FxHashSet<FileId>,
+}
 
 #[derive(Default)]
 pub struct Workspace {
@@ -233,8 +248,13 @@ impl Workspace {
 
     /// Indexes `path`, reading it from disk unless `text` (an open document) is given.
     pub fn index_path(&mut self, path: &Path, origin: FileOrigin, text: Option<&str>) -> bool {
+        self.read_and_index(path, origin, text).is_some()
+    }
+
+    /// Indexes `path` like `index_path`, returning its file and the entry the index held for it.
+    fn read_and_index(&mut self, path: &Path, origin: FileOrigin, text: Option<&str>) -> Option<Indexed> {
         if self.lint_config.is_excluded(path) {
-            return false;
+            return None;
         }
         let owned;
         let source = match text {
@@ -242,7 +262,7 @@ impl Workspace {
             None => {
                 let too_large = std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_INDEXED_FILE_BYTES);
                 if too_large {
-                    return false;
+                    return None;
                 }
                 match read_source(path) {
                     Ok(text) => {
@@ -251,15 +271,58 @@ impl Workspace {
                     }
                     Err(_) => {
                         self.mark_escrowed(path);
-                        return false;
+                        return None;
                     }
                 }
             }
         };
         let chunk = parse(source);
         let resolution = resolve(&chunk);
-        self.index_parsed(path, origin, source, &chunk, &resolution);
+        Some(self.index_entry(path, origin, source, &chunk, &resolution))
+    }
+
+    /// Indexes `path` from disk like `index_path`, adding what it now declares differently to
+    /// `changes`.
+    pub fn index_path_tracked(&mut self, path: &Path, origin: FileOrigin, changes: &mut Changes) -> bool {
+        let Some((id, replaced)) = self.read_and_index(path, origin, None) else { return false };
+        record(changes, id, self.changed(id, replaced.as_ref()));
         true
+    }
+
+    /// What the file `id` declares differently than `replaced`, the entry the index held for it
+    /// before.
+    fn changed(&self, id: FileId, replaced: Option<&FileEntry>) -> FxHashSet<Read> {
+        self.index.changes(replaced, self.index.file(id))
+    }
+
+    /// Indexes the closed files in `stale` again, and then the files that read what they now
+    /// declare differently, themselves included, until nothing changes or after `passes` passes,
+    /// so that the types those files inferred from those declarations follow them. Files in `open`
+    /// are left to their documents.
+    pub fn refresh_readers(&mut self, stale: FxHashSet<FileId>, open: &FxHashSet<FileId>, passes: usize) -> Refreshed {
+        let mut refreshed = Refreshed::default();
+        let mut stale: Vec<FileId> = stale.into_iter().collect();
+        for _ in 0..passes {
+            stale.sort_unstable();
+            let mut changed = Changes::default();
+            let mut indexed = FxHashSet::default();
+            for id in stale.drain(..) {
+                let Some(file) = self.index.file(id).filter(|file| file.origin != FileOrigin::Stub) else { continue };
+                refreshed.reached.insert(id);
+                if !open.contains(&id) {
+                    let (path, origin) = (file.path.clone(), file.origin);
+                    if self.index_path_tracked(&path, origin, &mut changed) {
+                        indexed.insert(id);
+                    }
+                }
+            }
+            refreshed.changed.extend(changed.keys());
+            stale.extend(self.index.readers_of(&changed, &indexed));
+            if stale.is_empty() {
+                break;
+            }
+        }
+        refreshed
     }
 
     fn mark_escrowed(&mut self, unreadable: &Path) {
@@ -280,6 +343,19 @@ impl Workspace {
         chunk: &qbx_lua_syntax::ast::Chunk,
         resolution: &qbx_lua_analysis::scope::Resolution,
     ) -> FileId {
+        self.index_entry(path, origin, source, chunk, resolution).0
+    }
+
+    /// Indexes a parsed file like `index_parsed`, returning its file and the entry the index held
+    /// for it.
+    fn index_entry(
+        &mut self,
+        path: &Path,
+        origin: FileOrigin,
+        source: &str,
+        chunk: &qbx_lua_syntax::ast::Chunk,
+        resolution: &qbx_lua_analysis::scope::Resolution,
+    ) -> Indexed {
         let id = self.index.allocate(path);
         let (resource, side) = self.side_and_resource(path);
         let origin = self.index.file(id).map_or(origin, |f| f.origin);
@@ -295,27 +371,30 @@ impl Workspace {
         if file.defines_for_all() {
             file.index.definition_scope = self.definition_scope(path);
         }
-        self.index.set_file(id, file);
-        id
+        (id, self.index.set_file(id, file))
     }
 
     /// Indexes a document open in the editor. Its symbols are inferred with what the index held for
     /// the file, so when it declares other classes or aliases now, as one indexed for the first time
     /// does, a second pass reads them, as the scan's second pass does for every file, and the
-    /// methods of `---@class Name` `Name = {}` see the class.
+    /// methods of `---@class Name` `Name = {}` see the class. What it now declares differently is
+    /// added to `changes`.
     pub fn index_document(
         &mut self,
         path: &Path,
         source: &str,
         chunk: &qbx_lua_syntax::ast::Chunk,
         resolution: &qbx_lua_analysis::scope::Resolution,
+        changes: &mut Changes,
     ) -> FileId {
         let id = self.index.allocate(path);
         let declared = |ws: &Self| ws.index.file(id).map(|file| declared_types(&file.index)).unwrap_or_default();
         let before = declared(self);
-        self.index_parsed(path, FileOrigin::Workspace, source, chunk, resolution);
+        let (_, replaced) = self.index_entry(path, FileOrigin::Workspace, source, chunk, resolution);
+        record(changes, id, self.changed(id, replaced.as_ref()));
         if declared(self) != before {
-            self.index_parsed(path, FileOrigin::Workspace, source, chunk, resolution);
+            let (_, replaced) = self.index_entry(path, FileOrigin::Workspace, source, chunk, resolution);
+            record(changes, id, self.changed(id, replaced.as_ref()));
         }
         id
     }
@@ -434,6 +513,13 @@ impl Workspace {
             }
         }
         refs
+    }
+}
+
+/// Adds what the file `id` declares differently, `changed`, to `changes`.
+fn record(changes: &mut Changes, id: FileId, changed: FxHashSet<Read>) {
+    if !changed.is_empty() {
+        changes.entry(id).or_default().extend(changed);
     }
 }
 

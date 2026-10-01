@@ -2588,8 +2588,8 @@ impl<'a> Infer<'a> {
                     }
                 }
                 let declared: FxHashSet<SmolStr> = out.iter().map(|m| m.name.clone()).collect();
-                for (file, symbol) in self.index.exports_of(resource) {
-                    if wanted(&symbol.name) && !declared.contains(&symbol.name) {
+                for (file, symbol) in self.index.exports_of(resource, filter) {
+                    if !declared.contains(&symbol.name) {
                         out.push(member_from_symbol(file, symbol));
                     }
                 }
@@ -2658,7 +2658,8 @@ impl<'a> Infer<'a> {
 
     /// The members set on the tables `owner` names themselves.
     fn own_members(&self, owner: &str, filter: Option<&str>, out: &mut Vec<MemberInfo>) {
-        for (file, symbol) in self.index.members_of(owner, self.ctx.file) {
+        for (file, entry) in self.index.member_entries(owner, filter, self.ctx.file) {
+            let symbol = &entry.symbol;
             if filter.is_none_or(|f| f == symbol.name) {
                 let mut member = member_from_symbol(file, symbol);
                 if matches!(member.ty, Type::Table | Type::Unknown) {

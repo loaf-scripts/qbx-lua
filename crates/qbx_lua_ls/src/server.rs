@@ -16,16 +16,13 @@ use crate::features::{
     code_action, completion, definition, diagnostics, folding, hover, inlay, on_type, reference, references,
     semantic_tokens, signature, symbols,
 };
-use crate::index::{normalize_path, FileOrigin};
-use crate::workspace::{uri_to_path, Workspace};
+use crate::index::{normalize_path, Changes, FileOrigin};
+use crate::workspace::{uri_to_path, Workspace, MAX_INDEX_PASSES};
 
 pub type Documents = FxHashMap<Url, Document>;
 
 /// Opening the file shows everything; the workspace overview only needs to say "look here".
 const MAX_PROBLEMS_PER_CLOSED_FILE: usize = 100;
-/// How often a flush may index the same open document, so that globals typed from each other
-/// cannot keep it going.
-const MAX_INDEX_PASSES: usize = 4;
 
 type AnyResult<T> = Result<T, Box<dyn Error + Sync + Send>>;
 
@@ -89,6 +86,13 @@ pub struct Server {
     workspace_stale: bool,
     /// Resources to re-lint after a save or close, which is much cheaper than the whole workspace.
     stale_resources: FxHashSet<Option<crate::index::ResourceId>>,
+    /// Closed files to re-lint besides those of `stale_resources`.
+    stale_files: FxHashSet<crate::index::FileId>,
+    /// What open documents declare differently than when the files that read it were indexed.
+    /// Those files follow once a document is saved or closed, rather than on every edit.
+    pending: Changes,
+    /// A document was saved or closed since the readers of `pending` were last indexed.
+    sync_readers: bool,
     next_request_id: i32,
 }
 
@@ -230,6 +234,9 @@ impl Server {
             workspace_reported: FxHashSet::default(),
             workspace_stale: true,
             stale_resources: FxHashSet::default(),
+            stale_files: FxHashSet::default(),
+            pending: Changes::default(),
+            sync_readers: false,
             next_request_id: 0,
         }
     }
@@ -332,7 +339,42 @@ impl Server {
     }
 
     /// Open documents are reparsed on every edit but only reindexed once something needs the index.
+    /// The files that read what they declare follow once one of them is saved or closed.
     fn flush_index(&mut self) {
+        self.index_dirty();
+        for _ in 0..MAX_INDEX_PASSES {
+            if !std::mem::take(&mut self.sync_readers) || self.pending.is_empty() {
+                break;
+            }
+            let stale = self.ws.index.readers_of(&std::mem::take(&mut self.pending), &FxHashSet::default());
+            let refreshed = self.ws.refresh_readers(stale, &self.open_files(), MAX_INDEX_PASSES);
+            let reached = refreshed.reached;
+            self.diagnostics_pending |= !reached.is_empty();
+            // The readers are checked again, and so are the resources of those that now declare
+            // something differently, whose other files may read it.
+            self.stale_files.extend(reached.iter().copied());
+            let changed = refreshed.changed.iter().filter_map(|id| self.ws.index.file(*id));
+            self.stale_resources.extend(changed.map(|file| file.resource));
+            // Open documents among the readers are indexed from their text, and what that changes is
+            // passed on in turn.
+            let open = self
+                .docs
+                .iter()
+                .filter(|(_, doc)| self.ws.index.file_id(&doc.path).is_some_and(|id| reached.contains(&id)));
+            let readers: Vec<Url> = open.map(|(uri, _)| uri.clone()).collect();
+            self.sync_readers = !readers.is_empty();
+            self.dirty.extend(readers);
+            self.index_dirty();
+        }
+    }
+
+    /// The files of the open documents.
+    fn open_files(&self) -> FxHashSet<crate::index::FileId> {
+        self.docs.values().filter_map(|doc| self.ws.index.file_id(&doc.path)).collect()
+    }
+
+    /// Indexes the documents edited since the index last held them.
+    fn index_dirty(&mut self) {
         self.diagnostics_pending |= !self.dirty.is_empty();
         let mut relink = false;
         // The same order whatever the paths hash to. Calls to a `---@callback` wrapper are only
@@ -340,7 +382,7 @@ impl Server {
         let mut dirty: Vec<Url> = std::mem::take(&mut self.dirty).into_iter().collect();
         dirty.sort();
         dirty.sort_by_key(|uri| !self.docs.get(uri).is_some_and(|doc| doc.text.contains("@callback")));
-        // The documents in the order they were indexed, with whether that changed their globals.
+        // The documents in the order they were indexed, with whether that changed what they declare.
         let mut indexed = Vec::new();
         for uri in dirty {
             if let Some(doc) = self.docs.get_mut(&uri) {
@@ -358,9 +400,9 @@ impl Server {
             self.ws.link_imports();
         }
         // Each document was indexed against the others as the index held them, so those before the
-        // last one whose globals changed may have missed a global it declares, like the `Players`
+        // last one whose declarations changed may have missed one of them, like the `Players`
         // that types `self` in `function Players:rename()`. Indexed again, they move to the end, and
-        // the globals they change in turn may be what the others missed.
+        // what they change in turn may be what the others missed.
         for _ in 1..MAX_INDEX_PASSES {
             let stale = indexed.iter().rposition(|(_, changed)| *changed).unwrap_or(0);
             if stale == 0 {
@@ -374,14 +416,16 @@ impl Server {
         }
     }
 
-    /// Indexes an open document, telling whether that changed the globals it declares.
+    /// Indexes an open document, telling whether that changed what it declares.
     fn index_document(&mut self, uri: &Url) -> bool {
         let Some(doc) = self.docs.get_mut(uri) else { return false };
-        let before = self.ws.index.file(doc.file).map(|file| file.index.globals.clone()).unwrap_or_default();
-        doc.file = self.ws.index_document(&doc.path, &doc.text, &doc.chunk, &doc.resolution);
-        let after = self.ws.index.file(doc.file).map_or(&[][..], |file| &file.index.globals[..]);
-        before.len() != after.len()
-            || before.iter().zip(after).any(|(old, new)| old.name != new.name || old.ty != new.ty)
+        let mut changes = Changes::default();
+        doc.file = self.ws.index_document(&doc.path, &doc.text, &doc.chunk, &doc.resolution, &mut changes);
+        let changed = !changes.is_empty();
+        for (file, reads) in changes {
+            self.pending.entry(file).or_default().extend(reads);
+        }
+        changed
     }
 
     fn publish_dirty(&mut self) {
@@ -401,7 +445,8 @@ impl Server {
     fn publish_workspace(&mut self) {
         let everything = std::mem::take(&mut self.workspace_stale);
         let scope = std::mem::take(&mut self.stale_resources);
-        if !everything && scope.is_empty() {
+        let stale_files = std::mem::take(&mut self.stale_files);
+        if !everything && scope.is_empty() && stale_files.is_empty() {
             return;
         }
         let in_scope = |resource: Option<crate::index::ResourceId>| everything || scope.contains(&resource);
@@ -410,8 +455,10 @@ impl Server {
         let mut targets: Vec<(Url, PathBuf, Option<crate::index::FileId>)> = Vec::new();
         if enabled {
             let in_workspace = |path: &std::path::Path| self.ws.roots.iter().any(|root| path.starts_with(root));
-            let files =
-                self.ws.index.files().filter(|(_, f)| f.origin == FileOrigin::Workspace && in_scope(f.resource));
+            let stale = |id: crate::index::FileId, file: &crate::index::FileEntry| {
+                in_scope(file.resource) || stale_files.contains(&id)
+            };
+            let files = self.ws.index.files().filter(|(id, f)| f.origin == FileOrigin::Workspace && stale(*id, f));
             for (id, file) in files {
                 targets.push((file.uri.clone(), file.path.clone(), Some(id)));
             }
@@ -573,13 +620,16 @@ impl Server {
                 }
                 self.mark_resource_stale(&uri);
                 self.dirty.insert(uri);
+                self.sync_readers = true;
             }
             notif::DidCloseTextDocument::METHOD => {
                 let Ok(params) = serde_json::from_value::<DidCloseTextDocumentParams>(params) else { return };
                 let uri = params.text_document.uri;
                 if let Some(doc) = self.docs.remove(&uri) {
                     if !doc.is_manifest() {
-                        self.ws.index_path(&doc.path, FileOrigin::Workspace, None);
+                        // What the document declared without saving is gone again for its readers too.
+                        self.ws.index_path_tracked(&doc.path, FileOrigin::Workspace, &mut self.pending);
+                        self.sync_readers = true;
                     }
                 }
                 self.dirty.remove(&uri);
@@ -621,6 +671,16 @@ impl Server {
         // files each resource imports.
         let mut relink = false;
         let mut config_changed = false;
+        // The files that read what a changed file declares follow it, whatever order the changes came
+        // in. The readers of what a deleted file declared can only be found while it is indexed.
+        let deleted: Changes = changes
+            .iter()
+            .filter(|change| change.typ == FileChangeType::DELETED)
+            .filter_map(|change| self.ws.index.file_id(&uri_to_path(&change.uri)?))
+            .filter_map(|id| Some((id, self.ws.index.changes(Some(self.ws.index.file(id)?), None))))
+            .collect();
+        let mut stale = self.ws.index.readers_of(&deleted, &FxHashSet::default());
+        let mut changed = Changes::default();
         for change in changes {
             let Some(path) = uri_to_path(&change.uri) else { continue };
             if path.extension().is_some_and(|e| e == "cfg") {
@@ -636,7 +696,7 @@ impl Server {
                 self.ws.index.remove_file(&path);
             } else if path.extension().is_some_and(|e| e == "lua") {
                 if !self.docs.contains_key(&change.uri) {
-                    self.ws.index_path(&path, FileOrigin::Workspace, None);
+                    self.ws.index_path_tracked(&path, FileOrigin::Workspace, &mut changed);
                 }
                 relink |= change.typ == FileChangeType::CREATED;
             }
@@ -651,6 +711,8 @@ impl Server {
         if relink || config_changed {
             self.ws.link_imports();
         }
+        stale.extend(self.ws.index.readers_of(&changed, &FxHashSet::default()));
+        self.ws.refresh_readers(stale, &self.open_files(), MAX_INDEX_PASSES);
         self.workspace_stale = true;
         self.dirty.extend(self.docs.keys().cloned());
     }
@@ -886,6 +948,8 @@ impl Server {
             "qbx/reindex" => {
                 qbx_lua_analysis::startup::clear_cache();
                 let stats = self.ws.scan();
+                // File IDs start over, and the scan indexed every file against the others.
+                self.pending.clear();
                 self.log_config_notes();
                 self.dirty.extend(self.docs.keys().cloned());
                 // Restore unsaved text before any request or closed-file diagnostic can see the
@@ -895,6 +959,7 @@ impl Server {
                 self.dirty.extend(self.docs.keys().cloned());
                 self.flush_index();
                 self.stale_resources.clear();
+                self.stale_files.clear();
                 self.workspace_stale = true;
                 Ok(json!({ "files": stats.files, "resources": stats.resources, "millis": stats.millis as u64 }))
             }

@@ -360,7 +360,7 @@ fn open_documents_alone_are_indexed_again_for_the_classes_they_declare() {
         );
         let doc = Document::new(path_to_uri(&path), path, 1, text);
         let file = match document {
-            true => ws.index_document(&doc.path, &doc.text, &doc.chunk, &doc.resolution),
+            true => ws.index_document(&doc.path, &doc.text, &doc.chunk, &doc.resolution, &mut Default::default()),
             false => ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution),
         };
         let index = &ws.index.file(file).unwrap().index;
@@ -411,4 +411,202 @@ fn manual_reindex_restores_unsaved_documents_and_their_new_file_ids() {
     client.request("qbx/reindex", Value::Null);
     let symbols = client.request("workspace/symbol", json!({"query": "ScratchOnly"}));
     assert!(symbols.as_array().unwrap().is_empty(), "{symbols}");
+}
+
+/// The file names and lines `textDocument/definition` finds for the `needle` in `text` of `uri`.
+fn definitions(client: &mut Client, uri: &Url, text: &str, needle: &str) -> Vec<(String, u64)> {
+    let offset = text.find(needle).unwrap();
+    let line = text[..offset].matches('\n').count();
+    let character = offset - text[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let result = client.request(
+        "textDocument/definition",
+        json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": character}}),
+    );
+    let locations = result.as_array().cloned().unwrap_or_default();
+    let place = |location: &Value| {
+        let file = location["uri"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+        (file, location["range"]["start"]["line"].as_u64().unwrap())
+    };
+    locations.iter().map(place).collect()
+}
+
+#[test]
+fn closed_files_follow_the_globals_of_documents_once_saved_or_closed() {
+    let fixture = Fixture::new();
+    fixture.write("demo/fxmanifest.lua", "shared_scripts { 'types.lua', 'methods.lua' }\nclient_script 'client.lua'\n");
+    fixture.write("demo/types.lua", "---@class Test.Player\nPlayers = {}\n");
+    fixture.write("demo/methods.lua", "function Players:rename(name)\n    self.nickname = name\nend\n");
+    fixture.write("demo/client.lua", "");
+    let mut client = Client::start(&fixture.0);
+    let types = path_to_uri(&fixture.0.join("demo/types.lua"));
+    let caller = path_to_uri(&fixture.0.join("demo/client.lua"));
+    let text =
+        "---@type Test.User\nlocal user\n---@type Test.Admin\nlocal admin\nprint(user.nickname, admin.nickname)\n";
+    client.open(&types, "---@class Test.Player\nPlayers = {}\n");
+    client.open(&caller, text);
+    let methods = || vec![("methods.lua".to_string(), 1)];
+    let change = |client: &Client, version: i32, class: &str| {
+        let text = format!("---@class {class}\nPlayers = {{}}\n");
+        client.notify(
+            "textDocument/didChange",
+            json!({"textDocument": {"uri": types, "version": version}, "contentChanges": [{"text": text}]}),
+        );
+    };
+
+    change(&client, 2, "Test.User");
+    assert_eq!(definitions(&mut client, &caller, text, "nickname,"), [], "closed files wait for a save");
+    fixture.write("demo/types.lua", "---@class Test.User\nPlayers = {}\n");
+    client.notify("textDocument/didSave", json!({"textDocument": {"uri": types}}));
+    assert_eq!(definitions(&mut client, &caller, text, "nickname,"), methods());
+
+    // Saving any document passes on what the others changed without saving.
+    change(&client, 3, "Test.Admin");
+    client.notify("textDocument/didSave", json!({"textDocument": {"uri": caller}}));
+    assert_eq!(definitions(&mut client, &caller, text, "nickname)"), methods());
+
+    // Closing without saving takes the declarations back to the file on disk.
+    client.notify("textDocument/didClose", json!({"textDocument": {"uri": types}}));
+    assert_eq!(definitions(&mut client, &caller, text, "nickname,"), methods());
+    assert_eq!(definitions(&mut client, &caller, text, "nickname)"), []);
+}
+
+#[test]
+fn closed_files_follow_globals_that_change_on_disk_in_any_order() {
+    let fixture = Fixture::new();
+    fixture.write("demo/fxmanifest.lua", "shared_script '*.lua'\n");
+    fixture.write("demo/query.lua", "");
+    let mut client = Client::start(&fixture.0);
+    client.request("qbx/status", Value::Null);
+    // The method on `Mid` is indexed before `Mid`, which is indexed before the `Base` it is typed from.
+    let files = [
+        ("demo/c.lua", "function Mid:touch()\n    self.touched = true\nend\n"),
+        ("demo/a.lua", "Mid = Base\n"),
+        ("demo/b.lua", "---@class Test.Base\nBase = {}\n"),
+    ];
+    for (file, text) in files {
+        fixture.write(file, text);
+    }
+    let changes: Vec<Value> =
+        files.iter().map(|(file, _)| json!({"uri": path_to_uri(&fixture.0.join(file)), "type": 1})).collect();
+    client.notify("workspace/didChangeWatchedFiles", json!({"changes": changes}));
+    let query = path_to_uri(&fixture.0.join("demo/query.lua"));
+    let text = "print(Base.touched)\n";
+    client.open(&query, text);
+    assert_eq!(definitions(&mut client, &query, text, "touched"), [("c.lua".to_string(), 1)]);
+
+    // Without `Base`, neither `Mid` nor the method on it has a class any more: the method makes `Mid`
+    // a table of its own, as a fresh scan reads it.
+    let deleted = path_to_uri(&fixture.0.join("demo/b.lua"));
+    std::fs::remove_file(fixture.0.join("demo/b.lua")).unwrap();
+    client.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": deleted, "type": 3}]}));
+    let symbols = client.request("workspace/symbol", json!({"query": "touched"}));
+    assert_eq!(symbols[0]["containerName"], "Mid", "{symbols}");
+    let fresh = Client::start(&fixture.0).request("workspace/symbol", json!({"query": "touched"}));
+    assert_eq!(symbols, fresh);
+}
+
+#[test]
+fn closed_files_follow_what_they_declare_themselves_once_changed_on_disk() {
+    let fixture = Fixture::new();
+    fixture.write("demo/fxmanifest.lua", "shared_script '*.lua'\n");
+    fixture.write("demo/init.lua", "Util = {}\n");
+    fixture.write("demo/utils.lua", "function Util.Key()\n    return 1\nend\n");
+    fixture.write("demo/query.lua", "");
+    let mut client = Client::start(&fixture.0);
+    client.request("qbx/status", Value::Null);
+    // `Key` returns what `String` beside it returns, which the file is indexed without at first.
+    let utils = "function Util.Key()\n    return Util.String()\nend\n\nfunction Util.String()\n    return ''\nend\n";
+    fixture.write("demo/utils.lua", utils);
+    let changed = path_to_uri(&fixture.0.join("demo/utils.lua"));
+    client.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": changed, "type": 2}]}));
+    let query = path_to_uri(&fixture.0.join("demo/query.lua"));
+    let text = "Value = Util.Key()\n";
+    client.open(&query, text);
+    assert_eq!(hover(&mut client, &query, text, "Value"), "(global) Value: string");
+}
+
+/// The first line `textDocument/hover` shows for the `needle` in `text` of `uri`.
+fn hover(client: &mut Client, uri: &Url, text: &str, needle: &str) -> String {
+    let offset = text.find(needle).unwrap();
+    let line = text[..offset].matches('\n').count();
+    let character = offset - text[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let result = client.request(
+        "textDocument/hover",
+        json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": character}}),
+    );
+    let value = result["contents"]["value"].as_str().unwrap_or_default();
+    value.lines().find(|line| !line.is_empty() && !line.starts_with("```")).unwrap_or_default().to_string()
+}
+
+#[test]
+fn closed_files_follow_the_classes_members_exports_and_modules_they_read() {
+    let fixture = Fixture::new();
+    let types = "---@class Test.Store\n---@field admin Test.Admin\n\n---@class Test.Admin\n\n---@class Test.User\n";
+    fixture.write("demo/fxmanifest.lua", "shared_scripts { 'types.lua', 'players.lua', 'readers.lua', 'query.lua' }\n");
+    fixture.write("demo/types.lua", types);
+    fixture.write("demo/players.lua", "---@type Test.Store\nStore = {}\nPlayers = {}\nPlayers.admin = 5\n");
+    fixture.write("demo/mod.lua", "return { value = 1 }\n");
+    fixture.write("shop/fxmanifest.lua", "server_script 'server.lua'\n");
+    fixture.write("shop/server.lua", "exports('GetThing', function() return 1 end)\n");
+    // Resources are found by name whatever its case.
+    let readers = "CurrentAdmin = Store.admin\nBoss = Players.admin\nThing = exports.Shop:GetThing()\n";
+    fixture.write("demo/readers.lua", &format!("{readers}Value = require('mod').value\n"));
+    fixture.write("demo/query.lua", "");
+    let mut client = Client::start(&fixture.0);
+    let query = path_to_uri(&fixture.0.join("demo/query.lua"));
+    let text = "print(CurrentAdmin, Boss, Thing, Value)\n";
+    client.open(&query, text);
+    let hovers = |client: &mut Client| {
+        ["CurrentAdmin", "Boss", "Thing", "Value"].map(|global| hover(client, &query, text, global))
+    };
+    assert_eq!(
+        hovers(&mut client),
+        [
+            "(global) CurrentAdmin: Test.Admin",
+            "(global) Boss: integer",
+            "(global) Thing: integer",
+            "(global) Value: integer"
+        ]
+    );
+
+    // What the readers stored follows the `@field` of a class, the export of another resource and
+    // what a module returns, none of them a global.
+    let changed = [
+        ("demo/types.lua", types.replace("admin Test.Admin", "admin Test.User")),
+        ("shop/server.lua", "exports('GetThing', function() return 'thing' end)\n".to_string()),
+        ("demo/mod.lua", "return { value = 'value' }\n".to_string()),
+    ];
+    for (file, text) in &changed {
+        fixture.write(file, text);
+    }
+    let changes: Vec<Value> =
+        changed.iter().map(|(file, _)| json!({"uri": path_to_uri(&fixture.0.join(file)), "type": 2})).collect();
+    client.notify("workspace/didChangeWatchedFiles", json!({"changes": changes}));
+    assert_eq!(
+        hovers(&mut client),
+        [
+            "(global) CurrentAdmin: Test.User",
+            "(global) Boss: integer",
+            "(global) Thing: string",
+            "(global) Value: string"
+        ]
+    );
+    // Also when the export alone changes.
+    fixture.write("shop/server.lua", "exports('GetThing', function() return true end)\n");
+    let server = path_to_uri(&fixture.0.join("shop/server.lua"));
+    client.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": server, "type": 2}]}));
+    assert_eq!(hover(&mut client, &query, text, "Thing"), "(global) Thing: boolean");
+
+    // A member that a document sets follows once it is saved.
+    let players = path_to_uri(&fixture.0.join("demo/players.lua"));
+    let saved = "---@type Test.Store\nStore = {}\nPlayers = {}\nPlayers.admin = 'admin'\n";
+    client.open(&players, "---@type Test.Store\nStore = {}\nPlayers = {}\nPlayers.admin = 5\n");
+    client.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": players, "version": 2}, "contentChanges": [{"text": saved}]}),
+    );
+    assert_eq!(hover(&mut client, &query, text, "Boss"), "(global) Boss: integer", "closed files wait for a save");
+    fixture.write("demo/players.lua", saved);
+    client.notify("textDocument/didSave", json!({"textDocument": {"uri": players}}));
+    assert_eq!(hover(&mut client, &query, text, "Boss"), "(global) Boss: string");
 }
