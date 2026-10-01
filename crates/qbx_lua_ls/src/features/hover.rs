@@ -317,13 +317,13 @@ fn class_hover(infer: &Infer, class: &ClassDef) -> String {
     let members = infer.members(&Type::Named(class.name.clone(), Vec::new()));
     let mut fields: Vec<String> = members.iter().map(|member| format!("{}: {}", member.name, member.ty)).collect();
     fields.extend(class.literal_fields(infer.side()).map(|(key, value)| format!("[{key}]: {value}")));
-    let index = class.index(infer.side());
-    if !fields.is_empty() || index.is_some() {
+    let indices = class.indices(infer.side());
+    if !fields.is_empty() || !indices.is_empty() {
         declaration.push_str(" {");
         for field in fields.iter().take(MAX_OVERVIEW_FIELDS) {
             declaration.push_str(&format!("\n    {field},"));
         }
-        if let Some((key, value)) = index {
+        for (key, value) in indices {
             declaration.push_str(&format!("\n    [{key}]: {value},"));
         }
         if fields.len() > MAX_OVERVIEW_FIELDS {

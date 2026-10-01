@@ -131,7 +131,8 @@ pub struct Shape {
     pub fields: Vec<ShapeField>,
     /// The values of the array part, which `ipairs` visits, apart from the other `[key]` entries.
     pub array: Option<Type>,
-    pub index: Option<(Type, Type)>,
+    /// The other `[key]: value` entries, as `[string]: integer` and `[integer]: boolean`.
+    pub indices: Vec<(Type, Type)>,
 }
 
 impl Type {
@@ -255,7 +256,7 @@ impl Type {
             Type::Shape(shape) => {
                 shape.fields.iter().any(|field| field.ty.mentions_self())
                     || shape.array.as_ref().is_some_and(Type::mentions_self)
-                    || shape.index.as_ref().is_some_and(|(key, value)| key.mentions_self() || value.mentions_self())
+                    || shape.indices.iter().any(|(key, value)| key.mentions_self() || value.mentions_self())
             }
             _ => false,
         }
@@ -283,7 +284,11 @@ impl Type {
             Type::Shape(shape) => Type::Shape(Arc::new(Shape {
                 fields: shape.fields.iter().map(|f| ShapeField { ty: f.ty.with_self(owner), ..f.clone() }).collect(),
                 array: shape.array.as_ref().map(|t| t.with_self(owner)),
-                index: shape.index.as_ref().map(|(key, value)| (key.with_self(owner), value.with_self(owner))),
+                indices: shape
+                    .indices
+                    .iter()
+                    .map(|(key, value)| (key.with_self(owner), value.with_self(owner)))
+                    .collect(),
             })),
             other => other.clone(),
         }
@@ -430,7 +435,7 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Type::Shape(shape) => {
-                if shape.fields.is_empty() && shape.array.is_none() && shape.index.is_none() {
+                if shape.fields.is_empty() && shape.array.is_none() && shape.indices.is_empty() {
                     return f.write_str("table");
                 }
                 let mut parts: Vec<String> = shape
@@ -442,7 +447,7 @@ impl fmt::Display for Type {
                 if let Some(array) = &shape.array {
                     parts.push(format!("[integer]: {array}"));
                 }
-                if let Some((k, v)) = &shape.index {
+                for (k, v) in &shape.indices {
                     parts.push(format!("[{k}]: {v}"));
                 }
                 if shape.fields.len() > 8 {
@@ -801,7 +806,7 @@ impl<'a> TypeParser<'a> {
                 self.eat(b']');
                 self.eat(b':');
                 let value = self.parse();
-                shape.index = Some((key, value));
+                shape.indices.push((key, value));
             } else if let Some(name) = self.ident() {
                 let optional = self.eat(b'?');
                 let ty = if self.eat(b':') { self.parse() } else { Type::Unknown };
@@ -848,6 +853,10 @@ mod tests {
         assert_eq!(roundtrip("async"), "async");
         assert_eq!(roundtrip("{ name: string, age?: number }"), "{ name: string, age?: number }");
         assert_eq!(roundtrip("{ [string]: boolean }"), "{ [string]: boolean }");
+        assert_eq!(
+            roundtrip("{ [string]: integer, [integer]: boolean, name: string }"),
+            "{ name: string, [string]: integer, [integer]: boolean }"
+        );
         assert_eq!(roundtrip("'left'|'right'"), "\"left\"|\"right\"");
         assert_eq!(roundtrip("[number, number]"), "[number, number]");
         assert_eq!(roundtrip("`T`"), "T");

@@ -359,8 +359,8 @@ both entries. A key held in an `integer` variable, as in `employee[i]`, may be e
 is neither reported nor checked against their types.
 
 Index types also decide what a field without its own `@field` holds, for every class and not only
-strict ones: with `---@field [string] number`, `{ other = true }` and `abc.other = true` are an
-`assign-type-mismatch`.
+strict ones: with `---@field [string] number`, `abc.other` is a `number`, and `{ other = true }` and
+`abc.other = true` are an `assign-type-mismatch`.
 
 With `strict_classes = true`, every class is strict unless it is marked `(loose)`. That default
 only covers classes declared in workspace files outside `exclude` and `ignore_diagnostics`, so the

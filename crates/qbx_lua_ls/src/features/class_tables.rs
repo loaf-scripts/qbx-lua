@@ -338,9 +338,10 @@ impl<'a, 'b> Classes<'a, 'b> {
             return None;
         }
         let defs = self.class_defs(class, from);
-        let own = defs.iter().find_map(|(file, def)| match def.index(self.infer.side()) {
-            Some((index_key, value)) if self.takes(index_key, *file, key) => Some((value.clone(), *file)),
-            _ => None,
+        let own = defs.iter().find_map(|(file, def)| {
+            let mut indices = def.indices(self.infer.side()).into_iter();
+            let (_, value) = indices.find(|(index_key, _)| self.takes(index_key, *file, key))?;
+            Some((value.clone(), *file))
         });
         own.or_else(|| {
             let mut parents = defs.iter().flat_map(|(file, def)| def.parents.iter().map(move |p| (p, *file)));

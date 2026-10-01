@@ -776,6 +776,79 @@ end
 }
 
 #[test]
+fn hover_reads_undeclared_names_and_keys_through_indices() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Counts
+---@field total integer
+---@field [string] number
+---@field [integer] boolean
+
+---@class Test.Tally : Test.Counts
+
+---@alias Test.Slot 'head'|'feet'
+
+---@class Test.Outfit
+---@field [Test.Slot] integer
+
+---@class Test.Left : Test.Counts, Test.Right
+---@class Test.Right : Test.Counts, Test.Left
+
+---@type { [string]: integer, [integer]: boolean, name: string }
+local mixed = {}
+---@type Test.Tally
+local tally = {}
+---@type table<string, integer>
+local scores = {}
+---@type Test.Outfit
+local outfit = {}
+---@type { [Test.Slot]: boolean }
+local slots = {}
+---@type Test.Left
+local left = {}
+
+local named = mixed.name
+local other = mixed.other
+local quoted = mixed['quoted']
+local first = mixed[1]
+local total = tally.total
+local inherited = tally.wins
+local position = tally[1]
+local score = scores.alice
+local head = outfit.head
+local hands = outfit.hands
+local feet = slots.feet
+local gloves = slots.gloves
+local shared = left.wins
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("named", "named: string"),
+        ("other", "other: integer"),
+        ("quoted", "quoted: integer"),
+        ("first", "first: boolean"),
+        ("total =", "total: integer"),
+        ("inherited", "inherited: number"),
+        ("position", "position: boolean"),
+        ("score =", "score: integer"),
+        // An index of the values of an alias takes those values only.
+        ("head", "head: integer"),
+        ("hands", "hands: unknown"),
+        ("feet", "feet: boolean"),
+        ("gloves", "gloves: unknown"),
+        // Parents that reach the same class, or each other, read it once.
+        ("shared", "shared: number"),
+    ] {
+        let (l, c) = pos(text, &format!("local {needle}"), 6);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (l, c) = pos(text, "Test.Counts\n", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("[string]: number,\n    [integer]: boolean,"), "{hover}");
+}
+
+#[test]
 fn hover_infers_loop_variables_of_top_level_tables() {
     let mut client = Client::start(fixture_root());
     let text = "\

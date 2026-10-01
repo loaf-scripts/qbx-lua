@@ -89,9 +89,17 @@ pub struct ClassDef {
 }
 
 impl ClassDef {
-    /// The last general index declared for this side, as for an unscoped index before side filtering.
-    pub fn index(&self, side: Option<Side>) -> Option<(&Type, &Type)> {
-        self.indices.iter().rev().find(|field| applies_on(field.side, side)).map(|field| (&field.key, &field.ty))
+    /// The general indices declared for this side, as `[string]` and `[integer]`. Of indices with
+    /// the same key, the last declared counts, as for an unscoped index before side filtering.
+    pub fn indices(&self, side: Option<Side>) -> Vec<(&Type, &Type)> {
+        let mut out: Vec<(&Type, &Type)> = Vec::new();
+        for field in self.indices.iter().filter(|field| applies_on(field.side, side)) {
+            match out.iter_mut().find(|(key, _)| **key == field.key) {
+                Some(index) => *index = (&field.key, &field.ty),
+                None => out.push((&field.key, &field.ty)),
+            }
+        }
+        out
     }
 
     pub fn literal_fields(&self, side: Option<Side>) -> impl Iterator<Item = (&Type, &Type)> {

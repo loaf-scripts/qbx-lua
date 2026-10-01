@@ -1043,13 +1043,14 @@ impl<'a> Infer<'a> {
             Type::Shape(shape) => {
                 let fields = shape.fields.iter().filter(|_| !array_only).map(|f| (Type::String, f.ty.clone()));
                 let array = shape.array.iter().map(|value| (Type::Integer, value.clone()));
-                let index = shape.index.iter().filter(|(key, _)| !array_only || is_integer_key(key)).cloned();
+                let index = shape.indices.iter().filter(|(key, _)| !array_only || is_integer_key(key)).cloned();
                 fields.chain(array).chain(index).unzip()
             }
             Type::Named(ref name, _) => {
                 let class = self.index.class(name, self.side).map(|(_, c)| c);
                 let index = class
-                    .and_then(|c| c.index(self.side))
+                    .into_iter()
+                    .flat_map(|c| c.indices(self.side))
                     .filter(|(key, _)| !array_only || is_integer_key(key))
                     .map(|(key, value)| (key.clone(), value.clone()));
                 // `---@field [1] number` fields, with their keys shown as `integer` rather than `1|2|3`.
@@ -1179,19 +1180,24 @@ impl<'a> Infer<'a> {
                 Type::IntLit(i) => items.get((*i as usize).wrapping_sub(1)).cloned().unwrap_or_default(),
                 _ => Type::union(items),
             },
-            Type::Shape(shape) => Type::union(shape.array.iter().chain(shape.index.as_ref().map(|(_, v)| v)).cloned()),
+            // The array part and the `[key]` entries that take a key of its type.
+            Type::Shape(shape) => {
+                let array = shape.array.iter().filter(|_| self.index_takes(&Type::Integer, key_ty, 0));
+                let indices = shape.indices.iter().filter(|(key, _)| self.index_takes(key, key_ty, 0));
+                Type::union(array.chain(indices.map(|(_, value)| value)).cloned())
+            }
             Type::Named(name, _) => {
                 let Some((_, class)) = self.index.class(&name, self.side) else { return Type::Unknown };
-                let index = class.index(self.side).map(|(_, value)| value.clone());
+                let key_ty = self.resolve_alias(key_ty);
+                let index = self.class_index_value(&name, &key_ty, &mut FxHashSet::default(), 0);
                 // `employee[1]` reads the `---@field [1] number` of its key, and `employee[i]` any
                 // literal-keyed field that `i` may name.
-                let key_ty = self.resolve_alias(key_ty);
                 if key_ty.is_literal() {
                     let field = class.literal_fields(self.side).find(|(key, _)| **key == key_ty);
-                    return field.map(|(_, value)| value.clone()).or(index).unwrap_or_default();
+                    return field.map_or(index, |(_, value)| value.clone());
                 }
                 let fields = class.literal_fields(self.side).filter(|(key, _)| may_be_literal_key(&key_ty, key));
-                Type::union(fields.map(|(_, value)| value.clone()).chain(index))
+                Type::union(fields.map(|(_, value)| value.clone()).chain([index]))
             }
             // `list[i]` on a table whose array part the index or a top-level local's constructor holds.
             Type::GlobalTable(owner)
@@ -1202,6 +1208,45 @@ impl<'a> Infer<'a> {
             Type::String | Type::StringLit(_) => Type::Unknown,
             _ => Type::Unknown,
         }
+    }
+
+    /// Whether an index declared for keys of type `declared`, such as the `[string]` of
+    /// `{ [string]: integer }`, takes a key of type `key`: one of a kind it takes, and when both are
+    /// literals, the same. An index of `'a'|'b'`, or of an alias of them, takes each of the two.
+    fn index_takes(&self, declared: &Type, key: &Type, depth: u32) -> bool {
+        if depth > 8 {
+            return true;
+        }
+        let (declared, key) = (self.resolve_alias(declared), self.resolve_alias(key));
+        if let Type::Union(parts) = &declared {
+            return parts.iter().any(|part| self.index_takes(part, &key, depth + 1));
+        }
+        if declared.is_literal() && key.is_literal() {
+            return declared == key;
+        }
+        let any = FunType::default();
+        match (self.value_kinds(&any, &declared, 0), self.value_kinds(&any, &key, 0)) {
+            (Some(taken), Some(given)) => taken & given != 0,
+            _ => true,
+        }
+    }
+
+    /// What a key of type `key` reads from an instance of `class` through the nearest indices of
+    /// the class or its parents that take it. A class that several parents share is read once.
+    fn class_index_value(&self, class: &str, key: &Type, visited: &mut FxHashSet<SmolStr>, depth: u32) -> Type {
+        if depth > 8 || !visited.insert(SmolStr::new(class)) {
+            return Type::Unknown;
+        }
+        let mut defs = self.index.class_defs(class);
+        defs.retain(|(_, def)| applies_on(def.side, self.side));
+        let indices = defs.iter().flat_map(|(_, def)| def.indices(self.side));
+        let taking = indices.filter(|(index, _)| self.index_takes(index, key, 0));
+        let own = Type::union(taking.map(|(_, value)| value.clone()));
+        if !own.is_unknown() {
+            return own;
+        }
+        let parents = defs.iter().flat_map(|(_, def)| &def.parents);
+        Type::union(parents.map(|parent| self.class_index_value(parent, key, visited, depth + 1)))
     }
 
     /// The field names a key can be: `'male'`, or every name of a `"male"|"female"` loop variable or
@@ -1250,7 +1295,7 @@ impl<'a> Infer<'a> {
         if !elements.keyed.is_empty() {
             let (keys, values): (Vec<Type>, Vec<Type>) =
                 elements.keyed.iter().map(|(key, value)| (self.expr(key).widen(), self.expr(value).widen())).unzip();
-            shape.index = Some((Type::union(keys), Type::union(values)));
+            shape.indices.push((Type::union(keys), Type::union(values)));
         }
         Type::Shape(Arc::new(shape))
     }
@@ -1869,9 +1914,39 @@ impl<'a> Infer<'a> {
     pub fn member(&self, ty: &Type, name: &str) -> Option<MemberInfo> {
         self.guarded(|| {
             let mut found = self.members_matching(ty, Some(name));
+            if found.is_empty() {
+                return indexed_field(name, self.index_value(ty, &Type::StringLit(SmolStr::new(name)), 0));
+            }
             let best = (0..found.len()).max_by_key(|i| (found[*i].ty.specificity(), std::cmp::Reverse(*i)))?;
             Some(found.swap_remove(best))
         })
+    }
+
+    /// What a key of type `key` reads from a value of type `ty` through the indices that take it:
+    /// the `[string]: integer` of `{ [string]: integer, name: string }`, the `---@field [string]
+    /// integer` of a class or a parent, or the value type of `table<string, integer>`.
+    fn index_value(&self, ty: &Type, key: &Type, depth: u32) -> Type {
+        if depth > 8 {
+            return Type::Unknown;
+        }
+        match ty {
+            Type::Union(types) => Type::union(
+                types.iter().filter(|t| !matches!(t, Type::Nil)).map(|t| self.index_value(t, key, depth + 1)),
+            ),
+            Type::Shape(shape) => {
+                let values = shape.indices.iter().filter(|(index, _)| self.index_takes(index, key, 0));
+                Type::union(values.map(|(_, value)| value.clone()))
+            }
+            Type::Map(index, value) if self.index_takes(index, key, 0) => (**value).clone(),
+            Type::Named(name, _) if self.index.class(name, self.side).is_some() => {
+                self.class_index_value(name, key, &mut FxHashSet::default(), depth + 1)
+            }
+            Type::Named(..) | Type::Require(_) => match self.resolve_alias(ty) {
+                resolved if resolved != *ty => self.index_value(&resolved, key, depth + 1),
+                _ => Type::Unknown,
+            },
+            _ => Type::Unknown,
+        }
     }
 
     pub fn members(&self, ty: &Type) -> Vec<MemberInfo> {
@@ -2061,6 +2136,19 @@ fn add_signature(fun: &mut Arc<FunType>, next: &Arc<FunType>) {
     fun.overloads.extend(next.overloads.iter().cloned());
 }
 
+/// The field `name` that an index gives the value `ty`, unless the value is unknown.
+fn indexed_field(name: &str, ty: Type) -> Option<MemberInfo> {
+    (!ty.is_unknown()).then(|| MemberInfo {
+        name: SmolStr::new(name),
+        ty,
+        doc: None,
+        deprecated: false,
+        literal: None,
+        kind: SymbolKind::Field,
+        location: None,
+    })
+}
+
 fn member_from_symbol(file: FileId, symbol: &crate::index::Symbol) -> MemberInfo {
     MemberInfo {
         name: symbol.name.clone(),
@@ -2110,7 +2198,7 @@ fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
         Type::Shape(shape) => Type::Shape(Arc::new(Shape {
             fields: shape.fields.iter().map(|f| ShapeField { ty: substitute(&f.ty, generics), ..f.clone() }).collect(),
             array: shape.array.as_ref().map(|t| substitute(t, generics)),
-            index: shape.index.as_ref().map(|(k, v)| (substitute(k, generics), substitute(v, generics))),
+            indices: shape.indices.iter().map(|(k, v)| (substitute(k, generics), substitute(v, generics))).collect(),
         })),
         other => other.clone(),
     }
