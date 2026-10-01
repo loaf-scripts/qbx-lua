@@ -9,12 +9,12 @@
 //! A function that lists sets of values, as `@return false | (string, string)` does, has to return
 //! one of them: each `return` is compared with the set it comes closest to.
 
+use qbx_lua_analysis::env::is_meta_file;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
 
 use super::class_tables::Classes;
-use crate::indexer::is_meta_file;
 use crate::infer::{always_exits, return_stmts, Infer};
 use crate::types::Type;
 

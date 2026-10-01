@@ -128,6 +128,21 @@ pub fn leading_doc_lines<'a>(source: &'a str, comments: &[Comment], offset: u32)
     lines
 }
 
+/// Whether a `---@meta` line above the first statement marks the file as a definition file.
+pub fn is_meta_file(source: &str, chunk: &Chunk) -> bool {
+    let first_stmt = chunk.block.stmts.first().map_or(u32::MAX, |stmt| stmt.span.start);
+    chunk
+        .comments
+        .iter()
+        .take_while(|comment| comment.span.start < first_stmt)
+        .any(|comment| is_meta_comment(comment.span.text(source)))
+}
+
+fn is_meta_comment(text: &str) -> bool {
+    let doc = text.strip_prefix("---").unwrap_or_default();
+    doc.trim_start().strip_prefix("@meta").is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

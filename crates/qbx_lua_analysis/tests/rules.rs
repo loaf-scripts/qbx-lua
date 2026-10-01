@@ -758,3 +758,76 @@ for i = 10, n do print(i) end";
     assert_eq!(fixed("for i = 10, 1, 2 do print(i) end"), "for i = 10, 1, -2 do print(i) end");
     assert_eq!(fixed("local t = {}\nfor i = #t, 1 do print(i) end"), "local t = {}\nfor i = #t, 1, -1 do print(i) end");
 }
+
+#[test]
+fn functions_set_twice_on_one_field() {
+    let source = "local M = {}
+function M.f() end
+function M.f() end
+M.g = function() end
+function M:g() end
+M['h'] = function() end
+M.h = function() end
+Shared = {}
+function Shared.a.b() end
+function Shared.a.b() end
+do
+    function M.inDo() end
+end
+function M.inDo() end
+local function setup()
+    M.inner = function() end
+    M.inner = function() end
+end
+return setup";
+    assert_eq!(reported_lines(source, "duplicate-set-field"), [3, 5, 7, 10, 14, 17]);
+    assert_eq!(
+        findings(source, "duplicate-set-field")[0].1,
+        "'M.f' is already defined on line 2; this definition replaces it"
+    );
+
+    for quiet in [
+        // Branches of an `if`, and an `if` beside the code around it, as LuaLS reads them.
+        "local M = {}\nif Config.Fast then\n    function M.f() end\nelse\n    function M.f() end\nend\nfunction M.g() end\nif Config.Fast then\n    function M.g() end\nend\nreturn M",
+        // Each side by branch, and a shared default overridden after a guard.
+        "Bridge = {}\nif IsDuplicityVersion() then\n    function Bridge.notify() end\nelse\n    function Bridge.notify() end\nend",
+        "Bridge = {}\nif lib.context == 'server' then\n    function Bridge.notify() end\nelse\n    function Bridge.notify() end\nend",
+        "Bridge = {}\nfunction Bridge.notify() end\nif not IsDuplicityVersion() then return end\nfunction Bridge.notify() end",
+        // Code after an `if` that can return, like the code in a branch of an `if`.
+        "F = {}\nfunction F.Get() end\nif GetResourceState('qbx_core') ~= 'started' then return end\nfunction F.Get() end",
+        // A field read between the definitions, as a wrapper does, or called through.
+        "local M = {}\nfunction M.n() end\nlocal old = M.n\nfunction M.n(m) old(m) end\nreturn M",
+        "local M = {}\nfunction M.n() end\nM.n()\nfunction M.n() end\nreturn M",
+        "local p = {}\nfunction p:enter() end\np:enter()\nfunction p:enter() end",
+        // A new table in the variable, or in a field above the one set.
+        "local p = lib.points.new(a)\nfunction p:onEnter() end\np = lib.points.new(b)\nfunction p:onEnter() end",
+        "local M = { sub = {} }\nfunction M.sub.f() end\nM.sub = {}\nfunction M.sub.f() end\nreturn M",
+        // Other tables, other functions, and values that are not function literals.
+        "local A, B = {}, {}\nfunction A.f() end\nfunction B.f() end\nreturn A, B",
+        "local function make()\n    local C = {}\n    function C.f() end\n    return C\nend\nlocal function other()\n    local C = {}\n    function C.f() end\n    return C\nend\nreturn make, other",
+        "local M = {}\nM.x = function() end\nM.x = nil\nM.y = print\nM.y = print\nlocal f = function() end\nf = function() end\nreturn M, f",
+        // Definition files declare signatures.
+        "---@meta\nM = {}\nfunction M.f(a) end\nfunction M.f(a, b) end",
+        // LuaLS's directive at either definition.
+        "local M = {}\n---@diagnostic disable-next-line: duplicate-set-field\nfunction M.f() end\nfunction M.f() end\nreturn M",
+        "local M = {}\nfunction M.f() end\n---@diagnostic disable-next-line: duplicate-set-field\nfunction M.f() end\nreturn M",
+    ] {
+        assert_eq!(reported_lines(quiet, "duplicate-set-field"), Vec::<u32>::new(), "{quiet}");
+    }
+
+    // Reads and new tables in other functions run later, when the second definition has replaced
+    // the first, and a new table in another field changes nothing.
+    let source = "local M = {}
+function M.n() return M.n() end
+AddEventHandler('x', function() M.n() end)
+function M.n() end
+local p = {}
+function p:a() end
+local function reset() p = {} end
+function p:a() end
+function M.f() end
+M.fx = {}
+function M.f() end
+return reset";
+    assert_eq!(reported_lines(source, "duplicate-set-field"), [4, 8, 11]);
+}

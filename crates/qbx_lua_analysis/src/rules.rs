@@ -66,6 +66,7 @@ pub const UNREACHABLE_CODE: &str = "unreachable-code";
 pub const EMPTY_BLOCK: &str = "empty-block";
 pub const UNBALANCED_ASSIGNMENTS: &str = "unbalanced-assignments";
 pub const DUPLICATE_INDEX: &str = "duplicate-index";
+pub const DUPLICATE_SET_FIELD: &str = "duplicate-set-field";
 pub const DUPLICATE_ARGUMENT: &str = "duplicate-argument";
 pub const MISSING_PARAMETER: &str = "missing-parameter";
 /// Reported by qbx-lua-ls, which indexes the LuaCATS types; the linter itself has no type information.
@@ -138,6 +139,7 @@ pub static RULES: &[Rule] = &[
     rule(EMPTY_BLOCK, Style, INFO, false, "A block has no statements."),
     rule(UNBALANCED_ASSIGNMENTS, Suspicious, WARN, false, "An assignment has more values than targets, or leaves targets without a value."),
     rule(DUPLICATE_INDEX, Suspicious, WARN, false, "A table constructor sets the same key twice."),
+    rule(DUPLICATE_SET_FIELD, Suspicious, WARN, false, "A function is assigned to the same table field twice in one block of a file, so the second replaces the first."),
     rule(DUPLICATE_ARGUMENT, Correctness, ERROR, false, "Two parameters of one function share a name."),
     rule(MISSING_PARAMETER, Correctness, WARN, false, "A function is called without an argument for a parameter its LuaCATS annotations require."),
     rule(UNDEFINED_DOC_NAME, Correctness, WARN, false, "A LuaCATS annotation names a type that no @class, @alias or @enum declares for the file's side (language server only)."),

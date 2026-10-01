@@ -1,11 +1,14 @@
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
-use qbx_lua_syntax::{NumberValue, Span};
+use qbx_lua_syntax::{LineIndex, NumberValue, SmolStr, Span};
 use rustc_hash::FxHashMap;
 
 use super::{FileInput, Sink};
 use crate::diagnostic::{Fix, Tag, TextEdit};
+use crate::directives::Suppressions;
+use crate::env::is_meta_file;
 use crate::rules;
+use crate::scope::{LocalId, Resolved};
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     for label in input.resolution.labels.iter().filter(|l| !l.used) {
@@ -20,12 +23,50 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     for name in &input.resolution.undefined_gotos {
         sink.report(rules::UNDEFINED_LABEL, name.span, format!("no visible label '{}' for goto", name.text));
     }
-    Flow { input, sink }.visit_block(&input.chunk.block);
+    // Definition files only declare signatures, which may repeat a field.
+    let set_fields = sink.enabled(rules::DUPLICATE_SET_FIELD).is_some() && !is_meta_file(input.source, input.chunk);
+    let mut flow = Flow {
+        input,
+        sink,
+        block: 0,
+        function: 0,
+        blocks: 0,
+        set_fields: set_fields.then(FxHashMap::default),
+        lines: None,
+        suppressions: None,
+    };
+    flow.visit_block(&input.chunk.block);
 }
 
 struct Flow<'a, 'b> {
     input: &'a FileInput<'a>,
     sink: &'a mut Sink<'b>,
+    /// The block `duplicate-set-field` compares definitions in: the main chunk, a function body or
+    /// one branch of an `if`, as LuaLS scopes the rule, and the code after an `if` that can return,
+    /// which runs only when it does not. Loops and `do` blocks share the block around them.
+    block: u32,
+    /// The block of the function body the code is in.
+    function: u32,
+    blocks: u32,
+    /// The functions set on table fields, by the variable and the keys they are set through. `None`
+    /// when the rule is off.
+    set_fields: Option<FxHashMap<Root, FxHashMap<String, Vec<SetField>>>>,
+    lines: Option<LineIndex>,
+    suppressions: Option<Suppressions>,
+}
+
+/// The variable a table field is set through.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Root {
+    Local(LocalId),
+    Global(SmolStr),
+}
+
+/// The last function set on a table field in one block.
+struct SetField {
+    block: u32,
+    function: u32,
+    span: Span,
 }
 
 impl Flow<'_, '_> {
@@ -96,6 +137,104 @@ impl Flow<'_, '_> {
         }
     }
 
+    /// Visits code that is a block of its own for `duplicate-set-field`.
+    fn in_new_block(&mut self, visit: impl FnOnce(&mut Self)) {
+        let outer = self.block;
+        self.blocks += 1;
+        self.block = self.blocks;
+        visit(self);
+        self.block = outer;
+    }
+
+    fn root(&self, name: &Name) -> Option<Root> {
+        match self.input.resolution.resolve_at(name.span.start)? {
+            Resolved::Local(id) => Some(Root::Local(id)),
+            Resolved::Global(_) => Some(Root::Global(name.text.clone())),
+        }
+    }
+
+    /// The variable an `a.b.c` or `a['b']` target starts from, and the keys after it.
+    fn place(&self, expr: &Expr) -> Option<(Root, String)> {
+        let (base, key) = match &expr.kind {
+            ExprKind::Name(name) => return Some((self.root(name)?, String::new())),
+            ExprKind::Paren(inner) => return self.place(inner),
+            ExprKind::Field { base, name, .. } => (base, format!("s:{}", name.text)),
+            ExprKind::Index { base, index, .. } => match &index.kind {
+                ExprKind::String(key) => (base, format!("s:{key}")),
+                ExprKind::Number(NumberValue::Int(key)) => (base, format!("n:{key}")),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let (root, path) = self.place(base)?;
+        Some((root, format!("{path}.{key}")))
+    }
+
+    /// `duplicate-set-field`: `function M.f()` or `M.f = function` where the same block already set
+    /// a function on that field. Side guards need no check of their own: each side's definition is
+    /// in a branch of its `if`, or after an `if` that returns on the other side.
+    fn set_function(&mut self, root: Option<Root>, path: String, span: Span) {
+        let (Some(root), Some(set_fields)) = (root, self.set_fields.as_mut()) else { return };
+        let (block, function) = (self.block, self.function);
+        let definitions = set_fields.entry(root).or_default().entry(path).or_default();
+        let Some(earlier) = definitions.iter_mut().find(|definition| definition.block == block) else {
+            definitions.push(SetField { block, function, span });
+            return;
+        };
+        let earlier = std::mem::replace(&mut earlier.span, span);
+        if self.suppressed_at(earlier.start) {
+            return;
+        }
+        let line = self.line_index().line_of(earlier.start) + 1;
+        let shown = span.text(self.input.source);
+        self.sink.report(
+            rules::DUPLICATE_SET_FIELD,
+            span,
+            format!("'{shown}' is already defined on line {line}; this definition replaces it"),
+        );
+    }
+
+    fn has_set_fields(&self) -> bool {
+        self.set_fields.as_ref().is_some_and(|set_fields| !set_fields.is_empty())
+    }
+
+    /// A read of a field, as `local old = M.f` is before wrapping it, so a later definition does not
+    /// simply replace the one that was read. Reads in other functions run at another time.
+    fn read_field(&mut self, place: Option<(Root, String)>) {
+        let Some((root, path)) = place else { return };
+        let function = self.function;
+        let set_fields = self.set_fields.as_mut().and_then(|set_fields| set_fields.get_mut(&root));
+        if let Some(definitions) = set_fields.and_then(|fields| fields.get_mut(&path)) {
+            definitions.retain(|definition| definition.function != function);
+        }
+    }
+
+    /// An assignment to a table, as `p = lib.points.new(b)` is, which leaves the functions set on the
+    /// fields of the table it replaces behind.
+    fn assign_table(&mut self, target: &Expr) {
+        let Some((root, path)) = self.place(target) else { return };
+        let function = self.function;
+        let Some(fields) = self.set_fields.as_mut().and_then(|set_fields| set_fields.get_mut(&root)) else { return };
+        for (field, definitions) in fields.iter_mut() {
+            if field.strip_prefix(path.as_str()).is_some_and(|rest| rest.starts_with('.')) {
+                definitions.retain(|definition| definition.function != function);
+            }
+        }
+    }
+
+    fn line_index(&mut self) -> &LineIndex {
+        let source = self.input.source;
+        self.lines.get_or_insert_with(|| LineIndex::new(source))
+    }
+
+    /// LuaLS leaves a repeated field alone when the rule is disabled at either definition.
+    fn suppressed_at(&mut self, offset: u32) -> bool {
+        let (source, comments) = (self.input.source, &self.input.chunk.comments);
+        let lines = self.lines.get_or_insert_with(|| LineIndex::new(source));
+        let suppressions = self.suppressions.get_or_insert_with(|| Suppressions::parse(source, comments, lines));
+        suppressions.is_suppressed(rules::DUPLICATE_SET_FIELD, lines.line_of(offset))
+    }
+
     /// `count-down-loop`: `for i = 10, 1` never runs, and `for i = #list, 1` never runs once its start
     /// is above 1. Both were meant to count down.
     fn count_down(&mut self, start: &Expr, limit: &Expr, step: Option<&Expr>) {
@@ -158,10 +297,25 @@ fn same_place(a: &Expr, b: &Expr) -> bool {
     }
 }
 
+/// An `if` with a branch that ends in `return`.
+fn can_return(stmt: &Stmt) -> bool {
+    let StmtKind::If { branches, else_block } = &stmt.kind else { return false };
+    let returns = |block: &Block| matches!(block.stmts.last(), Some(Stmt { kind: StmtKind::Return(_), .. }));
+    branches.iter().map(|branch| &branch.block).chain(else_block).any(returns)
+}
+
 impl<'ast> Visitor<'ast> for Flow<'_, '_> {
     fn visit_block(&mut self, block: &'ast Block) {
         self.unreachable(block);
-        visit::walk_block(self, block);
+        let outer = self.block;
+        for stmt in &block.stmts {
+            self.visit_stmt(stmt);
+            if can_return(stmt) {
+                self.blocks += 1;
+                self.block = self.blocks;
+            }
+        }
+        self.block = outer;
     }
 
     fn visit_func_body(&mut self, func: &'ast FuncBody) {
@@ -170,7 +324,12 @@ impl<'ast> Visitor<'ast> for Flow<'_, '_> {
                 self.sink.report(rules::DUPLICATE_ARGUMENT, param.span, format!("duplicate argument '{}'", param.text));
             }
         }
-        visit::walk_func_body(self, func);
+        let outer = self.function;
+        self.in_new_block(|flow| {
+            flow.function = flow.block;
+            visit::walk_func_body(flow, func);
+        });
+        self.function = outer;
     }
 
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
@@ -183,6 +342,32 @@ impl<'ast> Visitor<'ast> for Flow<'_, '_> {
                         self.sink.report(rules::SELF_ASSIGNMENT, stmt.span, "value is assigned to itself");
                     }
                 }
+                exprs.iter().for_each(|value| self.visit_expr(value));
+                for (i, target) in targets.iter().enumerate() {
+                    // What the target is reached through is read; the target itself is written.
+                    match &target.kind {
+                        ExprKind::Name(_) => {}
+                        ExprKind::Field { base, .. } => self.visit_expr(base),
+                        ExprKind::Index { base, index, .. } => {
+                            self.visit_expr(base);
+                            self.visit_expr(index);
+                        }
+                        _ => self.visit_expr(target),
+                    }
+                    if self.has_set_fields() {
+                        self.assign_table(target);
+                    }
+                    if exprs.get(i).is_some_and(|value| matches!(value.kind, ExprKind::Function(_))) {
+                        if let Some((root, path)) = self.place(target).filter(|(_, path)| !path.is_empty()) {
+                            self.set_function(Some(root), path, target.span);
+                        }
+                    }
+                }
+                return;
+            }
+            StmtKind::Function { name, .. } if !name.path.is_empty() || name.method.is_some() => {
+                let path = name.path.iter().chain(&name.method).map(|key| format!(".s:{}", key.text)).collect();
+                self.set_function(self.root(&name.base), path, name.span);
             }
             StmtKind::Do(body) => self.empty_block(body, stmt.span, "do"),
             StmtKind::While { body, .. } => self.empty_block(body, stmt.span, "while"),
@@ -207,6 +392,14 @@ impl<'ast> Visitor<'ast> for Flow<'_, '_> {
                     let start = branches.last().map_or(stmt.span.start, |b| b.block.span.end.max(b.cond.span.end));
                     self.empty_block(block, Span::new(start, stmt.span.end), "else");
                 }
+                for branch in branches {
+                    self.visit_expr(&branch.cond);
+                    self.in_new_block(|flow| flow.visit_block(&branch.block));
+                }
+                if let Some(block) = else_block {
+                    self.in_new_block(|flow| flow.visit_block(block));
+                }
+                return;
             }
             _ => {}
         }
@@ -224,6 +417,13 @@ impl<'ast> Visitor<'ast> for Flow<'_, '_> {
                     expr.span,
                     "both sides of the comparison are the same expression",
                 );
+            }
+            ExprKind::Field { .. } | ExprKind::Index { .. } if self.has_set_fields() => {
+                self.read_field(self.place(expr))
+            }
+            ExprKind::MethodCall { base, method, .. } if self.has_set_fields() => {
+                let place = self.place(base).map(|(root, path)| (root, format!("{path}.s:{}", method.text)));
+                self.read_field(place);
             }
             _ => {}
         }

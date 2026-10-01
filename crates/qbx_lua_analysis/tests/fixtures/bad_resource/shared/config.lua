@@ -8,3 +8,11 @@ helper = 1
 function Notify(message, duration)
     print(message, duration)
 end
+
+function Config.Notify(message)
+    print(message)
+end
+
+function Config.Notify(message)
+    print('replaced', message)
+end

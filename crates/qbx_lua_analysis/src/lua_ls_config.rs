@@ -28,6 +28,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "empty-block",
     "unbalanced-assignments",
     "duplicate-index",
+    "duplicate-set-field",
     "count-down-loop",
     "missing-parameter",
     "undefined-doc-name",
@@ -264,11 +265,15 @@ mod tests {
     #[test]
     fn maps_only_codes_that_mean_the_same() {
         let settings = parse_luals(
-            r#"{ "diagnostics.disable": ["undefined-field", "deprecated", "syntax-error", "undefined-global", "missing-parameter"] }"#,
+            r#"{ "diagnostics.disable": ["undefined-field", "deprecated", "syntax-error", "undefined-global", "missing-parameter", "duplicate-set-field"] }"#,
         );
         assert_eq!(
             settings.rules,
-            [("undefined-global".to_string(), Level::Off), ("missing-parameter".to_string(), Level::Off)]
+            [
+                ("undefined-global".to_string(), Level::Off),
+                ("missing-parameter".to_string(), Level::Off),
+                ("duplicate-set-field".to_string(), Level::Off)
+            ]
         );
         let targets = EQUIVALENT_CODES.iter().chain(ALIASES.iter().flat_map(|(_, codes)| codes.iter()));
         for code in targets {

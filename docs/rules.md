@@ -27,6 +27,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `empty-block` | info | A block has no statements. |
 | `unbalanced-assignments` | warning | An assignment has mismatched target and value counts. |
 | `duplicate-index` | warning | A table constructor assigns the same key twice. |
+| `duplicate-set-field` | warning | A function is assigned to the same field of the same table twice in one block of a file, so the second replaces the first. A block is the main chunk, a function body, one branch of an `if`, or the code after an `if` with a branch that returns, such as an `IsDuplicityVersion()` or `lib.context` guard. A read of the field between the two, as a wrapper has, or an assignment to the table's variable or to a field it is in, also separates them. Definitions in other files or in `---@meta` files are not compared. |
 | `duplicate-argument` | error | Function parameters share a name. |
 | `missing-parameter` | warning | A call leaves out an argument that the function's LuaCATS annotations require. qbx-lua-ls also reports `---@callback` wrapper calls whose payload leaves out a value the registered handler requires. |
 | `undefined-doc-name` | warning | A LuaCATS annotation names a type that no `@class`, `@alias` or `@enum` declares, or that only `(server)` or `(client)` declarations of the other side declare. Reported by qbx-lua-ls only. |
