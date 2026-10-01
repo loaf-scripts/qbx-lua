@@ -5373,6 +5373,48 @@ function Emitter:on(event, mode) end
 }
 
 #[test]
+fn value_lines_list_more_values_of_params_returns_types_and_fields() {
+    let mut client = Client::start(fixture_root());
+    let defs = "\
+---Runs the job.
+---@param mode string
+---| 'fast'
+---| 'slow'
+---@param level? integer
+---| 1
+---| 2
+function RunJob(mode, level) end
+
+---@class Opts
+---@field kind string
+---| 'car'
+---| 'boat'
+";
+    client.open_with("myresource/shared/config.lua", defs);
+    // The values offered where `$` is, in the order they are listed.
+    let mut values = |typed: &str| -> Vec<String> {
+        let (line, column) = pos(typed, "$", 0);
+        client.open_with(CLIENT, &typed.replace('$', ""));
+        let result = client.request("textDocument/completion", client.position_params(CLIENT, line, column));
+        let mut items = result["items"].as_array().cloned().unwrap_or_default();
+        items.retain(|item| item["kind"] == 20 || item["kind"] == 14);
+        items.sort_by_key(|item| item["sortText"].as_str().unwrap_or_default().to_string());
+        items.iter().map(|item| item["label"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(values("RunJob($"), ["'fast'", "'slow'"]);
+    assert_eq!(values("RunJob('fast', $)"), ["1", "2"]);
+    assert_eq!(values("---@type string\n---| 'a'\n---| 'b'\nlocal letter = $"), ["'a'", "'b'"]);
+    assert_eq!(values("---@return string\n---| 'ok'\nlocal function status()\n\treturn $\nend"), ["'ok'"]);
+    assert_eq!(values("---@type Opts\nlocal opts = { kind = $ }"), ["'car'", "'boat'"]);
+
+    let text = "RunJob('fast')";
+    client.open_with(CLIENT, text);
+    let hover = client.hover_text(CLIENT, 0, 1);
+    assert!(hover.contains("RunJob(mode: string|\"fast\"|\"slow\", level?: integer|1|2)"), "{hover}");
+    assert!(hover.contains("Runs the job.") && !hover.contains("'fast'"), "{hover}");
+}
+
+#[test]
 fn values_offer_what_their_declared_type_lists() {
     let mut client = Client::start(fixture_root());
     let defs = "\

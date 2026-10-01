@@ -20,11 +20,11 @@ Available features depend on the editor's LSP client.
 
 - Completion and hover for Lua symbols, FiveM natives, exports, events and callbacks.
 - Call snippets for functions that take a callback, with the function literal written out.
-- The values a parameter lists, through aliases and `@overload`s, as soon as its argument starts:
-  strings, integers, `true` and `false`, and `nil` beside them. Strings are also offered inside
-  the argument's string, and a function literal with the matching parameters where an argument
-  takes one. Call snippets stop in the quotes of listed strings, and end after a value that picks
-  an overload, so the handler written next matches it.
+- The values a parameter lists, through aliases, `---|` lines and `@overload`s, as soon as its
+  argument starts: strings, integers, `true` and `false`, and `nil` beside them. Strings are also
+  offered inside the argument's string, and a function literal with the matching parameters where
+  an argument takes one. Call snippets stop in the quotes of listed strings, and end after a value
+  that picks an overload, so the handler written next matches it.
 - The same values where a value of such a type, like `"busy"|"ready"`, `1|2|3` or `boolean`, is
   assigned, set as a field of a class, returned or compared with `==` or `~=`, and the function
   literal where a function is assigned or returned. They open on the space typed after the `=`,

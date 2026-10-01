@@ -176,9 +176,43 @@ fn strip_visibility(mut rest: &str) -> &str {
     rest
 }
 
-/// The type on a `---| value` line that continues an `@alias`, without its `>` or `+` marker.
-fn alias_member(line: &str) -> Option<&str> {
+/// The type on a `---| value` line, without its `>` or `+` marker.
+fn listed_value(line: &str) -> Option<&str> {
     Some(line.trim_start().strip_prefix('|')?.trim_start_matches(['>', '+', ' ']))
+}
+
+/// The declaration that the `---| value` lines after it list more values of.
+#[derive(Clone, Copy)]
+enum Listing {
+    Alias,
+    Param,
+    Return,
+    Type,
+    Field,
+}
+
+impl Listing {
+    /// Adds `value` to the type of the latest such declaration of `group`.
+    fn add(self, group: &mut DocGroup, value: Type) {
+        let ty = match self {
+            Listing::Alias => group.aliases.last_mut().map(|alias| &mut alias.ty),
+            Listing::Param => group.params.last_mut().map(|param| &mut param.ty),
+            Listing::Return => group.returns.last_mut().map(|ret| &mut ret.ty),
+            Listing::Type => group.ty_rest.last_mut().or(group.ty.as_mut()),
+            Listing::Field => group.classes.last_mut().and_then(|class| class.fields.last_mut()).map(|f| &mut f.ty),
+        };
+        if let Some(ty) = ty {
+            *ty = Type::union([std::mem::take(ty), value]);
+        }
+        // `---| nil` makes a parameter optional, as `@param name string|nil` does.
+        if let (Listing::Param, Some(param)) = (self, group.params.last_mut()) {
+            param.optional |= allows_nil(&param.ty);
+        }
+    }
+}
+
+fn allows_nil(ty: &Type) -> bool {
+    matches!(ty, Type::Union(types) if types.contains(&Type::Nil))
 }
 
 /// Splits attributes such as `(exact)`, `(key)` or `(server)` off the front of a tag. A parenthesized
@@ -243,25 +277,19 @@ fn overload(rest: &str) -> Option<Arc<FunType>> {
 pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
     let mut group = DocGroup::default();
     let mut description: Vec<&str> = Vec::new();
-    let mut open_alias = false;
+    let mut listing: Option<Listing> = None;
 
     for (index, raw) in lines.iter().enumerate() {
         let line = raw.strip_prefix(' ').unwrap_or(raw);
-        if let Some(member) = alias_member(line) {
-            if open_alias {
-                if let Some(alias) = group.aliases.last_mut() {
-                    let mut parser = TypeParser::new(member);
-                    let ty = parser.parse();
-                    alias.ty = Type::union([std::mem::take(&mut alias.ty), ty]);
-                }
-                continue;
-            }
+        if let (Some(value), Some(listing)) = (listed_value(line), listing) {
+            listing.add(&mut group, TypeParser::new(value).parse());
+            continue;
         }
         let Some((tag, rest)) = split_tag(line) else {
             description.push(line);
             continue;
         };
-        open_alias = false;
+        listing = None;
         match tag {
             "class" => {
                 let (attributes, rest) = split_attributes(rest);
@@ -285,7 +313,11 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                     ..DocClass::default()
                 });
             }
-            "field" => parse_field(rest, index, &mut group),
+            "field" => {
+                if parse_field(rest, index, &mut group) {
+                    listing = Some(Listing::Field);
+                }
+            }
             "overload" if !group.classes.is_empty() && !group.has_function_tags() => {
                 if let (Some(fun), Some(class)) = (overload(rest), group.classes.last_mut()) {
                     let owner = Type::Named(class.name.clone(), Vec::new());
@@ -306,7 +338,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                     line: index,
                     side: side_attribute(attributes),
                 });
-                open_alias = true;
+                listing = Some(Listing::Alias);
             }
             "enum" => {
                 let (attributes, rest) = split_attributes(rest);
@@ -330,10 +362,11 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                 let ty = parser.parse();
                 group.params.push(DocParam {
                     name: SmolStr::new(name),
-                    optional: optional || matches!(&ty, Type::Union(types) if types.contains(&Type::Nil)),
+                    optional: optional || allows_nil(&ty),
                     ty,
                     description: clean_description(parser.rest()),
                 });
+                listing = Some(Listing::Param);
             }
             "return" => {
                 let mut parser = TypeParser::new(rest);
@@ -375,11 +408,13 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                         }
                     }
                 }
+                listing = Some(Listing::Return);
             }
             "type" => {
                 let mut types = TypeParser::new(rest).parse_list().into_iter();
                 group.ty = types.next();
                 group.ty_rest = types.collect();
+                listing = Some(Listing::Type);
             }
             "generic" => {
                 let names = rest.split(',').filter_map(|g| g.trim().split([':', ' ']).next()).filter(|g| !g.is_empty());
@@ -418,8 +453,10 @@ fn in_class(class: &DocClass, ty: Type) -> Type {
     }
 }
 
-fn parse_field(rest: &str, line: usize, group: &mut DocGroup) {
-    let Some(class) = group.classes.last_mut() else { return };
+/// Reads a `@field` into the latest class of `group`. True when it adds a field of its own, the
+/// last of `fields`, which `---| value` lines after it list more values of.
+fn parse_field(rest: &str, line: usize, group: &mut DocGroup) -> bool {
+    let Some(class) = group.classes.last_mut() else { return false };
     let (side, rest) = field_head(rest);
     if let Some(index) = rest.strip_prefix('[') {
         let mut parser = TypeParser::new(index);
@@ -427,24 +464,27 @@ fn parse_field(rest: &str, line: usize, group: &mut DocGroup) {
         let after = parser.rest().trim_start().strip_prefix(']').unwrap_or(parser.rest());
         let value = in_class(class, TypeParser::new(after).parse());
         match key {
-            Type::StringLit(name) => class.fields.push(DocField { name, ty: value, line, side, ..DocField::default() }),
+            Type::StringLit(name) => {
+                class.fields.push(DocField { name, ty: value, line, side, ..DocField::default() });
+                return true;
+            }
             key @ (Type::IntLit(_) | Type::BooleanLit(_)) => {
                 class.literal_fields.push(DocIndexField { key, ty: value, side });
             }
             key => class.indices.push(DocIndexField { key, ty: value, side }),
         }
-        return;
+        return false;
     }
     let mut parser = TypeParser::new(rest);
-    let Some(name) = parser.ident() else { return };
+    let Some(name) = parser.ident() else { return false };
     let optional = parser.rest().starts_with('?');
     let mut parser = TypeParser::new(parser.rest().trim_start_matches('?'));
     let ty = in_class(class, parser.parse());
     let field =
         DocField { name: SmolStr::new(name), ty, optional, description: clean_description(parser.rest()), line, side };
-    if let Some(field) = add_signature(&mut class.fields, field) {
-        class.fields.push(field);
-    }
+    let Some(field) = add_signature(&mut class.fields, field) else { return false };
+    class.fields.push(field);
+    true
 }
 
 /// Adds a function field declared again under the name of an unscoped one as another signature of
@@ -575,7 +615,7 @@ pub fn declared_generics(line: &str) -> Vec<&str> {
 
 /// The tag of a doc line and the class and alias names on it.
 fn type_names(line: &str) -> Option<(&str, Vec<FoundName<'_>>)> {
-    let (tag, rest) = match alias_member(line) {
+    let (tag, rest) = match listed_value(line) {
         Some(member) => ("|", member),
         None => split_tag(line)?,
     };
@@ -778,6 +818,34 @@ mod tests {
 
         let doc = parse("---@param other self\n---@return self");
         assert_eq!(doc.params[0].ty.to_string(), "self", "a function's `self` depends on where it is defined");
+    }
+
+    #[test]
+    fn listed_values_continue_params_returns_types_and_fields() {
+        let doc = parse(
+            "---Runs.\n---@param mode string the mode\n---| 'fast' # goes quickly\n---|> 'slow'\n---@param level\n---| 1\n---| 2\n---@param key string\n---| nil\n---@return integer, string\n---| 'x'",
+        );
+        let params: Vec<(String, bool)> = doc.params.iter().map(|p| (p.ty.to_string(), p.optional)).collect();
+        assert_eq!(
+            params,
+            [("string|\"fast\"|\"slow\"".into(), false), ("1|2".into(), false), ("string?".into(), true)]
+        );
+        assert_eq!(doc.params[0].description, "the mode");
+        let returns: Vec<String> = doc.returns.iter().map(|r| r.ty.to_string()).collect();
+        assert_eq!(returns, ["integer", "string|\"x\""], "the values belong to the last value of the line");
+        assert_eq!(doc.description, "Runs.", "the listed values are no description");
+
+        let types = |doc: DocGroup| -> Vec<String> { doc.ty.iter().chain(&doc.ty_rest).map(Type::to_string).collect() };
+        assert_eq!(types(parse("---@type string\n---| 'a'\n---| 'b'")), ["string|\"a\"|\"b\""]);
+        assert_eq!(types(parse("---@type integer, string\n---| 'b'")), ["integer", "string|\"b\""]);
+
+        let doc = parse("---@class Opts\n---@field mode string\n---| 'a'\n---@field [string] integer\n---| 'b'");
+        assert_eq!(doc.classes[0].fields[0].ty.to_string(), "string|\"a\"");
+        assert_eq!(doc.classes[0].indices[0].ty.to_string(), "integer", "an index lists no values");
+
+        // Sets of returned values list theirs in parentheses.
+        let doc = parse("---@return false | (string, string)\n---| 'x'");
+        assert_eq!(doc.returns.iter().map(|r| r.ty.to_string()).collect::<Vec<_>>(), ["false|string", "string?"]);
     }
 
     #[test]
