@@ -6,6 +6,7 @@ use qbx_lua_syntax::SmolStr;
 
 use super::class_tables::Classes;
 use super::hover::{event_string_context, target_at, Target};
+use super::member_refs::member_target;
 use super::with_infer;
 use crate::document::Document;
 use crate::index::{EventFamily, EventKind, FileId, FileOrigin};
@@ -271,4 +272,22 @@ fn aliased_types(infer: &Infer, name: &str, out: &mut Vec<Named>, depth: u32) {
     for part in parts.iter().filter(|part| matches!(part, Type::Named(..))) {
         named_types(infer, part, out, depth + 1);
     }
+}
+
+/// Where code sets the field or method under the cursor: `function Class:name()`, `Class.name =
+/// value`, `self.name = value` and the keys of table constructors, without the `---@field` lines
+/// that declare it, so a method declared in a definition file leads to its body. Other names, and
+/// members that no code the file sees sets, like the exports a resource registers, go to their
+/// definition.
+pub fn implementation(ws: &Workspace, doc: &Document, position: Position) -> Option<GotoDefinitionResponse> {
+    let Some(target) = member_target(ws, doc, doc.offset(position)) else { return definition(ws, doc, position) };
+    let locations: Vec<Location> = target
+        .implementations(ws, doc.file)
+        .into_iter()
+        .filter_map(|(file, range)| location(ws, file, range))
+        .collect();
+    if locations.is_empty() {
+        return definition(ws, doc, position);
+    }
+    Some(GotoDefinitionResponse::Array(locations))
 }

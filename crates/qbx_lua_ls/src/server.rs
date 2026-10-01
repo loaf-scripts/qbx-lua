@@ -120,6 +120,7 @@ pub fn capabilities() -> ServerCapabilities {
         }),
         definition_provider: Some(OneOf::Left(true)),
         type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+        implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -677,6 +678,11 @@ impl Server {
                 let p: GotoDefinitionParams = params(raw)?;
                 let doc = self.doc(&p.text_document_position_params.text_document.uri)?;
                 reply(definition::type_definition(&self.ws, doc, p.text_document_position_params.position))
+            }
+            req::GotoImplementation::METHOD => {
+                let p: GotoDefinitionParams = params(raw)?;
+                let doc = self.doc(&p.text_document_position_params.text_document.uri)?;
+                reply(definition::implementation(&self.ws, doc, p.text_document_position_params.position))
             }
             req::References::METHOD => {
                 let p: ReferenceParams = params(raw)?;

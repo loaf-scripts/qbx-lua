@@ -21,6 +21,21 @@ pub struct MemberTarget {
     pub name: SmolStr,
     pub file: FileId,
     declarations: Vec<(FileId, Range)>,
+    /// The table or class whose member it is.
+    owner: Option<SmolStr>,
+}
+
+impl MemberTarget {
+    /// Where code that `from` sees sets the member, without the `---@field` lines that declare it.
+    pub fn implementations(&self, ws: &Workspace, from: FileId) -> Vec<(FileId, Range)> {
+        let Some(owner) = &self.owner else { return Vec::new() };
+        let members = ws.index.members_of(owner, from).into_iter();
+        let mut found: Vec<(FileId, Range)> =
+            members.filter(|(_, symbol)| symbol.name == self.name).map(|(file, symbol)| (file, symbol.range)).collect();
+        found.sort_by_key(|(file, range)| (*file, range.start, range.end));
+        found.dedup();
+        found
+    }
 }
 
 /// The field or method under the cursor, identified by where it is defined.
@@ -78,7 +93,8 @@ pub fn member_target(ws: &Workspace, doc: &Document, offset: u32) -> Option<Memb
     }
     declarations.sort_by_key(|(file, range)| (*file, range.start, range.end));
     declarations.dedup();
-    Some(MemberTarget { name, file, declarations })
+    let owner = owner.cloned();
+    Some(MemberTarget { name, file, declarations, owner })
 }
 
 /// Index entries may point at a quoted key or a whole @field comment. Resolve the actual token;

@@ -42,7 +42,8 @@ Available features depend on the editor's LSP client.
 - Hover and definitions for the classes, aliases and enums named in LuaCATS annotations.
 - Go to type definition: the `---@class`, `---@alias` or `---@enum` of a value's type, through
   unions, arrays, `table<K, V>` and what a function returns, and the classes an alias of a union
-  stands for.
+  stands for. Go to implementation: where code sets a field or method, without the `---@field`
+  lines that declare it.
 - Exports typed by LuaLS definitions, as `---@type PhoneExports` above `exports.phone = {}`, or
   `---@class qbx_core` above `exports.qbx_core = {}` with `function exports.qbx_core:GetCid()`
   methods: `exports.phone` and `exports['phone']` take the members of the declared type before the

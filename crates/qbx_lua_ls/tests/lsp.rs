@@ -5404,6 +5404,72 @@ print(either, list, map, mode, color, box, count, vehicle, config, player.job, G
 }
 
 #[test]
+fn implementations_leave_out_the_annotations_that_declare_a_member() {
+    let mut client = Client::start(fixture_root());
+    const TYPES: &str = "myresource/shared/config.lua";
+    let types = "\
+---@class Test.Player
+---@field name string
+---@field greet fun(self: Test.Player): string
+Players = {}
+
+function Players:greet() return 'hi' end
+";
+    client.open_with(TYPES, types);
+    // The other file reads `Players` from this one to know what `self` is.
+    client.diagnostics_for(TYPES);
+    let text = "\
+---@type Test.Player
+local player = Players
+local count = 1
+print(player:greet(), player.name, count)
+
+---@param name string
+function Players:rename(name)
+    self.name = name
+end
+";
+    client.open_with(CLIENT, text);
+    let capabilities = serde_json::to_value(qbx_lua_ls::server::capabilities()).unwrap();
+    assert_eq!(capabilities["implementationProvider"], true);
+    let mut found = |method: &str, needle: &str, delta: u32| -> Vec<(String, u64)> {
+        let (line, column) = pos(text, needle, delta);
+        let result = client.request(method, client.position_params(CLIENT, line, column));
+        let locations = result.as_array().cloned().unwrap_or_default();
+        let file =
+            |uri: &str| uri.rsplit('/').take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+        locations
+            .iter()
+            .map(|location| {
+                (file(location["uri"].as_str().unwrap()), location["range"]["start"]["line"].as_u64().unwrap())
+            })
+            .collect()
+    };
+    let shared = |line: u64| ("shared/config.lua".to_string(), line);
+    assert_eq!(found("textDocument/definition", "greet()", 0), [shared(2)], "definition picks the annotation");
+    assert_eq!(found("textDocument/implementation", "greet()", 0), [shared(5)], "the method's body");
+    let main = |line: u64| ("client/main.lua".to_string(), line);
+    assert_eq!(found("textDocument/implementation", "name, count", 0), [main(7)], "an assignment through `self`");
+    assert_eq!(found("textDocument/implementation", "count)", 0), [main(2)], "a local");
+}
+
+#[test]
+fn implementations_of_members_no_code_sets_are_their_definition() {
+    let mut client = Client::start(fixture_root());
+    client.open_with(
+        "shop/server.lua",
+        "---@return integer\nfunction GetCount() return 1 end\n\nexports('GetCount', GetCount)\n",
+    );
+    let text = "print(exports.shop:GetCount())\n";
+    client.open_with(SERVER, text);
+    let (line, column) = pos(text, "GetCount", 0);
+    let definition = client.request("textDocument/definition", client.position_params(SERVER, line, column));
+    assert!(definition.as_array().is_some_and(|locations| !locations.is_empty()), "{definition}");
+    let implementation = client.request("textDocument/implementation", client.position_params(SERVER, line, column));
+    assert_eq!(implementation, definition, "an export the resource registers");
+}
+
+#[test]
 fn annotation_features_ignore_names_outside_type_positions() {
     let mut client = Client::start(fixture_root());
     let lines = [
