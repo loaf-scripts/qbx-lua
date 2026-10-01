@@ -79,7 +79,11 @@ impl<'a, 'b> Declared<'a, 'b> {
             ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
                 self.returned(expr).and_then(|values| values.into_iter().next()).unwrap_or_default()
             }
-            ExprKind::Unary { op: UnOp::Neg, expr: operand } => self.declared(operand, depth + 1).widen(),
+            // `-'5'` is a number, and a table with an `__unm` metamethod gives anything.
+            ExprKind::Unary { op: UnOp::Neg, expr: operand } => match self.declared(operand, depth + 1).widen() {
+                ty @ (Type::Number | Type::Integer) => ty,
+                _ => Type::Unknown,
+            },
             // `a or b` is either of them, and `a and b` may be what `a` holds.
             ExprKind::Binary { op: BinOp::And | BinOp::Or, .. } => Type::Unknown,
             // Vectors, and tables with metamethods, give other values than numbers.
@@ -221,7 +225,7 @@ impl<'a, 'b> Declared<'a, 'b> {
 
     /// Whether `callee` names a native, or a local that holds one as `local IsCamActive = IsCamActive`
     /// does.
-    fn is_native(&self, callee: &Expr, depth: u32) -> bool {
+    pub fn is_native(&self, callee: &Expr, depth: u32) -> bool {
         let ExprKind::Name(name) = &callee.unparen().kind else { return false };
         let ctx = self.infer.ctx;
         let Some(Resolved::Local(id)) = ctx.resolution.resolve_at(name.span.start) else {

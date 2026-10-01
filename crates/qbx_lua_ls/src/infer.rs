@@ -67,6 +67,15 @@ impl<'e> CallArgs<'e> {
         Self { exprs, types: exprs.iter().map(|_| OnceCell::new()).collect(), open: false }
     }
 
+    /// `exprs` with the types `ty` gives them, leaving the function literals unknown.
+    fn typed(exprs: &'e [Expr], ty: impl Fn(&Expr) -> Type) -> Self {
+        let typed = |expr: &Expr| match expr.unparen().kind {
+            ExprKind::Function(_) => Type::Unknown,
+            _ => ty(expr),
+        };
+        Self { exprs, types: exprs.iter().map(|expr| OnceCell::from(typed(expr))).collect(), open: false }
+    }
+
     fn ty(&self, infer: &Infer, index: usize) -> &Type {
         self.types[index].get_or_init(|| infer.expr(&self.exprs[index]))
     }
@@ -601,7 +610,7 @@ impl<'a> Infer<'a> {
 
     /// The type that a `--[[@as T]]` or `---@as T` comment casts the expression ending at `end` to,
     /// when nothing but spaces stands between them.
-    fn cast_after(&self, end: u32) -> Option<Type> {
+    pub fn cast_after(&self, end: u32) -> Option<Type> {
         let comments = &self.ctx.chunk.comments;
         let comment = comments.get(comments.partition_point(|c| c.span.start < end))?;
         let between = self.ctx.source.get(end as usize..comment.span.start as usize)?;
@@ -888,7 +897,7 @@ impl<'a> Infer<'a> {
         let local = self.ctx.resolution.local(id);
         if local.kind == LocalKind::ImplicitSelf {
             return match self.ctx.decl(local.decl.start) {
-                Some(Decl::SelfParam { name }) => self.func_name_owner_type(name),
+                Some(Decl::SelfParam { name }) => self.self_type(name),
                 _ => Type::Unknown,
             };
         }
@@ -918,7 +927,7 @@ impl<'a> Infer<'a> {
                 }
                 expected.as_ref().and_then(|e| self.expected_param(e, *index)).unwrap_or_default()
             }
-            Decl::SelfParam { name } => self.func_name_owner_type(name),
+            Decl::SelfParam { name } => self.self_type(name),
             Decl::NumericFor => Type::Number,
             Decl::GenericFor { stmt, index } => self.for_in_type(stmt, *index),
         }
@@ -1005,6 +1014,35 @@ impl<'a> Infer<'a> {
         Some(if param.optional { param.ty.optional() } else { param.ty })
     }
 
+    /// The type the callee of a call declares for the parameter `id` of a function passed to it, with
+    /// the generics of the callee bound from the types `declared` gives its other arguments: `resolve`
+    /// of `fun(resolve: fun(value: T))` takes a `boolean` for `promise('boolean', ...)` whose first
+    /// parameter is a `` `T` ``. A generic they leave unbound is unknown: the values the call passes
+    /// bind it otherwise, which tells nothing declared. `None` when a `@param` line types the
+    /// parameter.
+    pub fn declared_callback_param(&self, id: LocalId, declared: impl Fn(&Expr) -> Type) -> Option<Type> {
+        let local = self.ctx.resolution.local(id);
+        let Some(Decl::Param { func, index, doc_anchor, expected: Some(Expected::Arg { call, arg_index }) }) =
+            self.ctx.decl(local.decl.start)
+        else {
+            return None;
+        };
+        let name = &func.params[*index].text;
+        if self.ctx.doc_at(doc_anchor.unwrap_or(call.span.start)).params.iter().any(|p| p.name == *name) {
+            return None;
+        }
+        if (*index < 2 && self.on_cache_param(call).is_some()) || self.triggered_returns(call, *arg_index).is_some() {
+            return None;
+        }
+        let (callee, args, via_method) = self.call_parts(call)?;
+        let (skip_params, skip_args) = callee.call_offsets(via_method);
+        let callback = self.fun_of(&callee.params.get((arg_index + skip_params).checked_sub(skip_args)?)?.ty)?;
+        let param = callback.params.get(*index)?;
+        let args = CallArgs::typed(args.exprs, declared);
+        let ty = substitute(&param.ty, &self.bind_generics(&callee, &args, via_method, false));
+        Some(if param.optional { ty.optional() } else { ty })
+    }
+
     /// `TriggerCallback('name', function(response) end)` receives what the handler of `name`
     /// returns, when argument `arg_index` of `call` is that function.
     fn triggered_returns(&self, call: &Expr, arg_index: usize) -> Option<Vec<Type>> {
@@ -1081,7 +1119,7 @@ impl<'a> Infer<'a> {
     }
 
     /// The function type `ty` describes, through aliases and the `nil` of `fun()?`.
-    fn fun_of(&self, ty: &Type) -> Option<Arc<FunType>> {
+    pub fn fun_of(&self, ty: &Type) -> Option<Arc<FunType>> {
         match self.resolve_alias(ty) {
             Type::Fun(fun) => Some(fun),
             Type::Union(types) => types.iter().find_map(|part| self.guarded(|| self.fun_of(part))),
@@ -1151,6 +1189,18 @@ impl<'a> Infer<'a> {
     /// The class that `self` stands for in the doc comment of the statement at `anchor`, for `func`.
     fn doc_self_at(&self, anchor: u32, func: &FuncBody) -> Type {
         statement_at(self.ctx.chunk, anchor).map_or(Type::Unknown, |stmt| self.doc_self(stmt, func))
+    }
+
+    /// The type of the `self` of a function defined with `:`: a value of the table it is defined on,
+    /// or a string for a method added to the `string` library, which strings call.
+    fn self_type(&self, name: &FuncName) -> Type {
+        let on_strings = name.base.text == "string"
+            && name.path.is_empty()
+            && matches!(self.ctx.resolution.resolve_at(name.base.span.start), Some(Resolved::Global(_)));
+        if on_strings {
+            return Type::String;
+        }
+        self.func_name_owner_type(name)
     }
 
     fn for_in_type(&self, stmt: &Stmt, index: usize) -> Type {
@@ -2386,6 +2436,11 @@ impl<'a> Infer<'a> {
         values
     }
 
+    /// Every member of `ty` called `name`, as the definitions a call of it may reach.
+    pub fn members_named(&self, ty: &Type, name: &str) -> Vec<MemberInfo> {
+        self.guarded(|| self.members_matching(ty, Some(name)))
+    }
+
     pub fn member(&self, ty: &Type, name: &str) -> Option<MemberInfo> {
         self.guarded(|| {
             let mut found = self.members_matching(ty, Some(name));
@@ -2806,14 +2861,19 @@ pub(crate) fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
 /// `List<T>` read from a `List<string>`. The names it binds are no longer generics of `fun`, even
 /// when `fun` declares one of them with `@generic` too, as lua-language-server binds them.
 fn substitute_fun(fun: &FunType, generics: &[(SmolStr, Type)]) -> FunType {
-    let types = |types: &[Type]| types.iter().map(|t| substitute(t, generics)).collect();
+    let types = |types: &[Type]| -> Vec<Type> { types.iter().map(|t| substitute(t, generics)).collect() };
     let unbound = |name: &&SmolStr| !generics.iter().any(|(bound, _)| bound == *name);
+    let returns = types(&fun.returns);
+    let return_sets: Vec<Vec<Type>> = fun.return_sets.iter().map(|set| types(set)).collect();
+    // Values bound from the arguments of a call tell what it passes today, not what it may,
+    // as the values that a generic function returns do.
+    let bound = returns != fun.returns || return_sets != fun.return_sets;
     FunType {
         params: fun.params.iter().map(|p| Param { ty: substitute(&p.ty, generics), ..p.clone() }).collect(),
-        returns: types(&fun.returns),
+        returns,
         return_values: fun.return_values.clone(),
-        return_sets: fun.return_sets.iter().map(|set| types(set)).collect(),
-        returns_inferred: fun.returns_inferred,
+        return_sets,
+        returns_inferred: fun.returns_inferred || bound,
         is_method: fun.is_method,
         lists_receiver: fun.lists_receiver,
         generics: fun.generics.iter().filter(unbound).cloned().collect(),

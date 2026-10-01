@@ -39,6 +39,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "missing-fields",
     "assign-type-mismatch",
     "invisible",
+    "param-type-mismatch",
     "return-type-mismatch",
     "missing-return",
     "cast-type-mismatch",

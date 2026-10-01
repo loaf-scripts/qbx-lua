@@ -83,6 +83,7 @@ fn bad_resource_reports_every_rule() {
                 | "undefined-doc-name"
                 | "missing-fields"
                 | "assign-type-mismatch"
+                | "param-type-mismatch"
                 | "undeclared-field"
                 | "invisible"
                 | "return-type-mismatch"

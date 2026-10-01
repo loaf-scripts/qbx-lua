@@ -844,7 +844,7 @@ function package.searchpath(name, path, sep, rep) end
 string = {}
 
 ---Returns the numeric codes of the bytes `s[i]` through `s[j]`; both default to `i` = 1.
----@param s string
+---@param s string|number
 ---@param i? integer
 ---@param j? integer
 ---@return integer ...
@@ -865,7 +865,7 @@ function string.char(...) end
 function string.dump(f, strip) end
 
 ---Finds the first match of `pattern` in `s` starting at `init`. Returns start and end indices plus any captures, or nil. `plain` disables pattern matching.
----@param s string
+---@param s string|number
 ---@param pattern string
 ---@param init? integer
 ---@param plain? boolean
@@ -876,14 +876,14 @@ function string.dump(f, strip) end
 function string.find(s, pattern, init, plain) end
 
 ---Builds a string from a printf-style format and its arguments. Supports `%q` for Lua-readable quoting and `%s` via `tostring`.
----@param s string
+---@param s string|number
 ---@param ... any
 ---@return string result
 ---@nodiscard
 function string.format(s, ...) end
 
 ---Returns an iterator that yields the captures (or whole match) of each successive match of `pattern` in `s`, starting at `init`.
----@param s string
+---@param s string|number
 ---@param pattern string
 ---@param init? integer
 ---@return fun(): string, ...string iterator
@@ -891,7 +891,7 @@ function string.format(s, ...) end
 function string.gmatch(s, pattern, init) end
 
 ---Returns a copy of `s` where matches of `pattern` (at most `n`) are replaced by `repl`, which may be a string, a lookup table or a function. Also returns the number of matches.
----@param s string
+---@param s string|number
 ---@param pattern string
 ---@param repl string|number|table|fun(...: string): any
 ---@param n? integer
@@ -901,19 +901,19 @@ function string.gmatch(s, pattern, init) end
 function string.gsub(s, pattern, repl, n) end
 
 ---Returns the length of `s` in bytes.
----@param s string
+---@param s string|number
 ---@return integer length
 ---@nodiscard
 function string.len(s) end
 
 ---Returns a copy of `s` with uppercase letters converted to lowercase.
----@param s string
+---@param s string|number
 ---@return string result
 ---@nodiscard
 function string.lower(s) end
 
 ---Returns the captures of the first match of `pattern` in `s` (or the whole match when there are none), or nil.
----@param s string
+---@param s string|number
 ---@param pattern string
 ---@param init? integer
 ---@return any ...
@@ -935,7 +935,7 @@ function string.pack(fmt, v1, ...) end
 function string.packsize(fmt) end
 
 ---Returns `n` copies of `s` joined by `sep`.
----@param s string
+---@param s string|number
 ---@param n integer
 ---@param sep? string
 ---@return string result
@@ -943,13 +943,13 @@ function string.packsize(fmt) end
 function string.rep(s, n, sep) end
 
 ---Returns `s` with its bytes in reverse order.
----@param s string
+---@param s string|number
 ---@return string result
 ---@nodiscard
 function string.reverse(s) end
 
 ---Returns the substring from `i` to `j` (default -1, the end). Negative indices count from the end.
----@param s string
+---@param s string|number
 ---@param i integer
 ---@param j? integer
 ---@return string result
@@ -965,7 +965,7 @@ function string.sub(s, i, j) end
 function string.unpack(fmt, s, pos) end
 
 ---Returns a copy of `s` with lowercase letters converted to uppercase.
----@param s string
+---@param s string|number
 ---@return string result
 ---@nodiscard
 function string.upper(s) end

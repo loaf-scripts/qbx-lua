@@ -1496,6 +1496,7 @@ AwaitServerCallback('add', 1, 2, GetValues())
 AwaitServerCallback('add', 1, GetValues())
 AwaitServerCallback('untyped', 1, 2)
 TriggerServerCallback('notify', function() end, 'hi', 5, true)
+AwaitServerCallback('add', 'one', 2)
 ";
     client.open_with(CLIENT, text);
     let line = |needle: &str| pos(text, needle, 0).0 as u64;
@@ -1541,6 +1542,14 @@ TriggerServerCallback('notify', function() end, 'hi', 5, true)
             ),
         ],
         "a call after the handler's parameters counts as one value, and undocumented parameters take one each"
+    );
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [(
+            "param-type-mismatch".to_string(),
+            line("AwaitServerCallback('add', 'one', 2)"),
+            "Cannot assign `string` to parameter `num1` of type `number`".to_string()
+        )]
     );
 }
 
@@ -3966,6 +3975,256 @@ use(back, returned, built)
         "a class needs one the declared type names or extends, as in lua-language-server: a subclass passes, a \
          parent does not, type arguments are not compared, `table` takes any class, and so does a local declared \
          with a table constructor"
+    );
+}
+
+#[test]
+fn arguments_their_parameters_do_not_take_are_reported() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param n number
+local function needsNumber(n) end
+---@param mode 'a'|'b'
+---@param ... string
+local function pick(mode, ...) end
+local Box = {}
+---@param size integer
+function Box:resize(size) end
+---@param id number
+---@overload fun(name: string, label: string)
+local function find(id) end
+---@return string
+local function name() return 'x' end
+---@generic T
+---@param list T[]
+local function first(list) return list[1] end
+---@param v string|number
+local function either(v)
+    if type(v) == 'number' then needsNumber(v) end
+end
+local mode = 'c'
+---@type string?
+local maybe
+Settings = { Count = 'five' }
+function string:shout() return string.upper(self) end
+
+needsNumber('str')
+needsNumber(5)
+pick('c')
+pick('a', 'x', 2)
+pick(mode)
+Box:resize('big')
+Box.resize(Box, 'large')
+find('name', 'label')
+find('alone')
+find(1, 'label')
+needsNumber(nil)
+needsNumber(false)
+needsNumber(maybe)
+needsNumber(Settings.Count)
+needsNumber(name() --[[@as number]])
+needsNumber(name())
+local rest = string.sub(123, 2)
+local head = first(5)
+SetEntityHeading(PlayerPedId(), 'north')
+local position = vector4(vector3(1, 2, 3), 4.0)
+---@diagnostic disable-next-line: param-type-mismatch
+needsNumber('suppressed')
+print(either, rest, head, position)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [
+            finding("needsNumber('str')", "Cannot assign `string` to parameter `n` of type `number`"),
+            finding("pick('c')", "Cannot assign `\"c\"` to parameter `mode` of type `\"a\"|\"b\"`"),
+            finding("pick('a', 'x', 2)", "Cannot assign `integer` to parameter `...` of type `string`"),
+            finding("Box:resize('big')", "Cannot assign `string` to parameter `size` of type `integer`"),
+            finding("Box.resize(Box, 'large')", "Cannot assign `string` to parameter `size` of type `integer`"),
+            finding("find('alone')", "Cannot assign `string` to parameter `id` of type `number`"),
+            finding("find(1, 'label')", "Cannot assign `integer` to parameter `name` of type `string`"),
+            finding("needsNumber(maybe)", "Cannot assign `string` to parameter `n` of type `number`"),
+            finding("needsNumber(name())", "Cannot assign `string` to parameter `n` of type `number`"),
+        ],
+        "a call passes when a signature that takes as many arguments takes them all; nil, false, values \
+         inferred from assignments, casts, type guards, generics, natives, the string a string method is          called on and suppressed lines pass"
+    );
+}
+
+#[test]
+fn arguments_are_compared_with_the_definitions_the_side_of_the_call_reaches() {
+    let mut client = Client::start(fixture_root());
+    client.open_with("myresource/shared/config.lua", "Lib = {}\n");
+    let client_text = "\
+---@param data table
+function Lib.notify(data) end
+
+---@param text string
+---@param kind string
+exports('Notify', function(text, kind) end)
+
+Lib.notify({ title = 'saved' })
+Lib.notify('saved')
+exports.myresource:Notify('saved', 'success')
+exports.myresource:Notify('saved', 5)
+";
+    let server_text = "\
+---@param source number
+---@param data table
+function Lib.notify(source, data) end
+
+Lib.notify(1, { title = 'saved' })
+Lib.notify('saved')
+";
+    client.open_with(CLIENT, client_text);
+    client.open_with(SERVER, server_text);
+    let finding = |text: &str, needle: &str, message: &str| {
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [
+            finding(client_text, "Lib.notify('saved')", "Cannot assign `string` to parameter `data` of type `table`"),
+            finding(client_text, "Notify('saved', 5)", "Cannot assign `integer` to parameter `kind` of type `string`"),
+        ],
+        "the exports proxy passes the arguments of a `:` call without the receiver"
+    );
+    assert_eq!(
+        findings(&mut client, SERVER, &["param-type-mismatch"]),
+        [finding(server_text, "Lib.notify('saved')", "Cannot assign `string` to parameter `source` of type `number`")],
+        "the client definition does not run on the server"
+    );
+}
+
+#[test]
+fn callbacks_take_the_generics_that_declared_arguments_bind() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param n number
+local function needsNumber(n) end
+---@generic T
+---@param _type `T`
+---@param handler fun(resolve: fun(value: T), reject: fun(reason: string))
+local function promise(_type, handler) end
+---@generic T
+---@param value T
+---@param handler fun(set: fun(value: T), get: fun(): T)
+local function watch(value, handler) end
+Settings = { Count = 'five' }
+
+promise('boolean', function(resolve, reject)
+    resolve(true)
+    reject(5)
+end)
+watch(true, function(set, get)
+    set(1)
+    needsNumber(get())
+end)
+watch(Settings.Count, function(set) set(1) end)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [
+            finding("reject(5)", "Cannot assign `integer` to parameter `reason` of type `string`"),
+            finding("set(1)\n", "Cannot assign `integer` to parameter `value` of type `boolean`"),
+        ],
+        "a function the callee passes takes what the other arguments declare for its generics; a generic \
+         bound from an inferred value takes any value, and what such a function returns passes"
+    );
+}
+
+#[test]
+fn unknown_beside_other_types_takes_any_value() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param card unknown|string
+local function present(card) end
+---@param value unknown?
+local function store(value) end
+---@type unknown|string
+local anything = {}
+---@return unknown|string
+local function describe() return {} end
+
+present({})
+store(5)
+print(anything, describe)
+";
+    client.open_with(CLIENT, text);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch", "assign-type-mismatch", "return-type-mismatch"]),
+        []
+    );
+    for (needle, expected) in [
+        ("present(card)", "present(card: string|unknown)"),
+        ("store(value)", "store(value?: unknown?)"),
+        ("anything = {}", "anything: string|unknown"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn literals_in_locals_count_by_their_kind_and_negation_by_its_operand() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param s string
+local function needsString(s) end
+---@param n number
+local function needsNumber(n) end
+---@param mode 'fast'|'slow'
+local function run(mode) end
+local count = 5
+local mode = 'dev'
+
+needsNumber(-'5')
+needsString(-count)
+needsString(count)
+run(mode)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str| {
+        let message = "Cannot assign `integer` to parameter `s` of type `string`".to_string();
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message)
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [finding("needsString(-count)"), finding("needsString(count)")],
+        "a negated string is a number, and a literal stored in a local passes for the literals of its kind"
+    );
+}
+
+#[test]
+fn arguments_of_calls_to_globals_of_escrowed_resources_are_not_checked() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+exports('Open', function() end)
+
+---@param amount number
+function VaultDeposit(amount) end
+
+VaultDeposit('all')
+VaultDeposit(1, 2)
+print(math.floor('x'))
+";
+    client.open_with("vault/open.lua", text);
+    assert_eq!(
+        findings(&mut client, "vault/open.lua", &["param-type-mismatch", "redundant-parameter"]),
+        [(
+            "param-type-mismatch".to_string(),
+            pos(text, "math.floor", 0).0 as u64,
+            "Cannot assign `string` to parameter `x` of type `number`".to_string()
+        )],
+        "the encrypted script of vault may define `VaultDeposit` differently, but not the runtime's functions"
     );
 }
 

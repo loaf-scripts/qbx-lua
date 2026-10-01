@@ -79,6 +79,8 @@ pub const DUPLICATE_DOC_FIELD: &str = "duplicate-doc-field";
 pub const MISSING_FIELDS: &str = "missing-fields";
 /// Reported by qbx-lua-ls, which reads the LuaCATS classes; the linter itself has no type information.
 pub const ASSIGN_TYPE_MISMATCH: &str = "assign-type-mismatch";
+/// Reported by qbx-lua-ls, which reads the LuaCATS types; the linter itself has no type information.
+pub const PARAM_TYPE_MISMATCH: &str = "param-type-mismatch";
 /// Reported by qbx-lua-ls, which reads the LuaCATS classes; the linter itself has no type information.
 pub const UNDECLARED_FIELD: &str = "undeclared-field";
 /// Reported by qbx-lua-ls, which reads the LuaCATS classes; the linter itself has no type information.
@@ -155,6 +157,7 @@ pub static RULES: &[Rule] = &[
     rule(DUPLICATE_DOC_FIELD, Suspicious, WARN, false, "A class declares the same field twice in one file for the same side; repeated function fields are overloads."),
     rule(MISSING_FIELDS, Correctness, WARN, false, "A table constructor typed as a LuaCATS class leaves out required fields (language server only)."),
     rule(ASSIGN_TYPE_MISMATCH, Correctness, WARN, false, "A table constructor or assignment stores a value of the wrong type in a field of a LuaCATS class, or in a variable typed with @type or @param (language server only)."),
+    rule(PARAM_TYPE_MISMATCH, Correctness, WARN, false, "A call passes an argument of a different type than its parameter's LuaCATS annotation declares (language server only)."),
     rule(UNDECLARED_FIELD, Correctness, WARN, false, "A field or key that a strict LuaCATS class does not declare is set or read (language server only)."),
     rule(INVISIBLE, Correctness, WARN, false, "A private, protected or package field or method of a LuaCATS class is used outside its class, subclasses or file (language server only)."),
     rule(RETURN_TYPE_MISMATCH, Correctness, WARN, false, "A function returns a value of a different type than its @return annotation declares (language server only)."),

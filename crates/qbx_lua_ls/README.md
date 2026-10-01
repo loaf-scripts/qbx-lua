@@ -61,7 +61,8 @@ Available features depend on the editor's LSP client.
 - Diagnostics and quick fixes with resource and client/server context, plus LuaCATS type checks:
   `missing-fields` and `assign-type-mismatch` for tables and assignments that leave out required
   fields of their class or store a value of the wrong type, in a field or in a variable typed with
-  `---@type` or `@param`, `undeclared-field` for fields and keys
+  `---@type` or `@param`, `param-type-mismatch` for arguments of the wrong type, `undeclared-field`
+  for fields and keys
   a `---@class (strict)` does not declare, and `return-type-mismatch` and `missing-return` for
   functions, including callback handlers, that do not return what their `@return` declares.
   `invisible` reports the use of fields and methods a class keeps `private`, `protected` or

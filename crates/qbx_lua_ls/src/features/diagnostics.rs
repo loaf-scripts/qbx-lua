@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::path::Path;
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
@@ -5,7 +6,8 @@ use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
     ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, IMPOSSIBLE_COMPARISON, INVISIBLE, MISSING_FIELDS, MISSING_PARAMETER,
-    MISSING_RETURN, NO_UNKNOWN, REDUNDANT_PARAMETER, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
+    MISSING_RETURN, NO_UNKNOWN, PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD,
+    UNDEFINED_DOC_NAME,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -14,8 +16,9 @@ use qbx_lua_analysis::{
 use qbx_lua_syntax::Span;
 use serde::{Deserialize, Serialize};
 
+use super::arguments::mismatched_arguments;
 use super::assignments::mismatched_assignments;
-use super::callback_payloads::{missing_payloads, redundant_payloads};
+use super::callback_payloads::{missing_payloads, payloads, redundant_payloads, Payload};
 use super::casts::mismatched_casts;
 use super::class_tables::missing_fields;
 use super::comparisons::impossible_comparisons;
@@ -24,9 +27,9 @@ use super::returns::{mismatched_returns, missing_returns};
 use super::strict_classes::undeclared_fields;
 use super::unknown_types::unknown_types;
 use super::visibility::invisible_members;
-use super::with_infer;
 use crate::document::Document;
 use crate::index::{FileId, FileOrigin};
+use crate::infer::{FileContext, Infer};
 use crate::workspace::Workspace;
 
 pub const SOURCE: &str = "qbx-lint";
@@ -50,41 +53,60 @@ fn strict_by_default(ws: &Workspace, file: FileId) -> bool {
         && ws.index.file(file).is_some_and(|f| f.origin == FileOrigin::Workspace && !is_silenced(ws, &f.path))
 }
 
+/// What the type checks of one file share: one inference, whose cache of the types of locals each
+/// check fills for the next, and the `@callback` wrapper calls the file makes.
+struct CheckInput<'a> {
+    ws: &'a Workspace,
+    doc: &'a Document,
+    infer: &'a Infer<'a>,
+    payloads: OnceCell<Vec<Payload<'a>>>,
+}
+
+impl<'a> CheckInput<'a> {
+    fn payloads(&self) -> &[Payload<'a>] {
+        self.payloads.get_or_init(|| payloads(self.infer, &self.doc.chunk))
+    }
+}
+
 /// Findings for rules qbx-lint registers but cannot check, because they need the LuaCATS types only
 /// the server indexes, and the parts of `missing-parameter` and `redundant-parameter` that depend on
 /// the handler a `@callback` wrapper call reaches. Inline suppression comments apply to them as they
 /// do to the linter's own.
 fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<qbx_lua_analysis::Diagnostic> {
-    type Check = fn(&Workspace, &Document) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 12] = [
-        (UNDEFINED_DOC_NAME, |ws, doc| {
-            let side = ws.index.file(doc.file).and_then(|f| f.side);
-            undefined_doc_names(&ws.index, &doc.text, &doc.chunk, side)
+    type Check = fn(&CheckInput) -> Vec<(Span, String)>;
+    let checks: [(&'static str, Check); 13] = [
+        (UNDEFINED_DOC_NAME, |input| {
+            let side = input.ws.index.file(input.doc.file).and_then(|f| f.side);
+            undefined_doc_names(&input.ws.index, &input.doc.text, &input.doc.chunk, side)
         }),
-        (MISSING_FIELDS, |ws, doc| with_infer(ws, doc, |infer| missing_fields(infer, &doc.chunk))),
-        (ASSIGN_TYPE_MISMATCH, |ws, doc| with_infer(ws, doc, |infer| mismatched_assignments(infer, &doc.chunk))),
-        (UNDECLARED_FIELD, |ws, doc| {
+        (MISSING_FIELDS, |input| missing_fields(input.infer, &input.doc.chunk)),
+        (ASSIGN_TYPE_MISMATCH, |input| mismatched_assignments(input.infer, &input.doc.chunk)),
+        (PARAM_TYPE_MISMATCH, |input| mismatched_arguments(input.infer, &input.doc.chunk, input.payloads())),
+        (UNDECLARED_FIELD, |input| {
             // Without a strict class there is nothing to find, so no assignment needs its type inferred.
-            if !ws.lint_config.strict_classes && !ws.index.has_strict_class() {
+            if !input.ws.lint_config.strict_classes && !input.ws.index.has_strict_class() {
                 return Vec::new();
             }
-            with_infer(ws, doc, |infer| undeclared_fields(infer, &doc.chunk, |file| strict_by_default(ws, file)))
+            undeclared_fields(input.infer, &input.doc.chunk, |file| strict_by_default(input.ws, file))
         }),
-        (INVISIBLE, |ws, doc| with_infer(ws, doc, |infer| invisible_members(infer, &doc.chunk))),
-        (RETURN_TYPE_MISMATCH, |ws, doc| with_infer(ws, doc, |infer| mismatched_returns(infer, &doc.chunk))),
-        (MISSING_RETURN, |ws, doc| with_infer(ws, doc, |infer| missing_returns(infer, &doc.chunk))),
-        (CAST_TYPE_MISMATCH, |ws, doc| with_infer(ws, doc, mismatched_casts)),
-        (MISSING_PARAMETER, |ws, doc| with_infer(ws, doc, |infer| missing_payloads(infer, &doc.chunk))),
-        (REDUNDANT_PARAMETER, |ws, doc| with_infer(ws, doc, |infer| redundant_payloads(infer, &doc.chunk))),
-        (NO_UNKNOWN, |ws, doc| with_infer(ws, doc, |infer| unknown_types(infer, &ws.lint_config.ignore_unused_prefix))),
-        (IMPOSSIBLE_COMPARISON, |ws, doc| with_infer(ws, doc, |infer| impossible_comparisons(infer, &doc.chunk))),
+        (INVISIBLE, |input| invisible_members(input.infer, &input.doc.chunk)),
+        (RETURN_TYPE_MISMATCH, |input| mismatched_returns(input.infer, &input.doc.chunk)),
+        (MISSING_RETURN, |input| missing_returns(input.infer, &input.doc.chunk)),
+        (CAST_TYPE_MISMATCH, |input| mismatched_casts(input.infer)),
+        (MISSING_PARAMETER, |input| missing_payloads(input.infer, input.payloads())),
+        (REDUNDANT_PARAMETER, |input| redundant_payloads(input.payloads())),
+        (NO_UNKNOWN, |input| unknown_types(input.infer, &input.ws.lint_config.ignore_unused_prefix)),
+        (IMPOSSIBLE_COMPARISON, |input| impossible_comparisons(input.infer, &input.doc.chunk)),
     ];
+    let ctx = FileContext::new(doc.file, &doc.text, &doc.chunk, &doc.resolution);
+    let infer = Infer::new(&ctx, &ws.index);
+    let input = CheckInput { ws, doc, infer: &infer, payloads: OnceCell::new() };
     let suppressions = Suppressions::parse(&doc.text, &doc.chunk.comments, &doc.lines);
     let mut out = Vec::new();
     for (code, check) in checks {
         let Some(severity) = config.severity(code) else { continue };
         out.extend(
-            check(ws, doc)
+            check(&input)
                 .into_iter()
                 .filter(|(span, _)| !suppressions.is_suppressed(code, doc.lines.line_of(span.start)))
                 .map(|(span, message)| qbx_lua_analysis::Diagnostic {

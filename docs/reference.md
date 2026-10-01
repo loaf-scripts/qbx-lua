@@ -100,7 +100,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `return-type-mismatch`, `missing-return`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
@@ -319,6 +319,53 @@ AwaitServerCallback('add')
 
 When several handlers are registered under the name, the one that needs the fewest values decides,
 and for `redundant-parameter` the one that takes the most.
+
+`param-type-mismatch` compares each argument with the type of its parameter, as
+`assign-type-mismatch` compares a value with the type of its variable: a different kind of value,
+or a literal the type does not list, is reported.
+
+```lua
+---@param mode "fast" | "slow"
+---@param count integer
+local function run(mode, count) end
+
+run("instant", 1) -- Cannot assign `"instant"` to parameter `mode` of type `"fast"|"slow"`
+run("fast", "2")  -- Cannot assign `string` to parameter `count` of type `integer`
+```
+
+A parameter typed `any` or `unknown` takes any value, also beside other types, as in
+`unknown|string`.
+
+It checks every call to a function whose parameters have types, also runtime functions, exports,
+methods of classes and fields typed `fun(...)`. A call is compared with each definition the side
+of the call reaches and with their `@overload`s, and passes when a signature that takes as many
+arguments as it passes takes each of them; when none takes that many, any of them may. A `:` call
+passes its receiver as the first argument, as in Lua, except through `exports`, whose proxy drops
+it. The payload of a `---@callback` wrapper call is compared with the handlers registered under its
+name.
+
+An argument has a type when something declares it, as for `impossible-comparison`: a literal, an
+operator, an annotation, a stub, or the value a local that is never assigned again is declared
+with. A literal stored in such a local counts by its kind only: `local mode = 'dev'` is a setting to
+change, so it passes for `"fast" | "slow"`, while `local count = 5` is still no `string`. A
+`--[[@as T]]` right after an argument casts it. Only clear cases count, and the rest is left alone:
+
+- Natives. The runtime converts their arguments, so `0` and `1` pass for a `boolean`, a string for
+  a hash, a number for a string, and a vector for three floats.
+- `nil`, written out or as the `?` of a `string?`, which is checked as a `string`. Annotations often
+  leave out the `?` of a parameter that code skips.
+- `false`, which FiveM code passes to skip a parameter, as in `AddItem(source, item, 1, false, info)`,
+  since exports and events serialize their arguments.
+- Types inferred from assigned values, such as that of `Config.Value = ''`.
+- Parameters typed with a generic of the function called: the arguments of the call bind it, which
+  declares nothing. A function that a callee passes to a callback, such as `resolve` of
+  `fun(resolve: fun(value: T))`, takes what the other arguments of that call declare for the
+  generic, as the `boolean` of `Promise:New('boolean', function(resolve) end)` for a `` `T` ``, and
+  any value for a generic they leave unbound. The values such a function returns are left out.
+- Parameters typed with the name of a native handle such as `Vehicle`, which resources also declare
+  as classes.
+- Calls through globals in an opaque resource, such as an escrowed one; see
+  [Escrowed, obfuscated and mixed-language resources](#escrowed-obfuscated-and-mixed-language-resources).
 
 ## Strict classes
 
@@ -671,9 +718,11 @@ complete knowledge of its globals or locale usage. Readable scripts are still an
 Unknown-export checks are suppressed for opaque resources and resources with non-Lua scripts.
 An opaque resource may also handle events named with its `resource:` prefix, so a wrong-side
 diagnostic is suppressed when the missing handler could be in that resource. Computed export
-registrations similarly prevent a complete list of exports. `missing-parameter` and
-`redundant-parameter` do not check calls to globals in an opaque resource, since an encrypted
-script may define them differently.
+registrations similarly prevent a complete list of exports. `missing-parameter`,
+`redundant-parameter` and `param-type-mismatch` do not check calls to globals in an opaque
+resource, or to fields of global tables, such as `Utils.round()`, since an encrypted script may
+define them differently. `param-type-mismatch` still checks the runtime's own functions, such as
+`math.floor`, and calls through `exports`.
 
 Read-only linting uses replacement characters for invalid UTF-8 bytes. `--fix`, `fmt`, and
 `fmt --check` report an encoding error for such source, and do not rewrite it. Convert its encoding

@@ -565,18 +565,30 @@ impl<'a> TypeParser<'a> {
             self.pos = self.src.len();
             return Type::Unknown;
         }
-        let mut types = vec![self.postfix()];
+        let mut types = Vec::new();
+        let mut lists_unknown = false;
         loop {
+            let start = self.pos;
+            types.push(self.postfix());
+            lists_unknown |= self.wrote_unknown(start);
             self.skip_ws();
-            if self.peek() == b'|' {
-                self.pos += 1;
-                types.push(self.postfix());
-            } else {
+            if self.peek() != b'|' {
                 break;
             }
+            self.pos += 1;
         }
         self.depth -= 1;
+        // A written `unknown` takes any value, also beside other types: `unknown|string` is no
+        // `string`, and is shown as `string|unknown`, as lua-language-server shows it.
+        if lists_unknown && types.len() > 1 {
+            return Type::union(types).or_unknown();
+        }
         Type::union(types)
+    }
+
+    /// Whether the text parsed since `start` is the type `unknown`.
+    fn wrote_unknown(&self, start: usize) -> bool {
+        self.src.get(start..self.pos).is_some_and(|text| text.trim() == "unknown")
     }
 
     /// The sets of values a function returns, written `false | (string, string)`: alternatives
@@ -650,14 +662,16 @@ impl<'a> TypeParser<'a> {
     }
 
     fn postfix(&mut self) -> Type {
+        let start = self.pos;
         let mut ty = self.primary();
         loop {
             if self.rest().starts_with("[]") {
                 self.pos += 2;
                 ty = Type::Array(Box::new(ty));
             } else if self.peek() == b'?' {
+                // `unknown?` takes any value, where an optional `unknown` would only be `nil`.
+                ty = if self.wrote_unknown(start) { Type::Nil.or_unknown() } else { ty.optional() };
                 self.pos += 1;
-                ty = ty.optional();
             } else {
                 return ty;
             }
@@ -902,6 +916,18 @@ mod tests {
         let mut parser = TypeParser::new("string|number the value to use");
         assert_eq!(parser.parse().to_string(), "string|number");
         assert_eq!(parser.rest().trim(), "the value to use");
+    }
+
+    #[test]
+    fn unknown_beside_other_types_takes_anything() {
+        assert_eq!(roundtrip("unknown"), "unknown");
+        assert_eq!(roundtrip("unknown|string"), "string|unknown");
+        assert_eq!(roundtrip("string | unknown"), "string|unknown");
+        assert_eq!(roundtrip("unknown?"), "unknown?");
+        assert_eq!(roundtrip("unknown[]?"), "unknown[]?");
+        assert_eq!(roundtrip("fun(value: unknown|nil)"), "fun(value: unknown?)");
+        assert_eq!(roundtrip("unknownType|string"), "unknownType|string");
+        assert_eq!(roundtrip("unknown|any"), "any");
     }
 
     #[test]

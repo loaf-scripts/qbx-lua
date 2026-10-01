@@ -44,9 +44,9 @@ pub fn payloads<'c>(infer: &Infer, chunk: &'c Chunk) -> Vec<Payload<'c>> {
 /// Each call to an `await` or `trigger` wrapper whose payload leaves out a parameter the handler
 /// requires, with the message naming it. Any of the handlers may be the one that runs, so the one
 /// that needs the fewest values decides.
-pub fn missing_payloads(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
+pub fn missing_payloads(infer: &Infer, payloads: &[Payload]) -> Vec<(Span, String)> {
     let mut out = Vec::new();
-    for payload in payloads(infer, chunk) {
+    for payload in payloads {
         // A call or `...` at the end passes as many values as it gives.
         if payload.args.last().is_some_and(Expr::is_multi_value) {
             continue;
@@ -79,9 +79,9 @@ pub fn missing_payloads(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
 
 /// Each call to an `await` or `trigger` wrapper whose payload passes more values than the handler
 /// takes, at the values it does not take. The handler that takes the most decides.
-pub fn redundant_payloads(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
+pub fn redundant_payloads(payloads: &[Payload]) -> Vec<(Span, String)> {
     let mut out = Vec::new();
-    'payloads: for payload in payloads(infer, chunk) {
+    'payloads: for payload in payloads {
         let mut most = 0;
         for handler in &payload.handlers {
             let Some(count) = most_arguments(handler, false) else { continue 'payloads };

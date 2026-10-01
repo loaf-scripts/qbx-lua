@@ -515,36 +515,47 @@ function promise:next(onFulfilled, onRejected) end
 ---@operator unm: quat
 ---@operator len: number
 
----Creates a vector2.
+---Creates a vector2. Its components can also come from vectors, as in `vector2(v3)`, from a
+---table, or from one number for all of them.
 ---@param x number
 ---@param y number
 ---@return vector2 v
+---@overload fun(...: number|vector2|vector3|vector4|table): vector2
 ---@nodiscard
 function vector2(x, y) end
 
----Creates a vector3.
+---Creates a vector3. Its components can also come from vectors, as in `vector3(xy, z)`, from a
+---table, or from one number for all of them.
 ---@param x number
 ---@param y number
 ---@param z number
 ---@return vector3 v
+---@overload fun(...: number|vector2|vector3|vector4|table): vector3
 ---@nodiscard
 function vector3(x, y, z) end
 
----Creates a vector4.
+---Creates a vector4. Its components can also come from vectors, as in `vector4(coords, heading)`, from a
+---table, or from one number for all of them.
 ---@param x number
 ---@param y number
 ---@param z number
 ---@param w number
 ---@return vector4 v
+---@overload fun(...: number|vector2|vector3|vector4|table): vector4
 ---@nodiscard
 function vector4(x, y, z, w) end
 
----Creates a quaternion. Note that the scalar part `w` comes first.
+---Creates a quaternion. Note that the scalar part `w` comes first. It also takes an angle in degrees
+---and the axis to rotate around, two directions to rotate the first into the second, or Euler
+---angles in radians.
 ---@param w number
 ---@param x number
 ---@param y number
 ---@param z number
 ---@return quat q
+---@overload fun(angle: number, axis: vector3): quat
+---@overload fun(from: vector3, to: vector3): quat
+---@overload fun(euler: vector3): quat
 ---@nodiscard
 function quat(w, x, y, z) end
 
@@ -552,6 +563,7 @@ function quat(w, x, y, z) end
 ---@param x number
 ---@param y number
 ---@return vector2 v
+---@overload fun(...: number|vector2|vector3|vector4|table): vector2
 ---@nodiscard
 function vec2(x, y) end
 
@@ -560,6 +572,7 @@ function vec2(x, y) end
 ---@param y number
 ---@param z number
 ---@return vector3 v
+---@overload fun(...: number|vector2|vector3|vector4|table): vector3
 ---@nodiscard
 function vec3(x, y, z) end
 
@@ -569,6 +582,7 @@ function vec3(x, y, z) end
 ---@param z number
 ---@param w number
 ---@return vector4 v
+---@overload fun(...: number|vector2|vector3|vector4|table): vector4
 ---@nodiscard
 function vec4(x, y, z, w) end
 
@@ -589,7 +603,8 @@ function vec(...) end
 function norm(v) end
 
 ---Computes the Jenkins one-at-a-time hash of `str`, the same value game natives use for model and asset names.
----@param str string
+---An integer is returned as it is.
+---@param str string|integer
 ---@return integer hash
 ---@nodiscard
 function joaat(str) end
