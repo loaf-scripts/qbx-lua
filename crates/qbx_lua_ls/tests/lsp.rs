@@ -2506,6 +2506,29 @@ local handlers = {}
 handlers['demo:request'] = RegisterNetEvent('demo:request', function(requestId, ...)
     print(requestId, ...)
 end)
+
+---@class TArgs
+---@field action fun(scrollIndex?: number)
+
+local documented = {
+    ---@param a1 number
+    action = function(a1) end,
+}
+
+---@type TArgs
+local declared = {
+    action = function(b1) end,
+}
+
+print(json.encode(documented, { exception = function(_, value) end }))
+
+local proxy = setmetatable(declared, { __index = function(_, key) end })
+
+local untyped = { run = function(arg) end }
+
+RegisterNUICallback('demo', function(data, cb)
+    cb(data)
+end)
 ";
     write("strict/main.lua", text);
     write("loose.lua", "function other(bar) end\n");
@@ -2519,6 +2542,8 @@ end)
         finding("local pending", "The type of `pending` is unknown; add `---@type <type>`"),
         finding("local result", "The type of `result` is unknown; add `---@type <type>`"),
         finding("function(payload)", "Parameter `payload` has no type; add `---@param payload <type>`"),
+        finding("function(arg)", "Parameter `arg` has no type; add `---@param arg <type>`"),
+        finding("function(data, cb)", "Parameter `data` has no type; add `---@param data <type>`"),
     ];
     assert_eq!(findings(&mut client, "strict/main.lua", &["no-unknown"]), expected);
     client.open_with("strict/main.lua", text);
@@ -3562,6 +3587,120 @@ end
         let hover = client.hover_text(CLIENT, l, c);
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
+}
+
+#[test]
+fn hover_types_the_parameters_of_functions_in_tables() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class TArgs
+---@field action fun(scrollIndex?: number)
+---@field items? { onSelect: fun(args: string) }[]
+
+---@alias Handler fun(source: integer, payload: string)
+
+local documented = {
+    ---@param a1 number
+    action = function(a1) end,
+    ---@param k1 boolean
+    [ 'keyed' ] = function(k1) end,
+}
+
+---@type TArgs
+local declared = {
+    action = function(b1) end,
+    items = { { onSelect = function(selected) end } },
+}
+
+---@param options { handlers: table<string, Handler> }
+local function register(options) end
+
+register({ handlers = { ping = function(source, payload) end } })
+
+local encoded = json.encode({}, { exception = function(reason, value) end })
+
+local proxy = setmetatable({}, {
+    __index = function(_, key) end,
+    __newindex = function(_, field, assigned) end,
+})
+
+---@type fun(count: integer)
+local counter = function(n) end
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        // `@param` lines above the field.
+        ("a1)", "a1: number"),
+        ("k1)", "k1: boolean"),
+        // The `@field` of the class a `---@type` local declares, and of the tables in its fields.
+        ("b1)", "b1: number?"),
+        ("selected)", "selected: string"),
+        // The type of the parameter a table is passed for.
+        ("source, payload", "source: integer"),
+        ("payload) end", "payload: string"),
+        ("reason, value", "reason: string"),
+        ("value) end", "value: any"),
+        // The metamethods of `setmetatable`'s second argument.
+        ("key) end", "key: any"),
+        ("assigned)", "assigned: any"),
+        // A function a `---@type` local holds.
+        ("n) end", "n: integer"),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn functions_in_table_fields_return_what_the_return_above_their_field_says() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local handlers = {
+    ---@param x integer
+    ---@return string
+    name = function(x) return x end,
+    ---@return integer
+    count = function() end,
+    nested = {
+        ---@return boolean
+        ready = function() return true end,
+    },
+}
+
+Register({
+    ---@return string
+    label = function() end,
+})
+
+return {
+    ---@return integer
+    size = function() return 'big' end,
+}
+";
+    client.open_with(CLIENT, text);
+    let found: Vec<(String, u64)> = findings(&mut client, CLIENT, &["missing-return", "return-type-mismatch"])
+        .into_iter()
+        .map(|(code, line, _)| (code, line))
+        .collect();
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        found,
+        [
+            ("return-type-mismatch".to_string(), line("name =")),
+            ("missing-return".to_string(), line("count =")),
+            ("missing-return".to_string(), line("label =")),
+            ("return-type-mismatch".to_string(), line("size =")),
+        ]
+    );
+
+    // A `return` in such a function completes the values its `@return` lists.
+    let text = "local modes = {\n    ---@return 'on'|'off'\n    get = function()\n        return ";
+    client.change(CLIENT, 2, text);
+    let mut labels = client.completion_labels(CLIENT, 3, 15);
+    labels.retain(|label| label.starts_with('\''));
+    assert_eq!(labels, ["'on'", "'off'"]);
 }
 
 #[test]

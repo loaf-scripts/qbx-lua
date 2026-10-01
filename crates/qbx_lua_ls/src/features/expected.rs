@@ -10,7 +10,7 @@ use rustc_hash::FxHashMap;
 
 use super::class_tables::{class_tables, entries, Classes, Key};
 use super::comparisons::Declared;
-use crate::infer::{documented_functions, Infer};
+use crate::infer::Infer;
 use crate::types::Type;
 
 /// Where a value is written.
@@ -97,9 +97,7 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
         if self.found.is_some() || !stmt.span.contains_inclusive(self.at()) {
             return;
         }
-        let functions = documented_functions(stmt);
-        if !functions.is_empty() {
-            let doc = self.infer.ctx.doc_at(stmt.span.start);
+        for (doc, functions) in self.infer.ctx.function_docs(stmt) {
             let returns: Vec<Type> = doc.returns.iter().map(|r| r.ty.clone()).collect();
             for func in functions {
                 self.documented.insert(func.params_span.start, returns.clone());

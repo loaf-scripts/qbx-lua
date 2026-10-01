@@ -152,10 +152,42 @@ function require(modname) end
 ---@nodiscard
 function select(index, ...) end
 
+---The fields Lua reads from the metatable of a table: the metamethods it calls for operations on the table, and its settings.
+---@class metatable
+---@field __index? table|fun(t: table, key: any): any
+---@field __newindex? table|fun(t: table, key: any, value: any)
+---@field __call? fun(t: table, ...: any): ...any
+---@field __tostring? fun(t: table): string
+---@field __len? fun(t: table): integer
+---@field __pairs? fun(t: table): function, table, any
+---@field __close? fun(t: table, err: any)
+---@field __gc? fun(t: table)
+---@field __unm? fun(a: table): any
+---@field __bnot? fun(a: table): any
+---@field __add? fun(a: any, b: any): any
+---@field __sub? fun(a: any, b: any): any
+---@field __mul? fun(a: any, b: any): any
+---@field __div? fun(a: any, b: any): any
+---@field __mod? fun(a: any, b: any): any
+---@field __pow? fun(a: any, b: any): any
+---@field __idiv? fun(a: any, b: any): any
+---@field __band? fun(a: any, b: any): any
+---@field __bor? fun(a: any, b: any): any
+---@field __bxor? fun(a: any, b: any): any
+---@field __shl? fun(a: any, b: any): any
+---@field __shr? fun(a: any, b: any): any
+---@field __concat? fun(a: any, b: any): any
+---@field __eq? fun(a: table, b: table): boolean
+---@field __lt? fun(a: any, b: any): boolean
+---@field __le? fun(a: any, b: any): boolean
+---@field __mode? "k"|"v"|"kv"
+---@field __name? string
+---@field __metatable? any
+
 ---Sets (or clears, with nil) the metatable of `t` and returns `t`. Fails if the current metatable has a `__metatable` field.
 ---@generic T: table
 ---@param t T
----@param metatable? table
+---@param metatable? table|metatable
 ---@return T t
 function setmetatable(t, metatable) end
 

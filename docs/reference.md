@@ -373,8 +373,8 @@ keeps it loose.
 A function documented with `@return` has to return values of those types. That includes a
 function passed to the call below the doc comment, such as the handler of
 `RegisterServerCallback('name', function(source) ... end)`, also when the statement assigns what
-the call returns, as `local handler = RegisterNetEvent('name', function() ... end)` does.
-qbx-lua-ls reports:
+the call returns, as `local handler = RegisterNetEvent('name', function() ... end)` does, and a
+function written in a table, whose doc comment goes above its field. qbx-lua-ls reports:
 
 - `return-type-mismatch` for a returned value that clearly is not of its `@return` type: a
   different kind of value, such as `return 5` for `---@return string`, or a literal the type does
@@ -484,7 +484,8 @@ Only clear cases count, and the rest is left alone:
 
 `no-unknown` is off by default. Turned on, qbx-lua-ls reports each parameter, local and loop
 variable whose type is unknown: none is declared, and none can be inferred from its value, from
-the function a callback is passed to, or from what a loop goes through.
+the function a callback is passed to, from the declared type of the table field a function is
+written in, or from what a loop goes through.
 
 ```toml
 [rules]
@@ -501,10 +502,14 @@ end
 ```
 
 A `---@param` or `---@type` gives the name a type, `any` included. Without one, a parameter that
-only takes `any` from the `fun(...)` its function is passed as, like the handler of
-`RegisterNetEvent`, counts as untyped. Its `---@param` goes above the statement that makes the
+only takes `any` from the `...` of the `fun(...)` its function is passed as, like the handler of
+`RegisterNetEvent`, counts as untyped, and so does the `data` of a `RegisterNUICallback` handler,
+which only the resource's own UI decides. Its `---@param` goes above the statement that makes the
 call, whether that is the call alone or `handlers[name] = RegisterNetEvent(name, function(id) end)`.
-A local declared without a value needs a `---@type`, since
+A function written in a table takes the `---@param` lines above its field, and the parameter
+types of the field's `fun(...)` when the table has a declared type: the `---@type` above its
+`local`, the type of the parameter it is passed for, or `metatable` for the second argument of
+`setmetatable`. A local declared without a value needs a `---@type`, since
 later assignments are not followed. Names that start with `ignore_unused_prefix`, and `self`, are
 not reported. To check only your own resources, set the level in an `[[overrides]]` entry instead
 of `[rules]`.

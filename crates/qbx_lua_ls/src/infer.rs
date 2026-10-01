@@ -95,11 +95,29 @@ pub enum Decl<'a> {
     GenericFor { stmt: &'a Stmt, index: usize },
 }
 
-/// A function literal passed as a call argument: its parameters can be typed from the callee.
+/// Where a function literal or table constructor is written, which may declare the type it has to
+/// be: the parameters of a function are typed from it, and so are those of the functions a table
+/// holds.
 #[derive(Clone, Copy)]
-pub struct Expected<'a> {
-    pub call: &'a Expr,
-    pub arg_index: usize,
+pub enum Expected<'a> {
+    /// Argument `arg_index` of a call, which has the type of the parameter it is passed for.
+    Arg { call: &'a Expr, arg_index: usize },
+    /// Value `index` of a `local` statement or an assignment, typed by the `---@type` above it.
+    Value { stmt: &'a Stmt, index: usize },
+    /// The value of the field `key` of a table constructor, which has the type of that field of the
+    /// table.
+    Field { table: &'a Expr, key: FieldKey<'a> },
+}
+
+/// How a table constructor keys one of its fields.
+#[derive(Clone, Copy)]
+pub enum FieldKey<'a> {
+    /// `name = value` or `['name'] = value`.
+    Name(&'a str),
+    /// The `n`th value written without a key.
+    Position(i64),
+    /// `[key] = value` with a key that is no string.
+    Expr(&'a Expr),
 }
 
 pub struct FileContext<'a> {
@@ -110,13 +128,20 @@ pub struct FileContext<'a> {
     decls: FxHashMap<u32, Decl<'a>>,
     /// The start of the statement each call is the value of, by the start of the call.
     call_anchors: FxHashMap<u32, u32>,
+    /// Where each table constructor that a declared type may describe is written, by its start.
+    tables: FxHashMap<u32, Expected<'a>>,
     docs: RefCell<FxHashMap<u32, Rc<DocGroup>>>,
     guards: OnceCell<Guards>,
 }
 
 impl<'a> FileContext<'a> {
     pub fn new(file: FileId, source: &'a str, chunk: &'a Chunk, resolution: &'a Resolution) -> Self {
-        let mut collector = DeclCollector { decls: FxHashMap::default(), call_anchors: FxHashMap::default() };
+        let mut collector = DeclCollector {
+            source,
+            decls: FxHashMap::default(),
+            call_anchors: FxHashMap::default(),
+            tables: FxHashMap::default(),
+        };
         collector.block(&chunk.block);
         Self {
             file,
@@ -125,6 +150,7 @@ impl<'a> FileContext<'a> {
             resolution,
             decls: collector.decls,
             call_anchors: collector.call_anchors,
+            tables: collector.tables,
             docs: RefCell::new(FxHashMap::default()),
             guards: OnceCell::new(),
         }
@@ -149,6 +175,63 @@ impl<'a> FileContext<'a> {
         doc
     }
 
+    /// The functions `stmt` defines, grouped by the doc comment they take: those of
+    /// `documented_functions`, under the comment above the statement, and each function its values
+    /// write in a field of a table constructor, under the comment above that field.
+    pub fn function_docs<'s>(&self, stmt: &'s Stmt) -> Vec<(Rc<DocGroup>, Vec<&'s FuncBody>)> {
+        let mut out = Vec::new();
+        let functions = documented_functions(stmt);
+        if !functions.is_empty() {
+            out.push((self.doc_at(stmt.span.start), functions));
+        }
+        let values: &[Expr] = match &stmt.kind {
+            StmtKind::Local { exprs, .. } | StmtKind::Assign { exprs, .. } | StmtKind::Return(exprs) => exprs,
+            StmtKind::Expr(expr) => std::slice::from_ref(expr),
+            _ => &[],
+        };
+        for value in values {
+            self.field_functions(value, &mut out);
+        }
+        out
+    }
+
+    /// Adds each function written in a field of a table constructor in `expr`, outside other
+    /// functions, with the doc comment above its field.
+    fn field_functions<'s>(&self, expr: &'s Expr, out: &mut Vec<(Rc<DocGroup>, Vec<&'s FuncBody>)>) {
+        match &expr.kind {
+            ExprKind::Table(fields) => {
+                for field in fields {
+                    let value = match field {
+                        TableField::Named { value, .. } | TableField::Positional(value) => value,
+                        TableField::Keyed { key, value } => {
+                            self.field_functions(key, out);
+                            value
+                        }
+                        TableField::SetMember(_) => continue,
+                    };
+                    match &value.kind {
+                        ExprKind::Function(func) => {
+                            out.push((self.doc_at(field_start(self.source, field)), vec![&**func]))
+                        }
+                        _ => self.field_functions(value, out),
+                    }
+                }
+            }
+            ExprKind::Call { callee: base, args, .. } | ExprKind::MethodCall { base, args, .. } => {
+                self.field_functions(base, out);
+                args.iter().for_each(|arg| self.field_functions(arg, out));
+            }
+            ExprKind::Index { base, index: other, .. } | ExprKind::Binary { lhs: base, rhs: other, .. } => {
+                self.field_functions(base, out);
+                self.field_functions(other, out);
+            }
+            ExprKind::Field { base: inner, .. } | ExprKind::Unary { expr: inner, .. } | ExprKind::Paren(inner) => {
+                self.field_functions(inner, out)
+            }
+            _ => {}
+        }
+    }
+
     /// Where the doc comment of the functions passed to a call is read: the start of the call, or
     /// of the `x = f(...)` or `local x = f(...)` statement the call is the value of.
     pub fn call_doc_anchor(&self, call_start: u32) -> u32 {
@@ -167,8 +250,10 @@ impl<'a> FileContext<'a> {
 }
 
 struct DeclCollector<'a> {
+    source: &'a str,
     decls: FxHashMap<u32, Decl<'a>>,
     call_anchors: FxHashMap<u32, u32>,
+    tables: FxHashMap<u32, Expected<'a>>,
 }
 
 impl<'a> DeclCollector<'a> {
@@ -188,12 +273,17 @@ impl<'a> DeclCollector<'a> {
     fn stmt(&mut self, stmt: &'a Stmt) {
         let anchor = Some(stmt.span.start);
         match &stmt.kind {
-            StmtKind::Local { names, exprs, .. } => {
+            StmtKind::Local { names, exprs, in_unpack } => {
                 for (index, name) in names.iter().enumerate() {
                     self.decls.insert(name.name.span.start, Decl::Local { stmt, index });
                 }
-                for expr in exprs {
-                    self.expr(expr, anchor);
+                for (index, expr) in exprs.iter().enumerate() {
+                    // `local a, b in t` takes the names from `t`, which the `---@type` above does not describe.
+                    if *in_unpack {
+                        self.expr(expr, anchor);
+                    } else {
+                        self.value(expr, anchor, Expected::Value { stmt, index });
+                    }
                 }
             }
             StmtKind::LocalFunction { name, func } => {
@@ -208,7 +298,9 @@ impl<'a> DeclCollector<'a> {
             }
             StmtKind::Assign { targets, exprs } => {
                 targets.iter().for_each(|e| self.expr(e, None));
-                exprs.iter().for_each(|e| self.expr(e, anchor));
+                for (index, expr) in exprs.iter().enumerate() {
+                    self.value(expr, anchor, Expected::Value { stmt, index });
+                }
             }
             StmtKind::CompoundAssign { target, expr, .. } => {
                 self.expr(target, None);
@@ -276,14 +368,25 @@ impl<'a> DeclCollector<'a> {
             }
             ExprKind::Unary { expr, .. } | ExprKind::Paren(expr) => self.expr(expr, None),
             ExprKind::Table(fields) => {
+                let mut position = 0;
                 for field in fields {
-                    match field {
-                        TableField::Positional(value) | TableField::Named { value, .. } => self.expr(value, None),
+                    let (key, value) = match field {
+                        TableField::Named { name, value } => (FieldKey::Name(&name.text), value),
                         TableField::Keyed { key, value } => {
                             self.expr(key, None);
-                            self.expr(value, None);
+                            (key.as_string().map_or(FieldKey::Expr(key), |name| FieldKey::Name(name)), value)
                         }
-                        TableField::SetMember(_) => {}
+                        TableField::Positional(value) => {
+                            position += 1;
+                            (FieldKey::Position(position), value)
+                        }
+                        TableField::SetMember(_) => continue,
+                    };
+                    let at = Expected::Field { table: expr, key };
+                    // A function in a field takes the `@param` lines above the field.
+                    match &value.kind {
+                        ExprKind::Function(func) => self.func(func, Some(field_start(self.source, field)), Some(at)),
+                        _ => self.value(value, None, at),
                     }
                 }
             }
@@ -291,16 +394,30 @@ impl<'a> DeclCollector<'a> {
         }
     }
 
+    /// A value written where `at` may declare its type. A function takes the doc comment at
+    /// `doc_anchor`, and a call passes it on to the functions passed to it.
+    fn value(&mut self, expr: &'a Expr, doc_anchor: Option<u32>, at: Expected<'a>) {
+        match &expr.kind {
+            ExprKind::Function(func) => self.func(func, doc_anchor, Some(at)),
+            ExprKind::Table(_) => {
+                self.tables.insert(expr.span.start, at);
+                self.expr(expr, None);
+            }
+            _ => self.expr(expr, doc_anchor),
+        }
+    }
+
     /// `doc_anchor` is the statement the call is the value of, whose doc comment the functions
-    /// passed to the call take.
+    /// passed to the call take. Without one, they take the doc comment above the call.
     fn call_args(&mut self, call: &'a Expr, args: &'a [Expr], doc_anchor: Option<u32>) {
         if let Some(anchor) = doc_anchor {
             self.call_anchors.insert(call.span.start, anchor);
         }
         for (arg_index, arg) in args.iter().enumerate() {
+            let at = Expected::Arg { call, arg_index };
             match &arg.kind {
-                ExprKind::Function(func) => self.func(func, doc_anchor, Some(Expected { call, arg_index })),
-                _ => self.expr(arg, None),
+                ExprKind::Function(func) => self.func(func, Some(doc_anchor.unwrap_or(call.span.start)), Some(at)),
+                _ => self.value(arg, None, at),
             }
         }
     }
@@ -621,8 +738,8 @@ impl<'a> Infer<'a> {
                 // A function passed to a call takes the `@param` lines above that call's statement, as
                 // the handler of `RegisterServerCallback('name', function(source, id) end)` does,
                 // also when the statement assigns what the call returns.
-                if let Some(anchor) = doc_anchor.or_else(|| expected.as_ref().map(|e| e.call.span.start)) {
-                    let doc = self.ctx.doc_at(anchor);
+                if let Some(anchor) = doc_anchor {
+                    let doc = self.ctx.doc_at(*anchor);
                     if let Some(param) = doc.params.iter().find(|p| p.name == *name) {
                         return if param.optional { param.ty.clone().optional() } else { param.ty.clone() };
                     }
@@ -679,8 +796,8 @@ impl<'a> Infer<'a> {
     }
 
     /// `lib.onCache('vehicle', function(value, oldValue)`: both parameters are `cache.vehicle`.
-    fn on_cache_param(&self, expected: &Expected) -> Option<Type> {
-        let ExprKind::Call { callee, args, .. } = &expected.call.kind else { return None };
+    fn on_cache_param(&self, call: &Expr) -> Option<Type> {
+        let ExprKind::Call { callee, args, .. } = &call.kind else { return None };
         if callee.dotted_path().as_deref() != Some("lib.onCache") {
             return None;
         }
@@ -688,11 +805,68 @@ impl<'a> Infer<'a> {
         self.member(&self.global_type("cache"), key).map(|m| m.ty)
     }
 
+    /// The type of parameter `index` of a function literal written where `expected` says.
     fn expected_param(&self, expected: &Expected, index: usize) -> Option<Type> {
-        if let Some(ty) = self.on_cache_param(expected).filter(|_| index < 2) {
-            return Some(ty);
+        if let Expected::Arg { call, arg_index } = *expected {
+            if let Some(ty) = self.on_cache_param(call).filter(|_| index < 2) {
+                return Some(ty);
+            }
+            if let Some(returns) = self.triggered_returns(call, arg_index) {
+                return Some(returns.get(index).cloned().unwrap_or(Type::Nil));
+            }
         }
-        let (fun, args, via_method) = match &expected.call.kind {
+        let param = self.expected_fun(expected)?.params.get(index)?.clone();
+        Some(if param.optional { param.ty.optional() } else { param.ty })
+    }
+
+    /// `TriggerCallback('name', function(response) end)` receives what the handler of `name`
+    /// returns, when argument `arg_index` of `call` is that function.
+    fn triggered_returns(&self, call: &Expr, arg_index: usize) -> Option<Vec<Type>> {
+        let (fun, args, via_method) = self.call_parts(call)?;
+        let wrapper = Wrapper::of(&fun, via_method).filter(|w| w.tag.role == CallbackRole::Trigger)?;
+        if wrapper.function.map(|param| wrapper.arg(param)) != Some(arg_index) {
+            return None;
+        }
+        let handler = self.wrapper_handler(&wrapper, args.exprs, call.span.start)?;
+        (!handler.returns.is_empty()).then(|| handler.returns.clone())
+    }
+
+    /// The function type that a function literal written where `expected` says has to be.
+    pub fn expected_fun(&self, expected: &Expected) -> Option<Arc<FunType>> {
+        self.fun_of(&self.expected_type(expected)?)
+    }
+
+    /// The type that a value written where `expected` says has to be, when something declares it.
+    fn expected_type(&self, expected: &Expected) -> Option<Type> {
+        match *expected {
+            Expected::Arg { call, arg_index } => {
+                let (fun, args, via_method) = self.call_parts(call)?;
+                let (skip_params, skip_args) = fun.call_offsets(via_method);
+                let param = &fun.params.get((arg_index + skip_params).checked_sub(skip_args)?)?.ty;
+                // A table passed for a parameter like the `T` of `setmetatable(t: T)` decides that
+                // generic itself. A function literal never does: `bind_generics` leaves those out.
+                let is_function = matches!(args.exprs.get(arg_index)?.kind, ExprKind::Function(_));
+                if !is_function && self.can_bind(&fun, param) {
+                    return None;
+                }
+                Some(substitute(param, &self.bind_generics(&fun, &args, via_method, false)))
+            }
+            Expected::Value { stmt, index } => {
+                // `---@class Name` above a table declares the class rather than a value of it.
+                let doc = self.ctx.doc_at(stmt.span.start);
+                doc.type_at(index).filter(|_| doc.classes.is_empty()).cloned()
+            }
+            Expected::Field { table, key } => {
+                let at = self.ctx.tables.get(&table.span.start)?;
+                let table = self.guarded(|| self.expected_type(at))?;
+                self.field_type(&table, key)
+            }
+        }
+    }
+
+    /// The signature that `call` uses, with its arguments and whether it calls a method.
+    fn call_parts<'e>(&self, call: &'e Expr) -> Option<(Arc<FunType>, CallArgs<'e>, bool)> {
+        let (fun, args, via_method) = match &call.kind {
             ExprKind::Call { callee, args, .. } => (self.expr(callee).as_fun().cloned(), args, false),
             ExprKind::MethodCall { base, method, args, .. } => {
                 let member = self.member(&self.expr(base), &method.text);
@@ -701,22 +875,32 @@ impl<'a> Infer<'a> {
             _ => return None,
         };
         let args = CallArgs::new(args);
-        let fun = self.signature_for(&fun?, &args, via_method, expected.call.span.start);
-        let (skip_params, skip_args) = fun.call_offsets(via_method);
-        let param_index = (expected.arg_index + skip_params).checked_sub(skip_args)?;
-        // `TriggerCallback('name', function(response) end)` receives what the handler of `name` returns.
-        if let Some(wrapper) = Wrapper::of(&fun, via_method).filter(|w| w.tag.role == CallbackRole::Trigger) {
-            if wrapper.function.map(|param| wrapper.arg(param)) == Some(expected.arg_index) {
-                if let Some(handler) = self.wrapper_handler(&wrapper, args.exprs, expected.call.span.start) {
-                    if !handler.returns.is_empty() {
-                        return Some(handler.returns.get(index).cloned().unwrap_or(Type::Nil));
-                    }
+        let fun = self.signature_for(&fun?, &args, via_method, call.span.start);
+        Some((fun, args, via_method))
+    }
+
+    /// The type of the field `key` in a table of type `table`.
+    fn field_type(&self, table: &Type, key: FieldKey) -> Option<Type> {
+        let key = match key {
+            FieldKey::Name(name) => {
+                if let Some(member) = self.member(table, name) {
+                    return Some(member.ty);
                 }
+                Type::StringLit(SmolStr::new(name))
             }
+            FieldKey::Position(position) => Type::IntLit(position),
+            FieldKey::Expr(key) => self.expr(key),
+        };
+        Some(self.element_type(&table.without_nil(), &key, 0)).filter(|ty| !ty.is_unknown())
+    }
+
+    /// The function type `ty` describes, through aliases and the `nil` of `fun()?`.
+    fn fun_of(&self, ty: &Type) -> Option<Arc<FunType>> {
+        match self.resolve_alias(ty) {
+            Type::Fun(fun) => Some(fun),
+            Type::Union(types) => types.iter().find_map(|part| self.guarded(|| self.fun_of(part))),
+            _ => None,
         }
-        let callback = fun.params.get(param_index)?.ty.as_fun()?.clone();
-        let ty = &callback.params.get(index)?.ty;
-        Some(substitute(ty, &self.bind_generics(&fun, &args, via_method, false)))
     }
 
     /// Whether `name` is the table a `---@class` annotation declares, like `Test` in `---@class Test`
@@ -932,24 +1116,19 @@ impl<'a> Infer<'a> {
                 return Type::union(fields);
             }
         }
-        self.element_type(&base_ty.without_nil(), index, &key_ty, 0)
+        self.element_type(&base_ty.without_nil(), &key_ty, 0)
     }
 
-    /// What `base[index]` holds when the key is not a known field name.
-    fn element_type(&self, base: &Type, index: &Expr, key_ty: &Type, depth: u32) -> Type {
+    /// What `base[key]` holds for a key of type `key_ty` that is not a known field name.
+    fn element_type(&self, base: &Type, key_ty: &Type, depth: u32) -> Type {
         match self.resolve_alias(base) {
             Type::Union(types) if depth < 8 => Type::union(
-                types
-                    .iter()
-                    .filter(|t| !matches!(t, Type::Nil))
-                    .map(|t| self.element_type(t, index, key_ty, depth + 1)),
+                types.iter().filter(|t| !matches!(t, Type::Nil)).map(|t| self.element_type(t, key_ty, depth + 1)),
             ),
             Type::Array(inner) => *inner,
             Type::Map(_, value) => *value,
-            Type::Tuple(items) => match &index.kind {
-                ExprKind::Number(NumberValue::Int(i)) => {
-                    items.get((*i as usize).wrapping_sub(1)).cloned().unwrap_or_default()
-                }
+            Type::Tuple(items) => match key_ty {
+                Type::IntLit(i) => items.get((*i as usize).wrapping_sub(1)).cloned().unwrap_or_default(),
                 _ => Type::union(items),
             },
             Type::Shape(shape) => Type::union(shape.array.iter().chain(shape.index.as_ref().map(|(_, v)| v)).cloned()),
@@ -1426,12 +1605,16 @@ impl<'a> Infer<'a> {
         }
         let mut literals = Literals::default();
         for (i, (param, arg)) in fixed.iter().zip(args).enumerate() {
-            // A function literal is not inferred here: its parameters may be typed from this very call.
-            let given = match arg.unparen().kind {
-                ExprKind::Function(_) => None,
-                _ => Some(call.ty(self, skip_args + i)),
+            // Function literals and table constructors are not inferred here: the parameters of the
+            // functions in them may be typed from this very call.
+            let (given, given_kinds) = match arg.unparen().kind {
+                ExprKind::Function(_) => (None, Some(kind::FUNCTION)),
+                ExprKind::Table(_) => (None, Some(kind::TABLE)),
+                _ => {
+                    let given = call.ty(self, skip_args + i);
+                    (Some(given), self.value_kinds(fun, given, 0))
+                }
             };
-            let given_kinds = given.map_or(Some(kind::FUNCTION), |ty| self.value_kinds(fun, ty, 0));
             if let (Some(wanted), Some(given_kinds)) = (self.param_kinds(fun, param), given_kinds) {
                 if wanted & given_kinds == 0 {
                     return Fit::No;
@@ -2017,6 +2200,19 @@ fn breaks(block: &Block) -> bool {
         }
         _ => false,
     })
+}
+
+/// Where a table field starts, whose doc comment the function it holds takes: at its name, the `[`
+/// of its key, or its value.
+fn field_start(source: &str, field: &TableField) -> u32 {
+    match field {
+        TableField::Named { name, .. } | TableField::SetMember(name) => name.span.start,
+        TableField::Keyed { key, .. } => {
+            let before = source[..key.span.start as usize].trim_end();
+            before.strip_suffix('[').map_or(key.span.start, |rest| rest.len() as u32)
+        }
+        TableField::Positional(value) => value.span.start,
+    }
 }
 
 /// The functions a statement defines under its doc comment: `function f()`, `local function f()`,

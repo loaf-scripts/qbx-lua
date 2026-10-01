@@ -25,8 +25,10 @@ pub fn unknown_types(infer: &Infer, ignored_prefix: &str) -> Vec<(Span, String)>
         let known = match infer.local_type(id as LocalId) {
             Type::Unknown => false,
             // The handler of `RegisterNetEvent(name, function(payload) end)` takes `any` from the
-            // `fun(...)` it is passed as, which says no more about `payload` than nothing does.
-            Type::Any if local.kind == LocalKind::Param => has_param_line(infer, local),
+            // `...` of the `fun(...)` it is passed as, which says no more about `payload` than
+            // nothing does. A parameter the function type names, like `value` of
+            // `fun(reason: string, value: any)`, is declared `any`.
+            Type::Any if local.kind == LocalKind::Param => has_param_line(infer, local) || !from_vararg(infer, local),
             _ => true,
         };
         if known {
@@ -44,10 +46,17 @@ pub fn unknown_types(infer: &Infer, ignored_prefix: &str) -> Vec<(Span, String)>
     out
 }
 
-/// Whether a `@param` line documents the parameter: above its function, or above the call its
-/// function is passed to.
+/// Whether a `@param` line documents the parameter: above its function, the call its function is
+/// passed to, or the table field that holds it.
 pub(super) fn has_param_line(infer: &Infer, param: &Local) -> bool {
-    let Some(Decl::Param { doc_anchor, expected, .. }) = infer.ctx.decl(param.decl.start) else { return false };
-    let anchor = doc_anchor.or_else(|| expected.as_ref().map(|expected| expected.call.span.start));
-    anchor.is_some_and(|anchor| infer.ctx.doc_at(anchor).params.iter().any(|doc| doc.name == param.name))
+    let Some(Decl::Param { doc_anchor, .. }) = infer.ctx.decl(param.decl.start) else { return false };
+    doc_anchor.is_some_and(|anchor| infer.ctx.doc_at(anchor).params.iter().any(|doc| doc.name == param.name))
+}
+
+/// Whether the parameter takes its value from the `...` of the function type its function has to be.
+fn from_vararg(infer: &Infer, param: &Local) -> bool {
+    let Some(Decl::Param { index, expected: Some(expected), .. }) = infer.ctx.decl(param.decl.start) else {
+        return false;
+    };
+    infer.expected_fun(expected).is_some_and(|fun| fun.params.get(*index).is_some_and(|p| p.name == "..."))
 }

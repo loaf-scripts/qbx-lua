@@ -2,12 +2,12 @@
 
 ---Registers a handler for NUI fetch requests sent to `https://<resource>/<name>`. The handler receives the decoded request body and a reply function that must be called once.
 ---@param name string
----@param cb fun(data: any, cb: fun(response: any))
+---@param cb fun(data: unknown, cb: fun(response: any))
 function RegisterNUICallback(name, cb) end
 
 ---Alternative spelling of `RegisterNUICallback`.
 ---@param name string
----@param cb fun(data: any, cb: fun(response: any))
+---@param cb fun(data: unknown, cb: fun(response: any))
 function RegisterNuiCallback(name, cb) end
 
 ---JSON-encodes `message` and posts it to this resource's NUI page, where it arrives as a window `message` event.

@@ -15,7 +15,7 @@ use qbx_lua_syntax::Span;
 
 use super::class_tables::Classes;
 use crate::indexer::is_meta_file;
-use crate::infer::{always_exits, documented_functions, return_stmts, Infer};
+use crate::infer::{always_exits, return_stmts, Infer};
 use crate::types::Type;
 
 /// Each returned value that its function's `@return` does not take, with the message naming both
@@ -153,9 +153,7 @@ struct Finder<'a, 'b, 'c> {
 
 impl<'c> Visitor<'c> for Finder<'_, '_, 'c> {
     fn visit_stmt(&mut self, stmt: &'c Stmt) {
-        let functions = documented_functions(stmt);
-        if !functions.is_empty() {
-            let doc = self.infer.ctx.doc_at(stmt.span.start);
+        for (doc, functions) in self.infer.ctx.function_docs(stmt) {
             if !doc.returns.is_empty() {
                 let returns: Vec<Type> = doc.returns.iter().map(|r| r.ty.clone()).collect();
                 let documented = |func| Documented { func, returns: returns.clone(), sets: doc.return_sets.clone() };
