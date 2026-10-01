@@ -98,20 +98,25 @@ Where an argument starts, right after the `(` or `,` in front of it, completion 
 be. String values that its parameter lists are offered quoted, with the value as filter text.
 Integers are offered as they are, and so are `true` and `false`, which a `boolean` lists too. A
 type that lists values also lists the `nil` it allows, last; a type such as `string?` lists
-nothing. Snippet clients also get a function literal labelled like `function(source)`, with the
-filter text `function`, when the argument takes a function. Values come from every signature that
+nothing. The members of an `---@enum` that the parameter names come before its values, as
+`EnumMember` items whose detail is the value, written the way the code reaches the enum's table:
+`Colors.Red` for `---@enum Color` above `Colors = { Red = 1 }`, or through a `local` in scope that
+holds the table, contains it or holds the module that returns it. An enum whose table no name in
+scope holds, such as a `local` of another file, offers only its values, and a `(key)` enum only
+its keys, which are its values. Snippet clients also get a function literal labelled like
+`function(source)`, with the filter text `function`, when the argument takes a function. Values come from every signature that
 the arguments before it fit, with `nil` after those of all of them, and the function's parameters
 from the signature they fit best, so
 `OnAction("playerUnloaded", ` picks the `@overload` that lists `"playerUnloaded"`. Signatures that
 fit equally well each get an item. `(` and `,` are completion trigger characters for these items
 only: a request whose `context.triggerCharacter` is `(` or `,` returns nothing else, leaves out
-the values of a parameter that lists no string or integer, as the many `boolean` parameters do,
-and returns `null` where nothing is left and the argument takes no function. Inside a string
-argument, the string values replace the string's contents.
+the values of a parameter that lists no enum member, string or integer, as the many `boolean`
+parameters do, and returns `null` where nothing is left and the argument takes no function. Inside
+a string argument, the string values replace the string's contents.
 
 Where another value starts, right after an `=`, `==`, `~=` or `return` on its line, completion
-offers the values that its type lists in the same way, and snippet clients get the function
-literal where a function is stored or returned, though not where one is compared. The type is the
+offers the enum members and values that its type lists in the same way, and snippet clients get
+the function literal where a function is stored or returned, though not where one is compared. The type is the
 `---@type` above the `local` or assignment, what the assigned local or class field is declared as,
 the `@field` that a table typed as a class sets, the `@return` of the function, or what the other
 side of the comparison is declared as. A local typed by `---@type` or `@param` keeps that type

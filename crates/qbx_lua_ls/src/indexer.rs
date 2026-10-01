@@ -12,8 +12,8 @@ use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
 
 use crate::callback_wrappers::Wrapper;
 use crate::index::{
-    AliasDef, ClassDef, Element, EventDef, EventFamily, EventKind, FileId, FileIndex, Index, Member, NuiCallbackDef,
-    Symbol, SymbolKind,
+    AliasDef, ClassDef, Element, EnumTable, EventDef, EventFamily, EventKind, FileId, FileIndex, Index, Member,
+    NuiCallbackDef, Symbol, SymbolKind,
 };
 use crate::infer::{table_elements, table_fields, FileContext, Infer};
 use crate::luacats::{parse_doc_lines, DocGroup};
@@ -238,6 +238,7 @@ impl<'a> Indexer<'a> {
                 range,
                 side: alias.side,
                 values: alias.values,
+                table: None,
             });
         }
     }
@@ -311,7 +312,8 @@ impl<'a> Indexer<'a> {
                     let fields = table_fields(expr).unwrap_or_default();
                     kind = SymbolKind::Table;
                     if let Some(enum_name) = &doc.enum_name {
-                        self.enum_class(enum_name.clone(), doc.enum_keys, doc.enum_side, fields, name.span);
+                        let (keys, side) = (doc.enum_keys, doc.enum_side);
+                        self.enum_class(enum_name.clone(), keys, side, fields, name.span, nested_owner);
                     }
                     self.table_members(SmolStr::new(nested_owner), fields, table_depth + 1);
                     Type::GlobalTable(SmolStr::new(nested_owner))
@@ -351,18 +353,35 @@ impl<'a> Indexer<'a> {
         (is_literal && text.len() <= 48 && !text.contains('\n')).then(|| SmolStr::new(text))
     }
 
-    fn enum_class(&mut self, name: SmolStr, keys: bool, side: Option<Side>, fields: &[TableField], span: Span) {
-        let values: Vec<Type> = fields
-            .iter()
-            .filter_map(|f| match f {
-                TableField::Named { name: key, .. } if keys => Some(Type::StringLit(key.text.clone())),
-                TableField::Keyed { key, .. } if keys => Some(self.infer.expr(key)),
-                TableField::Named { value, .. } | TableField::Keyed { value, .. } => Some(self.infer.expr(value)),
-                _ => None,
-            })
-            .collect();
+    /// Declares the alias of an `---@enum` above a table constructor whose fields are indexed under
+    /// `owner`: the union of its values, or with `keys` of its keys.
+    fn enum_class(
+        &mut self,
+        name: SmolStr,
+        keys: bool,
+        side: Option<Side>,
+        fields: &[TableField],
+        span: Span,
+        owner: &str,
+    ) {
+        let mut members = Vec::new();
+        for field in fields {
+            let (key, value) = match field {
+                TableField::Named { name: key, value } => (Type::StringLit(key.text.clone()), value),
+                TableField::Keyed { key, value } => (self.infer.expr(key), value),
+                _ => continue,
+            };
+            let value = if keys { None } else { Some(self.infer.expr(value)) };
+            members.push((key, value));
+        }
+        let values = members.iter().map(|(key, value)| value.clone().unwrap_or_else(|| key.clone()));
+        let ty = Type::union(values);
+        let table = (!keys).then(|| {
+            let members = members.into_iter().filter_map(|(key, value)| Some((key, value?))).collect();
+            Arc::new(EnumTable { owner: SmolStr::new(owner), members })
+        });
         let range = self.range(span);
-        self.out.aliases.push(AliasDef { name, ty: Type::union(values), doc: None, range, side, values: Vec::new() });
+        self.out.aliases.push(AliasDef { name, ty, doc: None, range, side, values: Vec::new(), table });
     }
 
     fn push_element(&mut self, owner: SmolStr, key: Option<Type>, value: Type) {
@@ -432,13 +451,8 @@ impl<'a> Indexer<'a> {
                                 None => self.ctx.local_owner_key(name.name.span.start),
                             };
                             if let Some(enum_name) = &doc.enum_name {
-                                self.enum_class(
-                                    enum_name.clone(),
-                                    doc.enum_keys,
-                                    doc.enum_side,
-                                    fields,
-                                    name.name.span,
-                                );
+                                let (keys, side) = (doc.enum_keys, doc.enum_side);
+                                self.enum_class(enum_name.clone(), keys, side, fields, name.name.span, &owner);
                             }
                             self.table_members(owner, fields, 1);
                         }
@@ -634,10 +648,10 @@ impl<'a> Indexer<'a> {
             Some(fields) => {
                 // `---@enum Name` above `return { ... }` declares the enum a module exports.
                 let doc = self.ctx.doc_at(stmt_start);
-                if let Some(enum_name) = &doc.enum_name {
-                    self.enum_class(enum_name.clone(), doc.enum_keys, doc.enum_side, fields, first.span);
-                }
                 let owner = SmolStr::new(format!("%mod{}", self.file));
+                if let Some(enum_name) = &doc.enum_name {
+                    self.enum_class(enum_name.clone(), doc.enum_keys, doc.enum_side, fields, first.span, &owner);
+                }
                 self.table_members(owner.clone(), fields, 1);
                 Type::GlobalTable(owner)
             }

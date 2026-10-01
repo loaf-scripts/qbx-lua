@@ -26,7 +26,8 @@ Available features depend on the editor's LSP client.
   an argument takes one. Call snippets stop in the quotes of listed strings, and end after a value
   that picks an overload, so the handler written next matches it. The `# description` of a value
   on a `---|` line under an `@alias` or `@param` comes with it. Hovers of the alias, or of the
-  function for its `@param`s and `@return`s, list the described values.
+  function for its `@param`s and `@return`s, list the described values. The members of an
+  `---@enum` come before its values, written as the code reaches its table, like `Colors.Red`.
 - The same values where a value of such a type, like `"busy"|"ready"`, `1|2|3` or `boolean`, is
   assigned, set as a field of a class, returned or compared with `==` or `~=`, and the function
   literal where a function is assigned or returned. They open on the space typed after the `=`,

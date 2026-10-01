@@ -124,6 +124,17 @@ pub struct AliasDef {
     pub side: Option<Side>,
     /// The values that the `---|` lines under `@alias` list, with their descriptions.
     pub values: Vec<DescribedValue>,
+    /// The table an `@enum` declares, unless it is a `(key)` enum, whose values are the keys.
+    pub table: Option<Arc<EnumTable>>,
+}
+
+/// The table an `---@enum` annotation declares.
+#[derive(Debug)]
+pub struct EnumTable {
+    /// The owner its fields are indexed under, which the type of a name that holds it names.
+    pub owner: SmolStr,
+    /// The key of each field it is written with, and the value, in declaration order.
+    pub members: Vec<(Type, Type)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

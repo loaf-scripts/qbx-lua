@@ -21,7 +21,7 @@ use super::visibility::Scope;
 use super::{lua_block, markdown, with_infer};
 use crate::callback_wrappers::{families, takes_function, Wrapper};
 use crate::document::Document;
-use crate::index::{EventFamily, EventKind, FileOrigin, SymbolKind};
+use crate::index::{EnumTable, EventFamily, EventKind, FileOrigin, SymbolKind};
 use crate::infer::{native_fun_type, Infer, MemberInfo};
 use crate::locate::{locate, string_content_span};
 use crate::types::{CallbackRole, DescribedValue, FunType, Param, Type};
@@ -411,6 +411,12 @@ fn is_identifier(text: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Whether code may write `text` after a `.`: an identifier that is no keyword, unlike the `nil` of
+/// `Types['nil']`.
+fn is_name(text: &str) -> bool {
+    is_identifier(text) && !KEYWORDS.contains(&text)
+}
+
 fn identifier_prefix(before: &str) -> &str {
     let start = before.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).map_or(0, |i| i + 1);
     &before[start..]
@@ -567,11 +573,24 @@ fn argument_items(
     let signatures = infer.open_call_signatures(&fun, args, via_method, site.base.span.start);
     let name = callee_name(site.base, site.method);
     let mut literals = argument_literals(infer, &signatures, argument, via_method, &name);
-    if typed && !literals.iter().any(|literal| matches!(literal.value, Type::StringLit(_) | Type::IntLit(_))) {
+    let mut members: Vec<EnumMember> = Vec::new();
+    for (signature, _) in &signatures {
+        let Some(param) = param_for_argument(signature, argument, via_method) else { continue };
+        for member in enum_members(infer, doc, &param.ty, offset, quote) {
+            if !members.iter().any(|known| known.written == member.written) {
+                members.push(member);
+            }
+        }
+    }
+    let lists = !members.is_empty()
+        || literals.iter().any(|literal| matches!(literal.value, Type::StringLit(_) | Type::IntLit(_)));
+    if typed && !lists {
         literals.clear();
     }
     let mut items: Vec<CompletionItem> =
-        literals.iter().enumerate().map(|(i, literal)| literal.written_item(i, quote, space)).collect();
+        members.iter().enumerate().map(|(i, member)| member.written_item(i, space)).collect();
+    let listed = literals.iter().enumerate();
+    items.extend(listed.map(|(i, literal)| literal.written_item(members.len() + i, quote, space)));
     if !snippets {
         return items;
     }
@@ -637,9 +656,12 @@ fn value_items(
     let space = if typed.len() == head.len() { " " } else { "" };
     with_infer(ws, doc, |infer| {
         let Some(expected) = expected_type(infer, &doc.chunk, Place::After(at)) else { return Vec::new() };
+        let members = enum_members(infer, doc, &expected.ty, offset, quote);
         let values = listed_values(infer, &expected.ty, &expected.values);
         let mut items: Vec<CompletionItem> =
-            values.iter().enumerate().map(|(i, value)| value.written_item(i, quote, space)).collect();
+            members.iter().enumerate().map(|(i, member)| member.written_item(i, space)).collect();
+        let listed = values.iter().enumerate();
+        items.extend(listed.map(|(i, value)| value.written_item(members.len() + i, quote, space)));
         if snippets && !expected.compared {
             let ty = infer.resolve_alias(&expected.ty.without_nil());
             items.extend(function_literal_item(&ty, &expected.ty.to_string(), space));
@@ -1024,6 +1046,101 @@ fn alias_value_description(infer: &Infer, ty: &Type, value: &Type, depth: u32) -
 fn described(values: &[DescribedValue], value: &Type) -> Option<String> {
     let listed = values.iter().find(|listed| listed.value == *value && !listed.description.is_empty());
     listed.map(|listed| listed.description.clone())
+}
+
+/// A field of the table of an `---@enum`, written as the code reaches it, like `Colors.Red`.
+struct EnumMember {
+    written: String,
+    value: Type,
+}
+
+impl EnumMember {
+    /// The item for the `index`th member, written after `space`. Members come before the values.
+    fn written_item(&self, index: usize, space: &str) -> CompletionItem {
+        let mut out = item(&self.written, CompletionItemKind::ENUM_MEMBER, 0);
+        out.sort_text = Some(format!("{index:04}"));
+        out.detail = Some(self.value.to_string());
+        out.filter_text = Some(self.written.clone());
+        out.insert_text = Some(format!("{space}{}", self.written));
+        out
+    }
+}
+
+/// The fields of the tables of the `---@enum`s that `ty` names, through unions and aliases, as the
+/// code at `offset` reaches them: `Colors.Red` for `---@enum Color` above `local Colors = { Red = 1 }`.
+/// A table that no name in scope holds, such as a local of another file, gives none, and neither
+/// does a `(key)` enum, whose values are its keys.
+fn enum_members(infer: &Infer, doc: &Document, ty: &Type, offset: u32, quote: char) -> Vec<EnumMember> {
+    let mut tables = Vec::new();
+    enum_tables(infer, ty, &mut tables, 0);
+    let mut out = Vec::new();
+    for table in tables {
+        let Some(path) = path_to_table(infer, doc, &table.owner, offset) else { continue };
+        for (key, value) in &table.members {
+            let written = match key {
+                Type::StringLit(name) if is_name(name) => format!("{path}.{name}"),
+                Type::StringLit(name) => format!("{path}[{quote}{}{quote}]", escaped_string(name, quote)),
+                Type::IntLit(_) | Type::BooleanLit(_) => format!("{path}[{key}]"),
+                _ => continue,
+            };
+            out.push(EnumMember { written, value: value.clone() });
+        }
+    }
+    out
+}
+
+fn enum_tables(infer: &Infer, ty: &Type, out: &mut Vec<Arc<EnumTable>>, depth: u32) {
+    if depth > 8 {
+        return;
+    }
+    match ty {
+        Type::Union(types) => types.iter().for_each(|part| enum_tables(infer, part, out, depth + 1)),
+        Type::Named(name, _) => {
+            // The enums the file sees, as for the names of classes: another resource's `---@enum`
+            // of the same name is another table.
+            let classes = Classes::new(infer);
+            if !classes.class_defs(name, infer.ctx.file).is_empty() {
+                return;
+            }
+            for (_, alias) in classes.alias_defs(name, infer.ctx.file) {
+                match &alias.table {
+                    Some(table) if !out.iter().any(|known| known.owner == table.owner) => out.push(table.clone()),
+                    Some(_) => {}
+                    None => enum_tables(infer, &alias.ty, out, depth + 1),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// How the code at `offset` reaches the table whose fields are indexed under `owner`: a global path
+/// that no local hides and the file sees, like `Colors` or `Config.Colors`, or a local in scope that
+/// holds the table or one that contains it, like `Jobs` after `local Jobs = require 'shared.jobs'`.
+/// A global of another resource or of the other side is no path, since `undefined-global` reports it.
+fn path_to_table(infer: &Infer, doc: &Document, owner: &str, offset: u32) -> Option<String> {
+    let table = Type::GlobalTable(SmolStr::new(owner));
+    let root = owner.split('.').next().unwrap_or_default();
+    let global = !owner.starts_with('%')
+        && doc.resolution.lookup_local_at(root, offset).is_none()
+        && !infer.index.globals_named(root, doc.file).is_empty();
+    if global && type_of_path(infer, owner, offset) == table {
+        return Some(owner.to_string());
+    }
+    let mut locals: Vec<_> = doc.resolution.locals_visible_at(offset).collect();
+    locals.sort_by_key(|(_, local)| std::cmp::Reverse(local.visible_from));
+    let mut seen = FxHashSet::default();
+    for (id, local) in locals {
+        if local.name.is_empty() || !seen.insert(local.name.clone()) {
+            continue;
+        }
+        let Type::GlobalTable(held) = infer.resolve_alias(&infer.local_type_at(id, offset)) else { continue };
+        let Some(rest) = owner.strip_prefix(held.as_str()) else { continue };
+        if rest.is_empty() || (rest.starts_with('.') && rest[1..].split('.').all(is_name)) {
+            return Some(format!("{}{rest}", local.name));
+        }
+    }
+    None
 }
 
 /// The values that the parameter of the argument at `arg_index` lists in `signatures`, in the

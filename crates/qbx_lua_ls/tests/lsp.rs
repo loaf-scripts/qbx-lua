@@ -6818,6 +6818,148 @@ function SetMode(mode) end
 }
 
 #[test]
+fn enum_members_come_before_their_values_where_the_table_is_reachable() {
+    let mut client = Client::start(fixture_root());
+    let defs = "\
+---@enum Color
+Colors = { Red = 1, Green = 2, ['Dark Blue'] = 3 }
+
+---@enum (key) Key
+Keys = { Alpha = 1, Beta = 2 }
+
+---@enum (server) Job
+Jobs = { Police = 'police' }
+
+---@enum Size
+local Sizes = { Small = 1 }
+print(Sizes)
+
+---@class Car
+---@field color Color
+
+---@param color Color
+function Paint(color) end
+
+---@param key Key
+function Press(key) end
+
+---@param job Job
+function Hire(job) end
+
+---@param size Size
+function Resize(size) end
+
+---@param weather Weather
+function Forecast(weather) end
+";
+    client.open_with("myresource/shared/config.lua", defs);
+    client.open_with("myresource/modules/weather.lua", "---@enum Weather\nreturn { Sun = 'sun', Rain = 'rain' }\n");
+    // `|` marks the cursor; `trigger` is the character typed to ask for completions. The listed items
+    // come back in the order their `sortText` gives, as label and inserted text.
+    let mut values = |file: &str, typed: &str, trigger: Option<&str>| -> Vec<(String, String)> {
+        let (line, column) = pos(typed, "|", 0);
+        client.open_with(file, &typed.replace('|', ""));
+        let mut params = client.position_params(file, line, column);
+        if let Some(trigger) = trigger {
+            params["context"] = json!({ "triggerKind": 2, "triggerCharacter": trigger });
+        }
+        let result = client.request("textDocument/completion", params);
+        let mut items = result["items"].as_array().cloned().unwrap_or_default();
+        items.retain(|item| {
+            let sort = item["sortText"].as_str().unwrap_or_default();
+            sort.len() == 4 && sort.bytes().all(|b| b.is_ascii_digit())
+        });
+        items.sort_by_key(|item| item["sortText"].as_str().unwrap_or_default().to_string());
+        let written = |item: &Value| item["insertText"].as_str().unwrap_or_default().to_string();
+        items.iter().map(|item| (item["label"].as_str().unwrap().to_string(), written(item))).collect()
+    };
+    let listed = |values: &[&str], space: &str| -> Vec<(String, String)> {
+        values.iter().map(|value| (value.to_string(), format!("{space}{value}"))).collect()
+    };
+    let colors = ["Colors.Red", "Colors.Green", "Colors['Dark Blue']", "1", "2", "3"];
+
+    // Where a value of the enum's type starts: an argument, a `---@type` local, a field of a class,
+    // a `return` and a comparison.
+    assert_eq!(values(CLIENT, "Paint(|)", Some("(")), listed(&colors, ""));
+    assert_eq!(values(CLIENT, "---@type Color\nlocal color =|", None), listed(&colors, " "));
+    assert_eq!(values(CLIENT, "---@type Color\nlocal color = |", Some(" ")), listed(&colors, ""));
+    assert_eq!(values(CLIENT, "---@type Car\nlocal car = { color = | }", None), listed(&colors, ""));
+    assert_eq!(values(CLIENT, "---@type Car\nlocal car\ncar.color = |", None), listed(&colors, ""));
+    assert_eq!(values(CLIENT, "---@return Color\nlocal function pick()\n\treturn |\nend", None), listed(&colors, ""));
+    let compared = "---@type Color\nlocal color = Colors.Red\nif color == | then end";
+    assert_eq!(values(CLIENT, compared, Some(" ")), listed(&colors, ""));
+
+    // The members are written as the code reaches the table: a local of this file, one that holds a
+    // module's table or contains the table, but not a local of another file or a hidden global.
+    let speeds = "---@enum Speed\nlocal Speeds = { Slow = 1 }\n---@param speed Speed\nlocal function go(speed) end\n";
+    assert_eq!(values(CLIENT, &format!("{speeds}go(|)"), Some("(")), listed(&["Speeds.Slow", "1"], ""));
+    let modes = "local Config = {}\n---@enum Mode\nConfig.Modes = { On = 1 }\n---@param mode Mode\nlocal function set(mode) end\n";
+    assert_eq!(values(CLIENT, &format!("{modes}set(|)"), Some("(")), listed(&["Config.Modes.On", "1"], ""));
+    let weather = "local Weather = require 'modules.weather'\nForecast(|)";
+    assert_eq!(values(CLIENT, weather, Some("(")), listed(&["Weather.Sun", "Weather.Rain", "'sun'", "'rain'"], ""));
+    assert_eq!(values(CLIENT, "Resize(|)", Some("(")), listed(&["1"], ""));
+    assert_eq!(values(CLIENT, "local Colors = 5\nPaint(|)", Some("(")), listed(&["1", "2", "3"], ""));
+
+    // A `(key)` enum lists its keys, which are its values, and a `(server)` one only on that side.
+    assert_eq!(values(CLIENT, "Press(|)", Some("(")), listed(&["'Alpha'", "'Beta'"], ""));
+    assert_eq!(values(SERVER, "Hire(|)", Some("(")), listed(&["Jobs.Police", "'police'"], ""));
+    assert_eq!(values(CLIENT, "Hire(|)", Some("(")), Vec::new());
+
+    // Members are enum members that show their value.
+    let (line, column) = pos("Paint(|)", "|", 0);
+    client.open_with(CLIENT, "Paint()");
+    let result = client.request("textDocument/completion", client.position_params(CLIENT, line, column));
+    let red = result["items"].as_array().unwrap().iter().find(|item| item["label"] == "Colors.Red").cloned();
+    assert_eq!(red.map(|item| (item["kind"].clone(), item["detail"].clone())), Some((json!(20), json!("1"))));
+}
+
+#[test]
+fn enum_members_are_written_through_globals_the_file_sees_and_brackets_for_keywords() {
+    let mut client = Client::start(fixture_root());
+    client.open_with("shop/shared.lua", "---@enum Test.Group\nGroups = { Job = 'job' }\n");
+    let defs = "\
+---@enum Test.Kind
+Kinds = { ['nil'] = 'nil', ['end'] = 'end', ok = 'ok' }
+
+---@param group Test.Group
+function Join(group) end
+
+---@param grade Test.Grade
+function Promote(grade) end
+
+---@param kind Test.Kind
+function Sort(kind) end
+";
+    client.open_with("myresource/shared/config.lua", defs);
+    // `|` marks the cursor of a completion that `(` asks for; the listed items come back as the text
+    // they insert, in the order their `sortText` gives.
+    let mut values = |file: &str, typed: &str| -> Vec<String> {
+        let (line, column) = pos(typed, "|", 0);
+        client.open_with(file, &typed.replace('|', ""));
+        let mut params = client.position_params(file, line, column);
+        params["context"] = json!({ "triggerKind": 2, "triggerCharacter": "(" });
+        let result = client.request("textDocument/completion", params);
+        let mut items = result["items"].as_array().cloned().unwrap_or_default();
+        items.retain(|item| {
+            let sort = item["sortText"].as_str().unwrap_or_default();
+            sort.len() == 4 && sort.bytes().all(|b| b.is_ascii_digit())
+        });
+        items.sort_by_key(|item| item["sortText"].as_str().unwrap_or_default().to_string());
+        items.iter().map(|item| item["insertText"].as_str().unwrap_or_default().to_string()).collect()
+    };
+
+    // The global table of an enum that another resource, or a script of the other side, declares is
+    // undefined here, so only its values are listed.
+    assert_eq!(values(CLIENT, "Join(|)"), ["'job'"]);
+    let grades = "---@enum Test.Grade\nGrades = { Boss = 'boss' }\nPromote(|)";
+    assert_eq!(values(SERVER, grades), ["Grades.Boss", "'boss'"]);
+    assert_eq!(values(CLIENT, "Promote(|)"), ["'boss'"]);
+
+    // A key that is a keyword cannot follow a `.`.
+    assert_eq!(values(CLIENT, "Sort(|)"), ["Kinds['nil']", "Kinds['end']", "Kinds.ok", "'nil'", "'end'", "'ok'"]);
+}
+
+#[test]
 fn call_snippets_leave_listed_values_to_the_list() {
     let defs = "\
 ---@alias Actions \"playerLoaded\"|\"playerUnloaded\"|string
