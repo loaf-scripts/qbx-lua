@@ -351,7 +351,7 @@ impl<'a> Indexer<'a> {
     ) -> Symbol {
         let doc = self.ctx.doc_at(doc_anchor);
         let mut kind = SymbolKind::Variable;
-        let ty = if let Some(class) = doc.classes.last() {
+        let ty = if let Some(class) = doc.declared_class() {
             if let Some(fields) = value.and_then(table_fields) {
                 self.table_members(class.name.clone(), fields, table_depth + 1);
             }
@@ -568,7 +568,7 @@ impl<'a> Indexer<'a> {
                     for (i, name) in names.iter().enumerate() {
                         if let Some(fields) = exprs.get(i).and_then(table_fields) {
                             let doc = self.ctx.doc_at(stmt.span.start);
-                            let owner = match doc.classes.last() {
+                            let owner = match doc.declared_class() {
                                 Some(class) => class.name.clone(),
                                 None => {
                                     let owner = self.ctx.local_owner_key(name.name.span.start);

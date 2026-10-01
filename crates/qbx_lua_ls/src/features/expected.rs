@@ -196,7 +196,7 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
                 if let Some(index) = exprs.iter().position(|expr| self.is_value(expr)) {
                     let doc = self.infer.ctx.doc_at(stmt.span.start);
                     // `---@class Name` above a table declares the class rather than an instance of it.
-                    if doc.classes.is_empty() {
+                    if doc.declared_class().is_none() {
                         let values = doc.type_values_at(index).to_vec();
                         self.found = doc.type_at(index).map(|ty| ExpectedValue::stored(ty.clone(), values));
                     }

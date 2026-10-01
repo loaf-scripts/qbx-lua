@@ -2943,6 +2943,71 @@ local account = { name = 'Ann' }
     assert_eq!(missing(&mut client, SERVER), [5]);
 }
 
+#[test]
+fn a_type_below_the_class_types_the_table_as_a_value_of_it() {
+    let mut client = Client::start(fixture_root());
+    // LuaLS binds a `---@type` that follows the `---@class` to the statement, and the class to
+    // nothing. In the other order the class still declares the table.
+    let text = "\
+---@class Test.Secret
+---@field shown integer
+---@field hidden string
+---@type Test.Secret
+local secret = { shown = 'one' }
+secret = 5
+
+---@class Test.GlobalSecret
+---@field shown integer
+---@type Test.GlobalSecret
+TestGlobalSecret = {}
+
+---@class Test.Shape
+---@type Test.Secret
+local shaped = { shown = 1, hidden = 'x' }
+
+---@type Test.Secret
+---@class Test.Declared
+---@field name string
+local declared = {}
+declared = 5
+
+---@class Test.Handlers
+---@field onCount fun(count: integer)
+---@type Test.Handlers
+local handlers = { onCount = function(count) end }
+print(secret, shaped, declared, handlers)
+";
+    client.open_with(CLIENT, text);
+    client.diagnostics_for(CLIENT);
+    let uri = client.uri(CLIENT).to_string();
+    let mut found: Vec<(u64, String)> = client.diagnostics[&uri]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == "missing-fields" || d["code"] == "assign-type-mismatch")
+        .map(|d| (d["range"]["start"]["line"].as_u64().unwrap(), d["message"].as_str().unwrap().into()))
+        .collect();
+    found.sort();
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        found,
+        [
+            (line("local secret"), "Cannot assign `string` to field `shown` of type `integer`".into()),
+            (line("local secret"), "Missing required fields in type `Test.Secret`: `hidden`".into()),
+            (line("secret = 5"), "Cannot assign `integer` to `secret` of type `Test.Secret`".into()),
+            (line("TestGlobalSecret = {}"), "Missing required fields in type `Test.GlobalSecret`: `shown`".into()),
+        ]
+    );
+    let (l, c) = pos(text, "shaped =", 0);
+    assert!(client.hover_text(CLIENT, l, c).contains("local shaped: Test.Secret"));
+    let (l, c) = pos(text, "declared =", 0);
+    assert!(client.hover_text(CLIENT, l, c).contains("local declared: Test.Declared"));
+    // The functions such a table holds take the parameters its fields declare.
+    let (l, c) = pos(text, "count) end", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("count: integer"), "{hover}");
+}
+
 /// The `undeclared-field` findings of `file` as (line, message), in source order.
 fn undeclared_fields(client: &mut Client, file: &str) -> Vec<(u64, String)> {
     client.diagnostics_for(file);
@@ -3044,6 +3109,37 @@ print(abc, loose, child, open, pair)
             (line("self.cache"), message("cache", "Test.Strict")),
         ],
         "fields and methods set on the class table count as declared, fields set through values of it do not"
+    );
+}
+
+#[test]
+fn strict_classes_check_a_table_typed_below_the_class() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class (strict) Test.StrictSecret
+---@field shown integer
+---@type Test.StrictSecret
+local secret = { shown = 1, other = true }
+secret.extra = 1
+function secret:reveal() end
+
+---@type Test.StrictSecret
+local another = { shown = 2 }
+another.extra = 2
+print(secret, another)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let message = |field: &str| format!("Field `{field}` is not declared in strict class `Test.StrictSecret`");
+    assert_eq!(
+        undeclared_fields(&mut client, CLIENT),
+        [
+            (line("other = true"), message("other")),
+            (line("secret.extra"), message("extra")),
+            (line("secret:reveal"), message("reveal")),
+            (line("another.extra"), message("extra")),
+        ],
+        "`secret` is a value of the class, so what it is given declares nothing"
     );
 }
 
@@ -3280,6 +3376,37 @@ print(outside, s.|)
             ("missing-fields", 19, "Missing required fields in type `Test.Account`: `balance`, `owner`"),
         ],
         "a private field is required wherever a table of the class is built, as in LuaLS"
+    );
+}
+
+#[test]
+fn a_type_above_a_class_leaves_its_table_the_class_table() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type table
+---@class Probe.Vault
+---@field private key string
+local Vault = {
+    ---@param vault Probe.Vault
+    read = function(vault) return vault.key end,
+}
+print(Vault.key)
+
+---@class Probe.Safe
+---@field private code string
+---@type Probe.Safe
+local safe = { code = 'x' }
+print(safe.code)
+";
+    client.open_with(CLIENT, text);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["invisible"]),
+        [(
+            "invisible".to_string(),
+            pos(text, "print(safe.code)", 0).0 as u64,
+            "Field `code` is private, it can only be accessed in class `Probe.Safe`".to_string()
+        )],
+        "a `@type` above the `@class` keeps the table and its functions those of the class; one below types a value"
     );
 }
 

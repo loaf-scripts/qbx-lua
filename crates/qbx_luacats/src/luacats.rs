@@ -119,6 +119,8 @@ pub struct DocGroup {
     /// The values that the `---|` lines under `@type` list for its last type, with their
     /// descriptions.
     pub type_values: Vec<DescribedValue>,
+    /// Index of the doc line of `@type`.
+    pub ty_line: usize,
     pub enum_name: Option<SmolStr>,
     pub enum_keys: bool,
     pub enum_side: Option<Side>,
@@ -137,6 +139,17 @@ pub struct DocGroup {
 impl DocGroup {
     pub fn has_function_tags(&self) -> bool {
         !self.params.is_empty() || !self.returns.is_empty() || !self.overloads.is_empty()
+    }
+
+    /// The class whose table the statement below is: the last `@class`, unless a `@type` line
+    /// follows it. LuaLS then binds the `@type` to the statement and the `@class` to nothing, so
+    /// `local s = {}` below `---@class Secret` `---@type Secret` is a value of the class.
+    pub fn declared_class(&self) -> Option<&DocClass> {
+        let class = self.classes.last()?;
+        match self.ty {
+            Some(_) if self.ty_line > class.line => None,
+            _ => Some(class),
+        }
     }
 
     /// The `@type` of the name at `index` of the statement below. A line that lists several types
@@ -493,6 +506,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                 group.ty = types.next();
                 group.ty_rest = types.collect();
                 listing = Some(Listing::Type);
+                group.ty_line = index;
             }
             "generic" => {
                 let names = rest.split(',').filter_map(|g| g.trim().split([':', ' ']).next()).filter(|g| !g.is_empty());
@@ -1157,6 +1171,15 @@ mod tests {
             ]
         );
         assert_eq!(doc.aliases[1].side, Some(Side::Server));
+    }
+
+    #[test]
+    fn a_type_after_the_class_types_the_statement_instead() {
+        let declared = |text: &str| parse(text).declared_class().map(|class| class.name.to_string());
+        assert_eq!(declared("---@class Secret\n---@field shown integer"), Some("Secret".into()));
+        assert_eq!(declared("---@class Secret\n---@field shown integer\n---@type Secret"), None);
+        assert_eq!(declared("---@type Other\n---@class Secret"), Some("Secret".into()));
+        assert_eq!(declared("---@type Other"), None);
     }
 
     #[test]

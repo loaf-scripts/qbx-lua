@@ -36,7 +36,7 @@ impl Finder<'_, '_> {
     /// declares the class rather than a value of it.
     fn stmt_type(&self, stmt: &Stmt, index: usize) -> Option<Type> {
         let doc = self.infer.ctx.doc_at(stmt.span.start);
-        doc.type_at(index).filter(|_| doc.classes.is_empty()).cloned()
+        doc.type_at(index).filter(|_| doc.declared_class().is_none()).cloned()
     }
 
     /// The type a local is declared with: the `---@type` above its `local` statement, or its

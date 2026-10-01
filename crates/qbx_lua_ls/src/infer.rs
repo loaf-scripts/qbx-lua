@@ -949,7 +949,7 @@ impl<'a> Infer<'a> {
     fn local_stmt_type(&self, stmt: &Stmt, index: usize, top_level: bool, reassigned: bool) -> Type {
         let StmtKind::Local { names, exprs, in_unpack } = &stmt.kind else { return Type::Unknown };
         let doc = self.ctx.doc_at(stmt.span.start);
-        if let Some(class) = doc.classes.last() {
+        if let Some(class) = doc.declared_class() {
             return own_type(&class.name, &class.generics);
         }
         if let Some(ty) = doc.type_at(index) {
@@ -1085,9 +1085,10 @@ impl<'a> Infer<'a> {
                 Some(substitute(param, &self.bind_generics(&fun, &args, via_method, false)))
             }
             Expected::Value { stmt, index } => {
-                // `---@class Name` above a table declares the class rather than a value of it.
+                // `---@class Name` above a table declares the class rather than a value of it,
+                // unless a `---@type` follows it.
                 let doc = self.ctx.doc_at(stmt.span.start);
-                doc.type_at(index).filter(|_| doc.classes.is_empty()).cloned()
+                doc.type_at(index).filter(|_| doc.declared_class().is_none()).cloned()
             }
             Expected::Field { table, key } => {
                 let at = self.ctx.tables.get(&table.span.start)?;
@@ -1141,7 +1142,7 @@ impl<'a> Infer<'a> {
     pub fn is_class_table(&self, name: &Name) -> bool {
         match self.ctx.resolution.resolve_at(name.span.start) {
             Some(Resolved::Local(id)) => match self.ctx.decl(self.ctx.resolution.local(id).decl.start) {
-                Some(Decl::Local { stmt, .. }) => !self.ctx.doc_at(stmt.span.start).classes.is_empty(),
+                Some(Decl::Local { stmt, .. }) => self.ctx.doc_at(stmt.span.start).declared_class().is_some(),
                 _ => false,
             },
             _ => self.index.globals_named(&name.text, self.ctx.file).iter().any(|(_, symbol)| symbol.is_class_table()),

@@ -14,7 +14,6 @@ use std::cell::OnceCell;
 use std::sync::Arc;
 
 use qbx_lua_analysis::project::relative_slash_path;
-use qbx_lua_analysis::scope::Resolved;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::lexer::TokenKind;
 use qbx_lua_syntax::visit::{self, Visitor};
@@ -23,7 +22,7 @@ use rustc_hash::FxHashSet;
 
 use super::class_tables::Classes;
 use crate::index::{ClassDef, FileId, SymbolKind};
-use crate::infer::{table_fields, Decl, Infer};
+use crate::infer::{table_fields, Infer};
 use crate::luacats::{applies_on, Visibility};
 use crate::types::Type;
 
@@ -197,21 +196,6 @@ impl<'a, 'b> Scope<'a, 'b> {
         parents.any(|(parent, file)| self.inherits(parent, file, ancestor, visited, depth + 1))
     }
 
-    /// Whether `name` is the table a `---@class` annotation declares. A `---@type` in the same doc
-    /// comment types the local instead, as LuaLS reads `---@class Secret` `---@type Secret` above
-    /// `local s = {}`.
-    fn is_class_table(&self, name: &Name) -> bool {
-        let resolution = self.infer.ctx.resolution;
-        let typed = match resolution.resolve_at(name.span.start) {
-            Some(Resolved::Local(id)) => match self.infer.ctx.decl(resolution.local(id).decl.start) {
-                Some(Decl::Local { stmt, .. }) => self.infer.ctx.doc_at(stmt.span.start).ty.is_some(),
-                _ => false,
-            },
-            _ => false,
-        };
-        !typed && self.infer.is_class_table(name)
-    }
-
     /// The class whose table `expr` is: a name or field that a `---@class` annotation declares, like
     /// `Secret` below `---@class Secret` `local Secret = {}`, or ox_lib's `lib.array`.
     fn class_table(&self, expr: &Expr) -> Option<SmolStr> {
@@ -221,7 +205,7 @@ impl<'a, 'b> Scope<'a, 'b> {
             member.is_some_and(|member| member.kind == SymbolKind::Table && matches!(member.ty, Type::Named(..)))
         };
         let is_table = match &expr.kind {
-            ExprKind::Name(name) => self.is_class_table(name),
+            ExprKind::Name(name) => self.infer.is_class_table(name),
             ExprKind::Field { base, name, .. } => declares(base, &name.text),
             ExprKind::Index { base, index, .. } => index.as_string().is_some_and(|key| declares(base, key)),
             _ => false,
@@ -244,7 +228,7 @@ impl<'a, 'b> Scope<'a, 'b> {
         let Some((last, parents)) = path.split_last() else {
             let owner = self.infer.func_name_owner_type(&func_name(&[]));
             let class = match owner.without_nil() {
-                Type::Named(class, _) if self.is_class_table(&name.base) => Some(class),
+                Type::Named(class, _) if self.infer.is_class_table(&name.base) => Some(class),
                 _ => None,
             };
             return (owner, class);
@@ -319,7 +303,7 @@ impl Methods<'_, '_, '_> {
     /// above the statement at `stmt_start` declares them.
     fn class_constructors(&mut self, stmt_start: u32, exprs: &[Expr]) {
         let doc = self.scope.infer.ctx.doc_at(stmt_start);
-        let Some(class) = doc.classes.last().filter(|_| doc.ty.is_none()) else { return };
+        let Some(class) = doc.declared_class() else { return };
         for fields in exprs.iter().filter_map(table_fields) {
             for field in fields {
                 let (TableField::Named { value, .. } | TableField::Keyed { value, .. }) = field else { continue };
