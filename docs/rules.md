@@ -40,6 +40,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `const-reassign` | error | An assignment to a `<const>` or `<close>` local. |
 | `self-assignment` | warning | A variable is assigned to itself. |
 | `self-comparison` | warning | A comparison has the same expression on both sides. |
+| `count-down-loop` | warning | A numeric `for` loop starts above its end without a negative step: a literal start above a literal end, with no step or a positive one, which never runs, or `#list, 1` or arithmetic on `#list` such as `#list - 1, 1`, with no step, which never runs once the start is above 1. Fix available. |
 | `impossible-comparison` | info | An `==` or `~=` compares values whose declared types share no value, such as a string with a number, or a literal with a type that does not list it, so it always gives the same answer. Comparisons with `nil` are not reported. Reported by qbx-lua-ls only. |
 | `lowercase-global` | warning | A global definition starts with a lowercase letter. |
 | `implicit-global` | warning | A function creates a global without a file-scope declaration. |

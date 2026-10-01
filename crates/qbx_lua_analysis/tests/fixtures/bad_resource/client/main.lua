@@ -35,3 +35,7 @@ RegisterNetEvent('bad:client', function(a, a)
 end)
 
 Notify('saved')
+
+for i = 3, 1 do
+    print(i)
+end

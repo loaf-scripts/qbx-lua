@@ -87,6 +87,7 @@ pub const NO_UNKNOWN: &str = "no-unknown";
 pub const CONST_REASSIGN: &str = "const-reassign";
 pub const SELF_ASSIGNMENT: &str = "self-assignment";
 pub const SELF_COMPARISON: &str = "self-comparison";
+pub const COUNT_DOWN_LOOP: &str = "count-down-loop";
 /// Reported by qbx-lua-ls, which infers the types; the linter itself has no type information.
 pub const IMPOSSIBLE_COMPARISON: &str = "impossible-comparison";
 pub const LOWERCASE_GLOBAL: &str = "lowercase-global";
@@ -150,6 +151,7 @@ pub static RULES: &[Rule] = &[
     rule(CONST_REASSIGN, Correctness, ERROR, false, "A <const> or <close> local is assigned to."),
     rule(SELF_ASSIGNMENT, Suspicious, WARN, false, "A variable is assigned to itself."),
     rule(SELF_COMPARISON, Suspicious, WARN, false, "Both sides of a comparison are the same expression."),
+    rule(COUNT_DOWN_LOOP, Suspicious, WARN, true, "A numeric for loop counts up from a start above its end, or from #list to 1, without a negative step."),
     rule(IMPOSSIBLE_COMPARISON, Suspicious, INFO, false, "Both sides of an == or ~= have types that share no value, so the comparison always gives the same answer (language server only)."),
     rule(LOWERCASE_GLOBAL, Suspicious, WARN, false, "A global with a lowercase first letter is defined; this is usually a missing 'local'."),
     rule(IMPLICIT_GLOBAL, Suspicious, WARN, false, "A global is created from inside a function and never declared at file scope."),

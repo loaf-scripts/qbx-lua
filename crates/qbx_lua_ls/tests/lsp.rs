@@ -5101,6 +5101,29 @@ fn code_actions_inlay_hints_tokens_and_folding() {
 }
 
 #[test]
+fn count_down_loops_get_a_negative_step_as_a_quick_fix() {
+    let mut client = Client::start(fixture_root());
+    let text = "local total = 0\nfor i = 3, 1 do total = total + i end\nprint(total)\n";
+    client.open_with(CLIENT, text);
+    let found = client.diagnostics_for(CLIENT);
+    assert_eq!(found, [("count-down-loop".to_string(), 1)], "{found:?}");
+    let uri = client.uri(CLIENT).to_string();
+    let diagnostics = client.diagnostics[&uri].clone();
+    let actions = client.request(
+        "textDocument/codeAction",
+        json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 0 } }, "context": { "diagnostics": diagnostics } }),
+    );
+    let fix =
+        actions.as_array().unwrap().iter().find(|a| a["title"] == "Count down with a step of -1").expect("quick fix");
+    let edit = &fix["edit"]["changes"][&uri][0];
+    assert_eq!(
+        (edit["range"]["start"]["line"].as_u64(), edit["range"]["start"]["character"].as_u64()),
+        (Some(1), Some(12))
+    );
+    assert_eq!(edit["newText"], ", -1");
+}
+
+#[test]
 fn survives_garbage_input_while_typing() {
     let mut client = Client::start(fixture_root());
     let text = client.open(CLIENT);

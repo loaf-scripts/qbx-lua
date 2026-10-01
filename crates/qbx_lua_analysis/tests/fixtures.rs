@@ -147,11 +147,12 @@ fn fixes_are_applied_and_converge() {
 
     let client = reports.iter().find(|r| r.path.ends_with("client/main.lua")).unwrap();
     let (fixed, applied) = apply_fixes(&client.source, &client.diagnostics);
-    assert_eq!(applied, 4);
+    assert_eq!(applied, 5);
     assert!(fixed.contains("\nCreateThread(function()\n    while true do\n        local ped = PlayerPedId()"));
     assert!(fixed.contains("local model = `adder`"));
     assert!(fixed.contains("        Wait(0)"));
     assert!(!fixed.contains("Citizen."));
+    assert!(fixed.contains("for i = 3, 1, -1 do"));
 
     let manifest = reports.iter().find(|r| r.path.ends_with("fxmanifest.lua")).unwrap();
     let (fixed, applied) = apply_fixes(&manifest.source, &manifest.diagnostics);

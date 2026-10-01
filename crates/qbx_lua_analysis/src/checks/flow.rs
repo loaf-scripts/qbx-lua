@@ -4,7 +4,7 @@ use qbx_lua_syntax::{NumberValue, Span};
 use rustc_hash::FxHashMap;
 
 use super::{FileInput, Sink};
-use crate::diagnostic::Tag;
+use crate::diagnostic::{Fix, Tag, TextEdit};
 use crate::rules;
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
@@ -95,6 +95,60 @@ impl Flow<'_, '_> {
             }
         }
     }
+
+    /// `count-down-loop`: `for i = 10, 1` never runs, and `for i = #list, 1` never runs once its start
+    /// is above 1. Both were meant to count down.
+    fn count_down(&mut self, start: &Expr, limit: &Expr, step: Option<&Expr>) {
+        let Some(last) = number(limit) else { return };
+        if step.is_some_and(|step| !number(step).is_some_and(|step| step > 0.0)) {
+            return;
+        }
+        let from_length = step.is_none() && last == 1.0 && starts_with_length(start);
+        if !from_length && !number(start).is_some_and(|first| first > last) {
+            return;
+        }
+        let source = self.input.source;
+        let text = |expr: &Expr| expr.span.text(source).split_whitespace().collect::<Vec<_>>().join(" ");
+        let (first, last) = (text(start), text(limit));
+        let (edit, negative) = match step {
+            Some(step) => {
+                let negative = format!("-{}", text(step));
+                (TextEdit { span: step.span, new_text: negative.clone() }, negative)
+            }
+            None => {
+                (TextEdit { span: Span::new(limit.span.end, limit.span.end), new_text: ", -1".into() }, "-1".into())
+            }
+        };
+        let message = if from_length {
+            format!("the loop counts up from {first} to 1, so it never runs when {first} is greater than 1; did you mean `{first}, 1, -1`?")
+        } else {
+            format!(
+                "the loop never runs: it counts up from {first} to {last}; did you mean `{first}, {last}, {negative}`?"
+            )
+        };
+        let fix = Fix { title: format!("Count down with a step of {negative}"), edits: vec![edit] };
+        let span = start.span.to(step.unwrap_or(limit).span);
+        self.sink.report_with(rules::COUNT_DOWN_LOOP, span, message, None, Some(fix));
+    }
+}
+
+/// The value of a numeric literal, negated or in parentheses.
+fn number(expr: &Expr) -> Option<f64> {
+    match &expr.unparen().kind {
+        ExprKind::Number(NumberValue::Int(value)) => Some(*value as f64),
+        ExprKind::Number(NumberValue::Float(value)) => Some(*value),
+        ExprKind::Unary { op: UnOp::Neg, expr } => number(expr).map(|value| -value),
+        _ => None,
+    }
+}
+
+/// `#list`, or arithmetic that starts with it, like `#list - 1`.
+fn starts_with_length(expr: &Expr) -> bool {
+    match &expr.unparen().kind {
+        ExprKind::Unary { op: UnOp::Len, .. } => true,
+        ExprKind::Binary { op: BinOp::Add | BinOp::Sub, lhs, .. } => starts_with_length(lhs),
+        _ => false,
+    }
 }
 
 fn same_place(a: &Expr, b: &Expr) -> bool {
@@ -133,9 +187,11 @@ impl<'ast> Visitor<'ast> for Flow<'_, '_> {
             StmtKind::Do(body) => self.empty_block(body, stmt.span, "do"),
             StmtKind::While { body, .. } => self.empty_block(body, stmt.span, "while"),
             StmtKind::Repeat { body, .. } => self.empty_block(body, stmt.span, "repeat"),
-            StmtKind::NumericFor { body, .. } | StmtKind::GenericFor { body, .. } => {
-                self.empty_block(body, stmt.span, "for")
+            StmtKind::NumericFor { start, limit, step, body, .. } => {
+                self.empty_block(body, stmt.span, "for");
+                self.count_down(start, limit, step.as_ref());
             }
+            StmtKind::GenericFor { body, .. } => self.empty_block(body, stmt.span, "for"),
             StmtKind::If { branches, else_block } => {
                 for (i, branch) in branches.iter().enumerate() {
                     let end = branches

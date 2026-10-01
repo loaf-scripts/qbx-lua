@@ -676,3 +676,85 @@ fn values_the_linter_cannot_follow_are_not_checked() {
         "a forward-declared local takes the function assigned to it"
     );
 }
+
+/// The findings of `code` in `source`, linted on its own, as `(line, message)`.
+fn findings(source: &str, code: &str) -> Vec<(u32, String)> {
+    let chunk = parse(source);
+    let resolution = resolve(&chunk);
+    let summary = summarize(source, &chunk, &resolution);
+    let config = FileConfig::default();
+    let input = FileInput {
+        source,
+        chunk: &chunk,
+        resolution: &resolution,
+        summary: &summary,
+        config: &config,
+        side: None,
+        resource: None,
+        crossrefs: None,
+        locale: None,
+        relative_path: "",
+    };
+    let lines = qbx_lua_syntax::LineIndex::new(source);
+    check_file(&input)
+        .into_iter()
+        .filter(|d| d.code == code)
+        .map(|d| (lines.line_of(d.span.start) + 1, d.message))
+        .collect()
+}
+
+fn reported_lines(source: &str, code: &str) -> Vec<u32> {
+    findings(source, code).into_iter().map(|(line, _)| line).collect()
+}
+
+#[test]
+fn loops_that_count_up_past_their_end() {
+    let source = "local t, n, step = {}, 5, 2
+for i = 10, 1 do print(i) end
+for i = 10, 1, 2 do print(i) end
+for i = -1, -10 do print(i) end
+for i = (3), 1.5 do print(i) end
+for i = #t, 1 do print(i) end
+for i = #t - 1, 1 do print(i) end
+for i = 10, 1, -1 do print(i) end
+for i = 1, 10 do print(i) end
+for i = 1, 1 do print(i) end
+for i = n, 1 do print(i) end
+for i = #t, 0 do print(i) end
+for i = #t, 1, -1 do print(i) end
+for i = 10, 1, step do print(i) end
+for i = 10, n do print(i) end";
+    assert_eq!(reported_lines(source, "count-down-loop"), [2, 3, 4, 5, 6, 7]);
+    assert_eq!(
+        findings("for i = 10, 1 do print(i) end", "count-down-loop")[0].1,
+        "the loop never runs: it counts up from 10 to 1; did you mean `10, 1, -1`?"
+    );
+    // `#t - 1, 1` still runs for two items or fewer, so the message names no number of items.
+    assert_eq!(
+        findings("local t = {}\nfor i = #t - 1, 1 do print(i) end", "count-down-loop")[0].1,
+        "the loop counts up from #t - 1 to 1, so it never runs when #t - 1 is greater than 1; did you mean `#t - 1, 1, -1`?"
+    );
+
+    let fixed = |source: &str| {
+        let chunk = parse(source);
+        let resolution = resolve(&chunk);
+        let summary = summarize(source, &chunk, &resolution);
+        let config = FileConfig::default();
+        let input = FileInput {
+            source,
+            chunk: &chunk,
+            resolution: &resolution,
+            summary: &summary,
+            config: &config,
+            side: None,
+            resource: None,
+            crossrefs: None,
+            locale: None,
+            relative_path: "",
+        };
+        qbx_lua_analysis::apply_fixes(source, &check_file(&input)).0
+    };
+    assert_eq!(fixed("for i = 10, 1 do print(i) end"), "for i = 10, 1, -1 do print(i) end");
+    assert_eq!(fixed("for i = 10, 1, 2 do print(i) end"), "for i = 10, 1, -2 do print(i) end");
+    assert_eq!(fixed("local t = {}\nfor i = #t, 1 do print(i) end"), "local t = {}\nfor i = #t, 1, -1 do print(i) end");
+}

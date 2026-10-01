@@ -28,6 +28,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "empty-block",
     "unbalanced-assignments",
     "duplicate-index",
+    "count-down-loop",
     "missing-parameter",
     "undefined-doc-name",
     "missing-fields",
