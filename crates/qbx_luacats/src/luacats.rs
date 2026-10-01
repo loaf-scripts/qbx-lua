@@ -358,19 +358,10 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
         match tag {
             "class" => {
                 let (attributes, rest) = split_attributes(rest);
-                let (head, parents) = rest.split_once(':').unwrap_or((rest, ""));
-                let name = head.split_whitespace().next().unwrap_or("").split('<').next().unwrap_or("");
-                if name.is_empty() {
-                    continue;
-                }
-                let parents = parents
-                    .split(',')
-                    .filter_map(|p| p.split_whitespace().next())
-                    .map(|p| SmolStr::new(p.split('<').next().unwrap_or(p)))
-                    .collect();
+                let Some((name, _, after)) = class_head(rest) else { continue };
                 group.classes.push(DocClass {
                     name: SmolStr::new(name),
-                    parents,
+                    parents: after.trim_start().strip_prefix(':').map(class_parents).unwrap_or_default(),
                     description: description.join("\n").trim().to_string(),
                     line: index,
                     side: side_attribute(attributes),
@@ -506,6 +497,39 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
 
     group.description = description.join("\n").trim().to_string();
     group
+}
+
+/// The name that a `@class` line declares, the list of type parameters after it, as `T, K` for
+/// `Pair<T, K>`, and the text after both.
+fn class_head(rest: &str) -> Option<(&str, &str, &str)> {
+    let mut parser = TypeParser::new(rest);
+    let name = parser.ident()?;
+    let (params, after) = type_params(parser.rest());
+    Some((name, params, after))
+}
+
+/// The list of type parameters that the text after a declared name starts with, as `T, K` for
+/// `<T, K> : Base`, and the text after it. Without parameters, the list is empty.
+fn type_params(after_name: &str) -> (&str, &str) {
+    after_name.strip_prefix('<').and_then(|list| list.split_once('>')).unwrap_or(("", after_name))
+}
+
+/// The parents a `@class` line lists after its `:`, by name: `Pair` for `Pair<string, integer>`. A
+/// parent that is no class name, such as `{ [number]: T }` or `table<string, any>`, is named by its
+/// type, and the description after the list names none. A union such as `B1 | C1` names its first
+/// type, as lua-language-server reads it.
+fn class_parents(text: &str) -> Vec<SmolStr> {
+    let parents = TypeParser::new(text).parse_list().into_iter().map(|parent| match parent {
+        Type::Union(types) => types.into_iter().find(|ty| *ty != Type::Nil).unwrap_or_default(),
+        parent => parent,
+    });
+    parents
+        .filter(|parent| !parent.is_unknown())
+        .map(|parent| match parent {
+            Type::Named(name, _) => name,
+            other => SmolStr::new(other.to_string()),
+        })
+        .collect()
 }
 
 /// The text of a `@field` after its `(server)` attributes and `private` keyword, in either order,
@@ -1058,6 +1082,22 @@ mod tests {
         assert!(class.fields.is_empty());
         let index = class.indices.last().expect("`[integer]` is a general index");
         assert_eq!(format!("[{}] {}", index.key, index.ty), "[integer] any");
+    }
+
+    #[test]
+    fn class_parents_are_read_as_types() {
+        let parents = |text: &str| parse(text).classes[0].parents.clone();
+        assert_eq!(
+            parents("---@class Entry : Pair<string, integer>, Base"),
+            ["Pair", "Base"],
+            "a comma between type arguments separates no parents"
+        );
+        assert_eq!(parents("---@class Array<T> : OxClass, { [number]: T }"), ["OxClass", "{ [number]: T }"]);
+        assert_eq!(parents("---@class Cache : table<string, Entry>"), ["table<string, Entry>"]);
+        assert_eq!(parents("---@class Child : Base the child, with a comma"), ["Base"]);
+        assert_eq!(parents("---@class Either : B1 | C1, Base"), ["B1", "Base"], "a union names its first type");
+        assert!(parents("---@class Plain").is_empty());
+        assert!(parents("---@class Linked https://example.com").is_empty(), "a colon in the description lists none");
     }
 
     #[test]

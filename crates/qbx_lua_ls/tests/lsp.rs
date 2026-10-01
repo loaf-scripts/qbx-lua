@@ -849,6 +849,33 @@ local shared = left.wins
 }
 
 #[test]
+fn a_class_parent_written_as_a_union_is_its_first_type() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.First
+---@field first string
+
+---@class Test.Second
+---@field second string
+
+---@class Test.Either : Test.First | Test.Second
+
+---@type Test.Either
+local either = {}
+
+local first = either.first
+local second = either.second
+";
+    client.open_with(CLIENT, text);
+    // As lua-language-server reads it, and as the parent was read before parents were types.
+    for (needle, expected) in [("local first", "first: string"), ("local second", "second: unknown")] {
+        let (l, c) = pos(text, needle, 6);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn hover_infers_loop_variables_of_top_level_tables() {
     let mut client = Client::start(fixture_root());
     let text = "\
@@ -2768,6 +2795,11 @@ function Strict:greet() end
 ---@class (strict) Test.StrictOpen
 ---@field [string] any
 
+---@class Test.Pair<L, R>
+---@field left L
+
+---@class (strict) Test.StrictPair : Test.Pair<string, integer>
+
 ---@type Test.Strict
 local abc = {
     test = '2543',
@@ -2786,6 +2818,9 @@ local child = { test = 'x', extra = 1, greet = function() end, missing = 2 }
 ---@type Test.StrictOpen
 local open = { anything = 1 }
 
+---@type Test.StrictPair
+local pair = { left = 'a', right = 1 }
+
 abc.test = 'y'
 abc.injected = true
 abc['quoted'] = 1
@@ -2802,7 +2837,7 @@ end
 loose.other = 1
 ---@diagnostic disable-next-line: undeclared-field
 abc.skipped = 1
-print(abc, loose, child, open)
+print(abc, loose, child, open, pair)
 ";
     client.open_with(CLIENT, text);
     let line = |needle: &str| pos(text, needle, 0).0 as u64;
@@ -2813,6 +2848,8 @@ print(abc, loose, child, open)
             (line("other = true"), message("other", "Test.Strict")),
             (line("nope = 1"), message("nope", "Test.StrictInner")),
             (line("missing = 2"), message("missing", "Test.StrictChild")),
+            // The `integer` of `Test.Pair<string, integer>` is a type argument, not a parent.
+            (line("right = 1"), message("right", "Test.StrictPair")),
             (line("abc.injected"), message("injected", "Test.Strict")),
             (line("abc['quoted']"), message("quoted", "Test.Strict")),
             (line("abc.helper"), message("helper", "Test.Strict")),
