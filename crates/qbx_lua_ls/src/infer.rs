@@ -1100,16 +1100,15 @@ impl<'a> Infer<'a> {
 
     /// The signature that `call` uses, with its arguments and whether it calls a method.
     fn call_parts<'e>(&self, call: &'e Expr) -> Option<(Arc<FunType>, CallArgs<'e>, bool)> {
-        let (fun, args, via_method) = match &call.kind {
-            ExprKind::Call { callee, args, .. } => (self.expr(callee).as_fun().cloned(), args, false),
-            ExprKind::MethodCall { base, method, args, .. } => {
-                let member = self.member(&self.expr(base), &method.text);
-                (member.and_then(|m| m.ty.as_fun().cloned()), args, true)
-            }
+        let (base, method, args) = match &call.kind {
+            ExprKind::Call { callee, args, .. } => (callee, None, args),
+            ExprKind::MethodCall { base, method, args, .. } => (base, Some(method), args),
             _ => return None,
         };
+        let via_method = method.is_some();
+        let (fun, _) = self.callee_fun(base, method)?;
         let args = CallArgs::new(args);
-        let fun = self.signature_for(&fun?, &args, via_method, call.span.start);
+        let fun = self.signature_for(&fun, &args, via_method, call.span.start);
         Some((fun, args, via_method))
     }
 
@@ -1765,12 +1764,12 @@ impl<'a> Infer<'a> {
         match method {
             Some(method) => {
                 let member = self.member(&self.expr(base), &method.text)?;
-                Some((member.ty.as_fun()?.clone(), Some(member)))
+                Some((self.fun_of(&member.ty)?, Some(member)))
             }
             None => {
                 let ty = self.expr(base);
-                if let Some(fun) = ty.as_fun() {
-                    return Some((fun.clone(), None));
+                if let Some(fun) = self.fun_of(&ty) {
+                    return Some((fun, None));
                 }
                 match self.resolve_alias(&ty) {
                     Type::Named(name, args) => {

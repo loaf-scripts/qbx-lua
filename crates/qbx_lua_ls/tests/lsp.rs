@@ -6780,6 +6780,60 @@ end
 }
 
 #[test]
+fn calls_through_function_aliases_use_their_signature() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Check fun(value: string): boolean
+---@alias Each fun(list: string[], cb: fun(item: string))
+---@alias Handler fun(id: integer, name: string)
+---@alias Run fun(self: Checker, cb: Handler)
+
+---@type Check
+local check = nil
+---@type Check?
+local maybeCheck = nil
+---@type Each
+local forEach = nil
+
+---@class Checker
+---@field check Check
+---@field run Run
+local Checker = {}
+
+---@param cb Handler
+local function on(cb) end
+
+local checked = check('a')
+local maybeChecked = maybeCheck('a')
+local fieldChecked = Checker.check('a')
+forEach({}, function(item) end)
+on(function(handlerId, handlerName) end)
+Checker:run(function(runId) end)
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        ("checked =", "checked: boolean"),
+        ("maybeChecked", "maybeChecked: boolean"),
+        ("fieldChecked", "fieldChecked: boolean"),
+        // A function passed to a call takes its parameters from the alias of the callee or of the parameter.
+        ("item)", "item: string"),
+        ("handlerId", "handlerId: integer"),
+        ("handlerName", "handlerName: string"),
+        ("runId", "runId: integer"),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+
+    let (l, c) = pos(text, "check('a'", 6);
+    let result = client.request("textDocument/signatureHelp", client.position_params(CLIENT, l, c));
+    assert_eq!(result["signatures"][0]["label"], "check(value: string): boolean", "{result}");
+    assert_eq!(result["activeParameter"], 0);
+}
+
+#[test]
 fn cfxlua_extends_the_standard_libraries() {
     let mut client = Client::start(fixture_root());
     let text = "\
