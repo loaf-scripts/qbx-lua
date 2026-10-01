@@ -2590,7 +2590,8 @@ impl<'a> Infer<'a> {
                 let declared: FxHashSet<SmolStr> = out.iter().map(|m| m.name.clone()).collect();
                 for (file, symbol) in self.index.exports_of(resource, filter) {
                     if !declared.contains(&symbol.name) {
-                        out.push(member_from_symbol(file, symbol));
+                        let member = member_from_symbol(file, symbol);
+                        out.push(MemberInfo { ty: called_through_exports(member.ty), ..member });
                     }
                 }
             }
@@ -2768,6 +2769,22 @@ fn indexed_field(name: &str, ty: Type) -> Option<MemberInfo> {
         kind: SymbolKind::Field,
         location: None,
     })
+}
+
+/// A function registered with `exports('Name', fn)` as calls through `exports.<resource>` see it.
+/// The proxy drops the first value of the call, so `exports.res:Fn(a, b)` and `exports.res.Fn(x, a, b)`
+/// both pass `a, b`, lined up with the parameters the way a function declared with `:` takes them.
+fn called_through_exports(ty: Type) -> Type {
+    match ty {
+        Type::Fun(fun) => Type::Fun(proxied(&fun)),
+        Type::Union(types) => Type::Union(types.into_iter().map(called_through_exports).collect()),
+        other => other,
+    }
+}
+
+fn proxied(fun: &FunType) -> Arc<FunType> {
+    let overloads = fun.overloads.iter().map(|overload| proxied(overload)).collect();
+    Arc::new(FunType { is_method: true, lists_receiver: false, overloads, ..fun.clone() })
 }
 
 fn member_from_symbol(file: FileId, symbol: &crate::index::Symbol) -> MemberInfo {

@@ -7555,6 +7555,113 @@ fn trigger_calls_show_the_parameters_of_the_handler() {
 }
 
 #[test]
+fn calls_through_exports_pass_what_follows_the_first_value() {
+    fn hint_labels(client: &mut Client, relative: &str) -> Vec<String> {
+        let hints = client.request(
+            "textDocument/inlayHint",
+            json!({ "textDocument": { "uri": client.uri(relative) }, "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 40, "character": 0 } } }),
+        );
+        hints.as_array().unwrap().iter().filter_map(|hint| hint["label"].as_str().map(str::to_owned)).collect()
+    }
+    const MYLIB: &str = "[core]/mylib/server.lua";
+    let mut client = Client::start(fixture_root());
+    let mylib = client.open(MYLIB);
+    let registered = "
+---@param text string
+---@param notifyType string
+---@param duration integer
+local function Notify(text, notifyType, duration) end
+exports('Notify', Notify)
+
+---@param cb fun(player: integer)
+exports('OnReady', function(cb) end)
+";
+    client.change(MYLIB, 2, &format!("{mylib}{registered}"));
+    let text = "exports.mylib:Notify('hello', 'error')
+exports['mylib'].Notify(nil, 'hello', 'error')
+exports.mylib:OnReady(function(player) end)
+";
+    client.open_with(SERVER, text);
+    assert_eq!(
+        hint_labels(&mut client, SERVER),
+        ["text:", "notifyType:", "text:", "notifyType:"],
+        "the proxy drops the receiver of a `:` call and the first argument of a `.` call"
+    );
+
+    let (l, c) = pos(text, "'error')", 1);
+    let result = client.request("textDocument/signatureHelp", client.position_params(SERVER, l, c));
+    assert_eq!(result["signatures"][0]["label"], "Notify(text: string, notifyType: string, duration: integer)");
+    assert_eq!(result["activeParameter"], 1);
+    let (l, c) = pos(text, "nil, 'hello', 'error'", 15);
+    let result = client.request("textDocument/signatureHelp", client.position_params(SERVER, l, c));
+    assert_eq!(result["activeParameter"], 1);
+
+    let (l, c) = pos(text, "player)", 0);
+    let player = client.hover_text(SERVER, l, c);
+    assert!(player.contains("player: integer"), "a function argument takes the type of its parameter: {player}");
+
+    // Declared types keep lining up as declared: `fun(self, ...)` fields skip `self`, and methods
+    // declared on `exports.<resource>` with `:` do not list it.
+    let root = declared_exports_root();
+    let mut client = Client::start_with_library(root.join("workspace"), &root.join("types"));
+    let text = "local cid = exports.qbx_core:GetCid(1)
+local rang = exports.tablet:Ring(2)
+print(cid, rang)
+";
+    client.open_with("app/server.lua", text);
+    assert_eq!(hint_labels(&mut client, "app/server.lua"), ["source:", "times:"]);
+}
+
+#[test]
+fn arguments_through_exports_go_to_the_parameters_the_proxy_passes() {
+    const MYLIB: &str = "[core]/mylib/server.lua";
+    let mut client = Client::start(fixture_root());
+    let mylib = client.open(MYLIB);
+    let registered = "
+---@param self string
+---@param count integer
+local function Track(self, count) end
+exports('Track', Track)
+";
+    client.change(MYLIB, 2, &format!("{mylib}{registered}"));
+    let text = "exports.mylib:Track('id', 2)
+exports.mylib:Track(5)
+exports['mylib'].Track(nil, 'id', 'two')
+";
+    client.open_with(SERVER, text);
+    let finding = |needle: &str, message: &str| {
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, SERVER, &["param-type-mismatch"]),
+        [
+            finding("Track(5)", "Cannot assign `integer` to parameter `self` of type `string`"),
+            finding("'two'", "Cannot assign `string` to parameter `count` of type `integer`"),
+        ],
+        "a first parameter named `self` takes the first value the proxy passes, as hover and signature help show"
+    );
+
+    let root = declared_exports_root();
+    let mut client = Client::start_with_library(root.join("workspace"), &root.join("types"));
+    let text = "local cid = exports.qbx_core:GetCid('one')
+local rang = exports.tablet:Ring('twice')
+print(cid, rang)
+";
+    client.open_with("app/server.lua", text);
+    let finding = |needle: &str, message: &str| {
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, "app/server.lua", &["param-type-mismatch"]),
+        [
+            finding("GetCid", "Cannot assign `string` to parameter `source` of type `number`"),
+            finding("Ring", "Cannot assign `string` to parameter `times` of type `number`"),
+        ],
+        "declared types line up as declared"
+    );
+}
+
+#[test]
 fn publishes_lint_diagnostics_with_resource_context() {
     let mut client = Client::start(fixture_root());
     client.open(CLIENT);

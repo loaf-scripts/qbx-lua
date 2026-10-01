@@ -205,8 +205,8 @@ pub fn takes_nil(classes: &Classes, param: &Param) -> bool {
 
 /// Every function a call of `base`, or of its `method`, may run: each member of that name defined
 /// on the side of the call, each global of that name its file sees, or else the function the callee
-/// holds. The exports proxy drops the receiver of `exports.name:Fn()`, so those calls pass their
-/// arguments to the parameters that the function lists.
+/// holds. The functions a resource registers with `exports` come as the exports proxy calls them,
+/// which drops the receiver of `exports.name:Fn()`.
 ///
 /// In an escrowed resource, an encrypted script may define the globals a call reaches differently,
 /// so a call through a global is left out unless only the runtime stubs define what it reaches, or
@@ -223,7 +223,6 @@ pub fn definitions(infer: &Infer, base: &Expr, method: Option<&Name>) -> Vec<Arc
     };
     let members = |owner: &Expr, name: &str| -> Vec<Arc<FunType>> {
         let owner = infer.expr(owner);
-        let exported = matches!(owner, Type::Exports(Some(_)));
         let found: Vec<_> = infer
             .members_named(&owner, name)
             .into_iter()
@@ -232,11 +231,7 @@ pub fn definitions(infer: &Infer, base: &Expr, method: Option<&Name>) -> Vec<Arc
         if !found.iter().all(|member| known(member.location.as_ref().map(|(file, _)| *file))) {
             return Vec::new();
         }
-        found
-            .into_iter()
-            .filter_map(|member| member.ty.as_fun().cloned())
-            .map(|fun| if exported { without_receiver(&fun) } else { fun })
-            .collect()
+        found.into_iter().filter_map(|member| member.ty.as_fun().cloned()).collect()
     };
     let held = || infer.callee_fun(base, method).map(|(fun, _)| fun).into_iter().collect();
     match (method, &base.unparen().kind) {
@@ -282,19 +277,6 @@ fn global_root<'e>(infer: &Infer, expr: &'e Expr) -> Option<&'e Name> {
         ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => global_root(infer, base),
         _ => None,
     }
-}
-
-/// `fun` as called through the exports proxy, which passes the values after the receiver of a `:`
-/// call, and drops the first value of a `.` call: like a function defined with `:`, unless it lists
-/// `self` itself.
-fn without_receiver(fun: &Arc<FunType>) -> Arc<FunType> {
-    let plain = |fun: &FunType| {
-        let lists_self = fun.params.first().is_some_and(|param| param.name == "self");
-        FunType { is_method: !lists_self, ..fun.clone() }
-    };
-    let mut out = plain(fun);
-    out.overloads = fun.overloads.iter().map(|overload| Arc::new(plain(overload))).collect();
-    Arc::new(out)
 }
 
 /// Whether a named type whose name `matches` is part of `ty`, as `T` is of `T[]`.
