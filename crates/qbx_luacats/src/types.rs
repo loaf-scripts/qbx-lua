@@ -68,6 +68,8 @@ pub struct FunType {
     pub side: Option<Side>,
     /// What a function tagged `@callback` does with the callback names passed to it.
     pub callback: Option<CallbackTag>,
+    /// `async fun(...)` or `---@async`: the function may yield, so it runs in a coroutine.
+    pub is_async: bool,
 }
 
 /// The role of a function tagged `---@callback register|await|trigger [family]`, which wraps a
@@ -405,6 +407,9 @@ impl fmt::Display for Type {
             }
             Type::Fun(fun) => {
                 let params: Vec<String> = fun.params.iter().map(Param::to_string).collect();
+                if fun.is_async {
+                    f.write_str("async ")?;
+                }
                 write!(f, "fun({})", params.join(", "))?;
                 if !fun.returns.is_empty() {
                     write!(f, ": {}", fun.returns_text())?;
@@ -680,6 +685,18 @@ impl<'a> TypeParser<'a> {
         let Some(name) = self.ident() else {
             return Type::Unknown;
         };
+        // `async fun(...)`, a function that may yield, is the function type marked as async.
+        if name == "async" {
+            let after = self.pos;
+            self.skip_ws();
+            if self.rest().starts_with("fun(") {
+                return match self.named() {
+                    Type::Fun(fun) => Type::Fun(Arc::new(FunType { is_async: true, ..(*fun).clone() })),
+                    other => other,
+                };
+            }
+            self.pos = after;
+        }
         if name == "fun" && self.peek() == b'(' {
             return self.fun();
         }
@@ -813,6 +830,9 @@ mod tests {
             "fun(a: string, b?: number): boolean, string"
         );
         assert_eq!(roundtrip("fun(...: any)"), "fun(...: any)");
+        assert_eq!(roundtrip("async fun(x: integer): string"), "async fun(x: integer): string");
+        assert_eq!(roundtrip("(async fun())[]"), "(async fun())[]");
+        assert_eq!(roundtrip("async"), "async");
         assert_eq!(roundtrip("{ name: string, age?: number }"), "{ name: string, age?: number }");
         assert_eq!(roundtrip("{ [string]: boolean }"), "{ [string]: boolean }");
         assert_eq!(roundtrip("'left'|'right'"), "\"left\"|\"right\"");

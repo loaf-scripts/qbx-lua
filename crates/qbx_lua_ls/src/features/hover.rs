@@ -85,9 +85,11 @@ const MAX_OVERVIEW_FIELDS: usize = 14;
 
 /// `name: type`, a function signature, or for tables an overview of the fields that are in scope
 /// for this file, with the literal values the index remembered. Aliases follow on their own lines.
+/// The signature of a function that may yield starts with `(async)`, as in lua-language-server.
 fn describe_value(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: Option<&str>) -> String {
     if let (Some(fun), Type::Fun(_)) = (ty.as_fun(), ty) {
-        return format!("{prefix}{}", fun.signature(name));
+        let marker = if fun.is_async { "(async) " } else { "" };
+        return format!("{marker}{prefix}{}", fun.signature(name));
     }
     let mut out = value_overview(infer, prefix, name, ty, literal);
     for (alias, target) in alias_expansions(infer, ty) {

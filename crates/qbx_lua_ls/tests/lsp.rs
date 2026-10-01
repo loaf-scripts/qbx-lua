@@ -3774,6 +3774,54 @@ local loose = free(1)
 }
 
 #[test]
+fn async_function_types_are_function_types() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type async fun(x: integer): string
+local fetch
+
+---@param job async fun(): integer
+local function run(job)
+    local done = job()
+    return done
+end
+
+local fetched = fetch(1)
+local ran = run(function() return 1 end)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [("fetched", "fetched: string"), ("done", "done: integer"), ("ran", "ran: integer")] {
+        let (l, c) = pos(text, &format!("local {needle}"), 6);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    assert!(findings(&mut client, CLIENT, &["undefined-doc-name"]).is_empty());
+
+    // Hover keeps the `async`, as lua-language-server shows it.
+    let (l, c) = pos(text, "fetch(1)", 0);
+    let fetch = client.hover_text(CLIENT, l, c);
+    assert!(fetch.contains("(async) local function fetch(x: integer): string"), "{fetch}");
+    let (l, c) = pos(text, "run(job)", 0);
+    let run = client.hover_text(CLIENT, l, c);
+    assert!(run.contains("local function run(job: async fun(): integer)"), "{run}");
+}
+
+#[test]
+fn functions_tagged_async_show_it_in_hover() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@async
+---@param ms integer
+local function sleep(ms) end
+sleep(1)
+";
+    client.open_with(CLIENT, text);
+    let (l, c) = pos(text, "sleep(1)", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("(async) local function sleep(ms: integer)"), "{hover}");
+}
+
+#[test]
 fn hover_expands_aliases_and_lists_members_only_for_tables() {
     let mut client = Client::start(fixture_root());
     let text = "\

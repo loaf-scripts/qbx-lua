@@ -145,6 +145,7 @@ impl DocGroup {
             overloads,
             side: None,
             callback: self.callback.clone(),
+            is_async: self.is_async,
         }
     }
 
@@ -921,6 +922,7 @@ mod tests {
             "@type table<string, Gar^age>",
             "@type fun(value: Gar^age): boolean",
             "@type fun(): Gar^age",
+            "@type async fun(value: Gar^age)",
             "@type { value: Gar^age }",
             "@type { [Gar^age]: boolean }",
             "@type [string, Gar^age]",
@@ -1006,6 +1008,7 @@ mod tests {
             "@type string Gar^age",
             "@type 'Gar^age'",
             "@type fun(Gar^age: string): boolean",
+            "@type as^ync fun(): string",
             "@type { Gar^age: string }",
             "@type str^ing",
             "@generic Gar^age: string",
