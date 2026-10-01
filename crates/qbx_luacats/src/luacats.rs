@@ -200,6 +200,7 @@ impl DocGroup {
             overloads,
             side: None,
             callback: self.callback.clone(),
+            nodiscard: self.nodiscard,
             is_async: self.is_async,
         }
     }
@@ -922,7 +923,7 @@ mod tests {
     #[test]
     fn function_docs() {
         let doc = parse(
-            "---Spawns a vehicle.\n---Second line.\n---@param model string|integer the model\n---@param coords? vector4\n---@param ... any extra\n---@return integer netId # network id\n---@return string? err\n---@deprecated use other\n---@async",
+            "---Spawns a vehicle.\n---Second line.\n---@param model string|integer the model\n---@param coords? vector4\n---@param ... any extra\n---@return integer netId # network id\n---@return string? err\n---@deprecated use other\n---@async\n---@nodiscard",
         );
         assert_eq!(doc.description, "Spawns a vehicle.\nSecond line.");
         assert_eq!(doc.params.len(), 3);
@@ -936,6 +937,7 @@ mod tests {
         assert!(doc.is_async);
 
         let fun = doc.fun_type(&["model".into(), "coords".into()], true, false);
+        assert!(fun.nodiscard);
         assert_eq!(
             fun.signature("spawn"),
             "function spawn(model: string|integer, coords?: vector4, ...: any): integer, string?"

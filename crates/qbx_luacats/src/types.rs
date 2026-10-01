@@ -84,6 +84,8 @@ pub struct FunType {
     pub side: Option<Side>,
     /// What a function tagged `@callback` does with the callback names passed to it.
     pub callback: Option<CallbackTag>,
+    /// `@nodiscard`: a call has to use the values the function returns.
+    pub nodiscard: bool,
     /// `async fun(...)` or `---@async`: the function may yield, so it runs in a coroutine.
     pub is_async: bool,
 }

@@ -78,8 +78,7 @@ impl Calls<'_, '_> {
         }
         let via_colon = method.is_some();
         let at = base.span.start;
-        let signatures: Vec<Arc<FunType>> = self
-            .definitions(base, method, at)
+        let signatures: Vec<Arc<FunType>> = definitions(self.infer, base, method)
             .iter()
             .flat_map(|fun| self.infer.call_signatures(fun, args, via_colon, at).0)
             .collect();
@@ -89,71 +88,6 @@ impl Calls<'_, '_> {
         let values: Vec<Type> = args.iter().map(|arg| self.value(arg)).collect();
         let signatures: Vec<&FunType> = signatures.iter().map(Arc::as_ref).collect();
         self.compare(&signatures, via_colon, args, &values);
-    }
-
-    /// Every function a call of `base`, or of its `method`, at `at` may run: each member of that
-    /// name defined on the side of the call, each global of that name its file sees, or else the
-    /// function the callee holds. The exports proxy drops the receiver of `exports.name:Fn()`, so
-    /// those calls pass their arguments to the parameters that the function lists.
-    ///
-    /// In an escrowed resource, an encrypted script may define the globals a call reaches
-    /// differently, so a call through a global is left out unless only the runtime stubs define what
-    /// it reaches, or it goes through the exports proxy.
-    fn definitions(&self, base: &Expr, method: Option<&Name>, at: u32) -> Vec<Arc<FunType>> {
-        let infer = self.infer;
-        let side = infer.side_at(at);
-        let reaches = |file: FileId| match (infer.index.file(file).and_then(|f| f.side), side) {
-            (Some(defined), Some(call)) => defined.is_available_on(call),
-            _ => true,
-        };
-        let hidden = in_escrowed_resource(infer) && global_root(infer, base).is_some_and(|root| root.text != "exports");
-        let known = |file: Option<FileId>| {
-            !hidden || file.and_then(|file| infer.index.file(file)).is_some_and(|f| f.origin == FileOrigin::Stub)
-        };
-        let members = |owner: &Expr, name: &str| -> Vec<Arc<FunType>> {
-            let owner = infer.expr(owner);
-            let exported = matches!(owner, Type::Exports(Some(_)));
-            let found: Vec<_> = infer
-                .members_named(&owner, name)
-                .into_iter()
-                .filter(|member| member.location.as_ref().is_none_or(|(file, _)| reaches(*file)))
-                .collect();
-            if !found.iter().all(|member| known(member.location.as_ref().map(|(file, _)| *file))) {
-                return Vec::new();
-            }
-            found
-                .into_iter()
-                .filter_map(|member| member.ty.as_fun().cloned())
-                .map(|fun| if exported { without_receiver(&fun) } else { fun })
-                .collect()
-        };
-        let held = || infer.callee_fun(base, method).map(|(fun, _)| fun).into_iter().collect();
-        match (method, &base.unparen().kind) {
-            (Some(method), _) => members(base, &method.text),
-            (None, ExprKind::Field { base: owner, name, .. }) => members(owner, &name.text),
-            (None, ExprKind::Index { base: owner, index, .. }) if index.as_string().is_some() => {
-                members(owner, index.as_string().map(SmolStr::as_str).unwrap_or_default())
-            }
-            (None, ExprKind::Name(name)) => match infer.ctx.resolution.resolve_at(name.span.start) {
-                Some(Resolved::Global(_)) => {
-                    let globals = infer.index.globals_named(&name.text, infer.ctx.file);
-                    let globals: Vec<_> = globals.into_iter().filter(|(file, _)| reaches(*file)).collect();
-                    if !globals.iter().all(|(file, _)| known(Some(*file))) {
-                        return Vec::new();
-                    }
-                    globals.into_iter().filter_map(|(_, symbol)| symbol.ty.as_fun().cloned()).collect()
-                }
-                // A parameter whose function the callee of its own function gives takes what the callee
-                // declares, with the generics that the other arguments of that call declare.
-                Some(Resolved::Local(id)) => {
-                    let declared = Declared::new(infer);
-                    let callback = infer.declared_callback_param(id, |arg| declared.of(arg));
-                    callback.and_then(|ty| infer.fun_of(&ty)).map_or_else(held, |fun| vec![fun])
-                }
-                _ => held(),
-            },
-            _ => held(),
-        }
     }
 
     /// The declared type of an argument, or the type a `--[[@as T]]` right after it gives it.
@@ -240,6 +174,70 @@ impl Calls<'_, '_> {
         }
         let shown = if self.classes.literal_mismatch(expected, from, &given) { given } else { given.widen() };
         Some(format!("Cannot assign `{shown}` to parameter `{}` of type `{expected}`", param.name))
+    }
+}
+
+/// Every function a call of `base`, or of its `method`, may run: each member of that name defined
+/// on the side of the call, each global of that name its file sees, or else the function the callee
+/// holds. The exports proxy drops the receiver of `exports.name:Fn()`, so those calls pass their
+/// arguments to the parameters that the function lists.
+///
+/// In an escrowed resource, an encrypted script may define the globals a call reaches differently,
+/// so a call through a global is left out unless only the runtime stubs define what it reaches, or
+/// it goes through the exports proxy.
+pub fn definitions(infer: &Infer, base: &Expr, method: Option<&Name>) -> Vec<Arc<FunType>> {
+    let side = infer.side_at(base.span.start);
+    let reaches = |file: FileId| match (infer.index.file(file).and_then(|f| f.side), side) {
+        (Some(defined), Some(call)) => defined.is_available_on(call),
+        _ => true,
+    };
+    let hidden = in_escrowed_resource(infer) && global_root(infer, base).is_some_and(|root| root.text != "exports");
+    let known = |file: Option<FileId>| {
+        !hidden || file.and_then(|file| infer.index.file(file)).is_some_and(|f| f.origin == FileOrigin::Stub)
+    };
+    let members = |owner: &Expr, name: &str| -> Vec<Arc<FunType>> {
+        let owner = infer.expr(owner);
+        let exported = matches!(owner, Type::Exports(Some(_)));
+        let found: Vec<_> = infer
+            .members_named(&owner, name)
+            .into_iter()
+            .filter(|member| member.location.as_ref().is_none_or(|(file, _)| reaches(*file)))
+            .collect();
+        if !found.iter().all(|member| known(member.location.as_ref().map(|(file, _)| *file))) {
+            return Vec::new();
+        }
+        found
+            .into_iter()
+            .filter_map(|member| member.ty.as_fun().cloned())
+            .map(|fun| if exported { without_receiver(&fun) } else { fun })
+            .collect()
+    };
+    let held = || infer.callee_fun(base, method).map(|(fun, _)| fun).into_iter().collect();
+    match (method, &base.unparen().kind) {
+        (Some(method), _) => members(base, &method.text),
+        (None, ExprKind::Field { base: owner, name, .. }) => members(owner, &name.text),
+        (None, ExprKind::Index { base: owner, index, .. }) if index.as_string().is_some() => {
+            members(owner, index.as_string().map(SmolStr::as_str).unwrap_or_default())
+        }
+        (None, ExprKind::Name(name)) => match infer.ctx.resolution.resolve_at(name.span.start) {
+            Some(Resolved::Global(_)) => {
+                let globals = infer.index.globals_named(&name.text, infer.ctx.file);
+                let globals: Vec<_> = globals.into_iter().filter(|(file, _)| reaches(*file)).collect();
+                if !globals.iter().all(|(file, _)| known(Some(*file))) {
+                    return Vec::new();
+                }
+                globals.into_iter().filter_map(|(_, symbol)| symbol.ty.as_fun().cloned()).collect()
+            }
+            // A parameter whose function the callee of its own function gives takes what the callee
+            // declares, with the generics that the other arguments of that call declare.
+            Some(Resolved::Local(id)) => {
+                let declared = Declared::new(infer);
+                let callback = infer.declared_callback_param(id, |arg| declared.of(arg));
+                callback.and_then(|ty| infer.fun_of(&ty)).map_or_else(held, |fun| vec![fun])
+            }
+            _ => held(),
+        },
+        _ => held(),
     }
 }
 

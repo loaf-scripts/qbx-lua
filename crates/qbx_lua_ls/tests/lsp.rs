@@ -4749,6 +4749,77 @@ local kept = RegisterServerCallback('test:kept', function(source) return 2 end)
 }
 
 #[test]
+fn values_of_nodiscard_functions_have_to_be_used() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@nodiscard
+---@return integer
+local function important() return 1 end
+local Store = {}
+---@nodiscard
+---@return string
+function Store:key() return 'k' end
+local function plain() return 1 end
+
+important()
+local kept = important()
+Store:key()
+plain()
+tostring(5)
+local text = 'abc'
+text:upper()
+text:gsub('%w+', print)
+math.random()
+math.random(5)
+math.random(1, 10)
+print(important(), kept)
+---@diagnostic disable-next-line: discard-returns
+important()
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("discard-returns".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["discard-returns"]),
+        [
+            finding("important()\nlocal kept", "The values that `important` returns cannot be discarded"),
+            finding("Store:key()\nplain", "The values that `Store:key` returns cannot be discarded"),
+            finding("tostring(5)", "The values that `tostring` returns cannot be discarded"),
+            finding("text:upper()", "The values that `text:upper` returns cannot be discarded"),
+            finding("math.random(1, 10)", "The values that `math.random` returns cannot be discarded"),
+        ],
+        "values that are used, functions without `@nodiscard`, `@overload`s, which are not marked, and \
+         suppressed lines pass"
+    );
+}
+
+#[test]
+fn discarded_values_of_globals_of_escrowed_resources_are_not_reported() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+exports('Open', function() end)
+
+---@nodiscard
+---@return integer
+function VaultCount() return 1 end
+
+VaultCount()
+tostring(5)
+";
+    client.open_with("vault/open.lua", text);
+    assert_eq!(
+        findings(&mut client, "vault/open.lua", &["discard-returns"]),
+        [(
+            "discard-returns".to_string(),
+            pos(text, "tostring(5)", 0).0 as u64,
+            "The values that `tostring` returns cannot be discarded".to_string()
+        )],
+        "the encrypted script of vault may define `VaultCount` differently, but not the runtime's functions"
+    );
+}
+
+#[test]
 fn returns_with_more_values_than_declared_are_reported() {
     let mut client = Client::start(fixture_root());
     let text = "\

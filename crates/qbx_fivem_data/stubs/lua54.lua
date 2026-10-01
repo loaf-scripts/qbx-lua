@@ -897,7 +897,6 @@ function string.gmatch(s, pattern, init) end
 ---@param n? integer
 ---@return string result
 ---@return integer count
----@nodiscard
 function string.gsub(s, pattern, repl, n) end
 
 ---Returns the length of `s` in bytes.

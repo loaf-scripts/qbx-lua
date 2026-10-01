@@ -9,6 +9,7 @@ pub mod comparisons;
 pub mod completion;
 pub mod definition;
 pub mod diagnostics;
+pub mod discards;
 pub mod doc_names;
 pub mod event_call;
 pub mod expected;

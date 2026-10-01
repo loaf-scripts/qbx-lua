@@ -43,6 +43,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "return-type-mismatch",
     "missing-return",
     "redundant-return-value",
+    "discard-returns",
     "cast-type-mismatch",
     "no-unknown",
 ];

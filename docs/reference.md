@@ -100,7 +100,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
@@ -544,6 +544,26 @@ assigned again after its declaration, since its declared type may not be what it
 applies to the values `assign-type-mismatch` checks, where `nil` is a value like any other:
 `abc.field = nil` needs a field type that allows it, such as `string?` or `string|nil`.
 
+`discard-returns` reports a call on a line of its own whose function is marked `@nodiscard`, as
+its values are what it is called for. The runtime stubs mark the functions that only compute a
+value, such as `tostring`, `math.floor`, `json.encode` and `vector3`:
+
+```lua
+---@nodiscard
+---@return integer
+local function count() ... end
+
+count() -- The values that `count` returns cannot be discarded
+```
+
+A call that may run one of several functions, such as a client and a server definition, is only
+reported when each of them is marked. Of a function with `@overload`s, the signature the call picks
+decides, as for LuaLS: an overload is not marked, so `math.random()`, which warms up the generator,
+passes, while `math.random(1, 10)` is reported. `string.gsub` is not marked either, since with a
+function as `repl` it loops over the matches. Calls through globals in an opaque resource, such as
+an escrowed one, are not checked; see
+[Escrowed, obfuscated and mixed-language resources](#escrowed-obfuscated-and-mixed-language-resources).
+
 ## Typed variables
 
 `assign-type-mismatch` also covers variables whose type is declared. A `local` or an assignment
@@ -725,10 +745,10 @@ Unknown-export checks are suppressed for opaque resources and resources with non
 An opaque resource may also handle events named with its `resource:` prefix, so a wrong-side
 diagnostic is suppressed when the missing handler could be in that resource. Computed export
 registrations similarly prevent a complete list of exports. `missing-parameter`,
-`redundant-parameter` and `param-type-mismatch` do not check calls to globals in an opaque
-resource, or to fields of global tables, such as `Utils.round()`, since an encrypted script may
-define them differently. `param-type-mismatch` still checks the runtime's own functions, such as
-`math.floor`, and calls through `exports`.
+`redundant-parameter`, `param-type-mismatch` and `discard-returns` do not check calls to globals in
+an opaque resource, or to fields of global tables, such as `Utils.round()`, since an encrypted
+script may define them differently. `param-type-mismatch` and `discard-returns` still check the
+runtime's own functions, such as `math.floor`, and calls through `exports`.
 
 Read-only linting uses replacement characters for invalid UTF-8 bytes. `--fix`, `fmt`, and
 `fmt --check` report an encoding error for such source, and do not rewrite it. Convert its encoding

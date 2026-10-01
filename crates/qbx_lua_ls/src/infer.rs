@@ -2880,6 +2880,7 @@ fn substitute_fun(fun: &FunType, generics: &[(SmolStr, Type)]) -> FunType {
         overloads: fun.overloads.iter().map(|overload| Arc::new(substitute_fun(overload, generics))).collect(),
         side: fun.side,
         callback: fun.callback.clone(),
+        nodiscard: fun.nodiscard,
         is_async: fun.is_async,
     }
 }

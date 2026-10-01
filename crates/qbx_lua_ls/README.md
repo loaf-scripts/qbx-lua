@@ -62,12 +62,12 @@ Available features depend on the editor's LSP client.
   `missing-fields` and `assign-type-mismatch` for tables and assignments that leave out required
   fields of their class or store a value of the wrong type, in a field or in a variable typed with
   `---@type` or `@param`, `param-type-mismatch` for arguments of the wrong type, `undeclared-field`
-  for fields and keys
-  a `---@class (strict)` does not declare, and `return-type-mismatch`, `missing-return` and
-  `redundant-return-value` for functions, including callback handlers, that do not return what
-  their `@return` declares. `invisible` reports the use of fields and methods a class keeps
-  `private`, `protected` or `package` from outside its class, subclasses or file, and completion
-  leaves them out there.
+  for fields and keys a `---@class (strict)` does not declare, `return-type-mismatch`,
+  `missing-return` and `redundant-return-value` for functions, including callback handlers, that
+  do not return what their `@return` declares, and `discard-returns` for calls that drop the
+  values of a `@nodiscard` function. `invisible` reports the use of fields and methods a class
+  keeps `private`, `protected` or `package` from outside its class, subclasses or file, and
+  completion leaves them out there.
   `impossible-comparison` reports an `==` or `~=` between values whose declared types share no
   value, such as `GetState() == "invalid"` for a function that returns `"active"|"busy"`, and
   `cast-type-mismatch` a `---@cast` to a type the local is not declared to take. The opt-in
