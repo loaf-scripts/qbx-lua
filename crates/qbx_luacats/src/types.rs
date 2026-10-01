@@ -227,6 +227,52 @@ impl Type {
     pub fn first_return(&self) -> Type {
         self.as_fun().and_then(|f| f.returns.first().cloned()).unwrap_or_default()
     }
+
+    /// Whether the type names `self`, which a doc comment writes for the class of the table its
+    /// function or field belongs to.
+    pub fn mentions_self(&self) -> bool {
+        match self {
+            Type::Named(name, args) => (name == "self" && args.is_empty()) || args.iter().any(Type::mentions_self),
+            Type::Array(inner) | Type::Variadic(inner) => inner.mentions_self(),
+            Type::Map(key, value) => key.mentions_self() || value.mentions_self(),
+            Type::Tuple(types) | Type::Union(types) => types.iter().any(Type::mentions_self),
+            Type::Fun(fun) => fun.mentions_self(),
+            Type::Shape(shape) => {
+                shape.fields.iter().any(|field| field.ty.mentions_self())
+                    || shape.array.as_ref().is_some_and(Type::mentions_self)
+                    || shape.index.as_ref().is_some_and(|(key, value)| key.mentions_self() || value.mentions_self())
+            }
+            _ => false,
+        }
+    }
+
+    /// The type with each `self` replaced by `owner`, the class it stands for. With no class to
+    /// stand for, `self?` is unknown rather than `nil`.
+    pub fn with_self(&self, owner: &Type) -> Type {
+        match self {
+            Type::Named(name, args) if name == "self" && args.is_empty() => owner.clone(),
+            Type::Named(name, args) => Type::Named(name.clone(), args.iter().map(|t| t.with_self(owner)).collect()),
+            Type::Array(inner) => Type::Array(Box::new(inner.with_self(owner))),
+            Type::Variadic(inner) => Type::Variadic(Box::new(inner.with_self(owner))),
+            Type::Map(key, value) => Type::Map(Box::new(key.with_self(owner)), Box::new(value.with_self(owner))),
+            Type::Tuple(types) => Type::Tuple(types.iter().map(|t| t.with_self(owner)).collect()),
+            Type::Union(types) => {
+                let parts: Vec<Type> = types.iter().map(|t| t.with_self(owner)).collect();
+                if parts.iter().filter(|t| !matches!(t, Type::Nil)).all(Type::is_unknown) {
+                    Type::Unknown
+                } else {
+                    Type::union(parts)
+                }
+            }
+            Type::Fun(fun) => Type::Fun(Arc::new(fun.with_self(owner))),
+            Type::Shape(shape) => Type::Shape(Arc::new(Shape {
+                fields: shape.fields.iter().map(|f| ShapeField { ty: f.ty.with_self(owner), ..f.clone() }).collect(),
+                array: shape.array.as_ref().map(|t| t.with_self(owner)),
+                index: shape.index.as_ref().map(|(key, value)| (key.with_self(owner), value.with_self(owner))),
+            })),
+            other => other.clone(),
+        }
+    }
 }
 
 /// What each position holds across the sets of values a function returns. A set that ends before
@@ -252,6 +298,26 @@ impl FunType {
             (true, false) if explicit_self => (1, 0),
             (false, true) => (0, 1),
             _ => (0, 0),
+        }
+    }
+
+    /// Whether a parameter, returned value or overload names `self`.
+    pub fn mentions_self(&self) -> bool {
+        self.params.iter().any(|param| param.ty.mentions_self())
+            || self.returns.iter().any(Type::mentions_self)
+            || self.overloads.iter().any(|overload| overload.mentions_self())
+    }
+
+    /// The function with each `self` in its parameters, returned values and overloads replaced by
+    /// `owner`.
+    pub fn with_self(&self, owner: &Type) -> FunType {
+        let types = |types: &[Type]| types.iter().map(|t| t.with_self(owner)).collect();
+        FunType {
+            params: self.params.iter().map(|p| Param { ty: p.ty.with_self(owner), ..p.clone() }).collect(),
+            returns: types(&self.returns),
+            return_sets: self.return_sets.iter().map(|set| types(set)).collect(),
+            overloads: self.overloads.iter().map(|overload| Arc::new(overload.with_self(owner))).collect(),
+            ..self.clone()
         }
     }
 

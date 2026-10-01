@@ -13,6 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::callback_wrappers::{self, Wrapper};
 use crate::index::{FileId, Index, SymbolKind};
+use crate::locate::statement_at;
 use crate::luacats::{applies_on, parse_doc_lines, DocGroup};
 use crate::narrow::Guards;
 use crate::types::{CallbackRole, FunType, Param, Shape, ShapeField, Type, TypeParser};
@@ -741,7 +742,11 @@ impl<'a> Infer<'a> {
                 if let Some(anchor) = doc_anchor {
                     let doc = self.ctx.doc_at(*anchor);
                     if let Some(param) = doc.params.iter().find(|p| p.name == *name) {
-                        return if param.optional { param.ty.clone().optional() } else { param.ty.clone() };
+                        let ty = match param.ty.mentions_self() {
+                            true => param.ty.with_self(&self.doc_self_at(*anchor, func)),
+                            false => param.ty.clone(),
+                        };
+                        return if param.optional { ty.optional() } else { ty };
                     }
                 }
                 expected.as_ref().and_then(|e| self.expected_param(e, *index)).unwrap_or_default()
@@ -917,11 +922,54 @@ impl<'a> Infer<'a> {
 
     /// The type `self` has inside `function a.b:c()`, which is also the owner of `c`.
     pub fn func_name_owner_type(&self, name: &FuncName) -> Type {
-        let mut ty = self.name(&name.base);
-        for segment in &name.path {
+        self.path_type(&name.base, &name.path)
+    }
+
+    /// The type of `base.path`, as of `a.b` for `base` `a` and `path` `b`.
+    fn path_type(&self, base: &Name, path: &[Name]) -> Type {
+        let mut ty = self.name(base);
+        for segment in path {
             ty = self.member(&ty, &segment.text).map(|m| m.ty).unwrap_or_default();
         }
         ty
+    }
+
+    /// The class that `self` stands for in the doc comment above `stmt`, for `func`, one of the
+    /// functions it defines: the type of the table that `function a.b:c()`, `function a.b.c()` or
+    /// `a.b.c = function()` puts the function in, `a.b`. Unknown for other functions, such as a
+    /// `local function`.
+    pub fn doc_self(&self, stmt: &Stmt, func: &FuncBody) -> Type {
+        match &stmt.kind {
+            StmtKind::Function { name, func: defined } if std::ptr::eq(&**defined, func) => match name.method {
+                Some(_) => self.func_name_owner_type(name),
+                None => match name.path.split_last() {
+                    Some((_, owner)) => self.path_type(&name.base, owner),
+                    None => Type::Unknown,
+                },
+            },
+            StmtKind::Assign { targets, exprs } => {
+                let defines = |expr: &Expr| matches!(&expr.kind, ExprKind::Function(f) if std::ptr::eq(&**f, func));
+                match exprs.iter().position(defines).and_then(|index| targets.get(index)).map(|target| &target.kind) {
+                    Some(ExprKind::Field { base, .. } | ExprKind::Index { base, .. }) => self.expr(base),
+                    _ => Type::Unknown,
+                }
+            }
+            _ => Type::Unknown,
+        }
+    }
+
+    /// `ty`, read from the doc comment above `stmt` for `func`, one of the functions it defines,
+    /// with `self` standing for the class `doc_self` gives.
+    pub fn doc_type_for(&self, stmt: &Stmt, func: &FuncBody, ty: &Type) -> Type {
+        match ty.mentions_self() {
+            true => ty.with_self(&self.doc_self(stmt, func)),
+            false => ty.clone(),
+        }
+    }
+
+    /// The class that `self` stands for in the doc comment of the statement at `anchor`, for `func`.
+    fn doc_self_at(&self, anchor: u32, func: &FuncBody) -> Type {
+        statement_at(self.ctx.chunk, anchor).map_or(Type::Unknown, |stmt| self.doc_self(stmt, func))
     }
 
     fn for_in_type(&self, stmt: &Stmt, index: usize) -> Type {
@@ -1760,6 +1808,9 @@ impl<'a> Infer<'a> {
             Some(doc) => doc.fun_type(&names, func.vararg.is_some(), is_method),
             None => DocGroup::default().fun_type(&names, func.vararg.is_some(), is_method),
         };
+        if let Some(anchor) = doc_anchor.filter(|_| fun.mentions_self()) {
+            fun = fun.with_self(&self.doc_self_at(anchor, func));
+        }
         if fun.returns.is_empty() {
             let (returns, sets) = self.inferred_returns(&func.body);
             if returns.iter().any(|t| !t.is_unknown()) {

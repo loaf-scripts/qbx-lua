@@ -155,8 +155,12 @@ impl<'c> Visitor<'c> for Finder<'_, '_, 'c> {
     fn visit_stmt(&mut self, stmt: &'c Stmt) {
         for (doc, functions) in self.infer.ctx.function_docs(stmt) {
             if !doc.returns.is_empty() {
-                let returns: Vec<Type> = doc.returns.iter().map(|r| r.ty.clone()).collect();
-                let documented = |func| Documented { func, returns: returns.clone(), sets: doc.return_sets.clone() };
+                let documented = |func| {
+                    let ty = |ty: &Type| self.infer.doc_type_for(stmt, func, ty);
+                    let returns = doc.returns.iter().map(|r| ty(&r.ty)).collect();
+                    let sets = doc.return_sets.iter().map(|set| set.iter().map(ty).collect()).collect();
+                    Documented { func, returns, sets }
+                };
                 self.out.extend(functions.into_iter().map(documented));
             }
         }

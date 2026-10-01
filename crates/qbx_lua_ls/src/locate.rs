@@ -185,6 +185,35 @@ pub struct Located<'a> {
     pub table_in_call: Option<(&'a Expr, usize, &'a Expr)>,
 }
 
+/// The statement that starts at `start`, at any depth.
+pub fn statement_at(chunk: &Chunk, start: u32) -> Option<&Stmt> {
+    struct Finder<'a> {
+        start: u32,
+        found: Option<&'a Stmt>,
+    }
+    impl<'a> Visitor<'a> for Finder<'a> {
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            if self.found.is_some() || !stmt.span.contains_inclusive(self.start) {
+                return;
+            }
+            if stmt.span.start == self.start {
+                self.found = Some(stmt);
+                return;
+            }
+            visit::walk_stmt(self, stmt);
+        }
+
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if self.found.is_none() && expr.span.contains_inclusive(self.start) {
+                visit::walk_expr(self, expr);
+            }
+        }
+    }
+    let mut finder = Finder { start, found: None };
+    finder.visit_block(&chunk.block);
+    finder.found
+}
+
 pub fn locate(chunk: &Chunk, offset: u32) -> Located<'_> {
     let mut locator =
         Locator { offset, member: None, call: None, callee: None, string: None, func_name: None, table_in_call: None };

@@ -3704,6 +3704,76 @@ return {
 }
 
 #[test]
+fn self_in_doc_types_is_the_class_of_the_table_a_function_is_defined_on() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Builder
+---@field parent? self
+local Builder = {}
+
+---@return self
+function Builder:chain() return self end
+
+---@param other self
+---@return self
+function Builder:merge(other)
+    local merged = other
+    return merged
+end
+
+---@return self
+function Builder.new() return setmetatable({}, { __index = Builder }) end
+
+---@return self
+Builder.copy = function() return Builder.new() end
+
+---@return self
+function Builder:broken() return 5 end
+
+---@class Test.Child : Test.Builder
+
+---@param value self
+---@return self
+local function free(value) return value end
+
+---@type Test.Builder
+local built = Builder.new()
+---@type Test.Child
+local child = {}
+local chained = built:chain()
+local inherited = child:chain()
+local made = Builder.new()
+local copied = Builder.copy()
+local parent = built.parent
+local loose = free(1)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("chained", "chained: Test.Builder"),
+        // As in lua-language-server, `self` is the class the method is defined on, not the receiver.
+        ("inherited", "inherited: Test.Builder"),
+        ("made", "made: Test.Builder"),
+        ("copied", "copied: Test.Builder"),
+        ("parent =", "parent: Test.Builder?"),
+        ("merged =", "merged: Test.Builder"),
+        // A function that belongs to no table has no class for `self`.
+        ("loose", "loose: unknown"),
+    ] {
+        let (l, c) = pos(text, &format!("local {needle}"), 6);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (l, c) = pos(text, "merge(other)", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("merge(other: Test.Builder): Test.Builder"), "{hover}");
+    let mismatch = "Cannot return `integer` as return value #1 of type `Test.Builder`";
+    assert_eq!(
+        findings(&mut client, CLIENT, &["return-type-mismatch", "missing-return", "undefined-doc-name"]),
+        [("return-type-mismatch".to_string(), pos(text, "return 5", 0).0 as u64, mismatch.to_string())]
+    );
+}
+
+#[test]
 fn hover_expands_aliases_and_lists_members_only_for_tables() {
     let mut client = Client::start(fixture_root());
     let text = "\

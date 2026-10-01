@@ -287,7 +287,8 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
             "field" => parse_field(rest, index, &mut group),
             "overload" if !group.classes.is_empty() && !group.has_function_tags() => {
                 if let (Some(fun), Some(class)) = (overload(rest), group.classes.last_mut()) {
-                    class.call = Some(fun);
+                    let owner = Type::Named(class.name.clone(), Vec::new());
+                    class.call = Some(if fun.mentions_self() { Arc::new(fun.with_self(&owner)) } else { fun });
                 }
             }
             "overload" => group.overloads.extend(overload(rest)),
@@ -408,14 +409,22 @@ fn field_head(rest: &str) -> (Option<Side>, &str) {
     (side_attribute(before).or(side_attribute(after)), rest)
 }
 
+/// `ty`, declared for the class `class`, with `self` standing for that class.
+fn in_class(class: &DocClass, ty: Type) -> Type {
+    match ty.mentions_self() {
+        true => ty.with_self(&Type::Named(class.name.clone(), Vec::new())),
+        false => ty,
+    }
+}
+
 fn parse_field(rest: &str, line: usize, group: &mut DocGroup) {
     let Some(class) = group.classes.last_mut() else { return };
     let (side, rest) = field_head(rest);
     if let Some(index) = rest.strip_prefix('[') {
         let mut parser = TypeParser::new(index);
-        let key = parser.parse();
+        let key = in_class(class, parser.parse());
         let after = parser.rest().trim_start().strip_prefix(']').unwrap_or(parser.rest());
-        let value = TypeParser::new(after).parse();
+        let value = in_class(class, TypeParser::new(after).parse());
         match key {
             Type::StringLit(name) => class.fields.push(DocField { name, ty: value, line, side, ..DocField::default() }),
             key @ (Type::IntLit(_) | Type::BooleanLit(_)) => {
@@ -429,7 +438,7 @@ fn parse_field(rest: &str, line: usize, group: &mut DocGroup) {
     let Some(name) = parser.ident() else { return };
     let optional = parser.rest().starts_with('?');
     let mut parser = TypeParser::new(parser.rest().trim_start_matches('?'));
-    let ty = parser.parse();
+    let ty = in_class(class, parser.parse());
     let field =
         DocField { name: SmolStr::new(name), ty, optional, description: clean_description(parser.rest()), line, side };
     if let Some(field) = add_signature(&mut class.fields, field) {
@@ -753,6 +762,21 @@ mod tests {
         assert!(class.call.is_some());
         assert_eq!(doc.aliases[0].ty.to_string(), "\"client\"|\"server\"");
         assert_eq!(doc.aliases[1].ty.to_string(), "integer|string");
+    }
+
+    #[test]
+    fn self_in_class_fields_names_the_class() {
+        let doc = parse(
+            "---@class Node\n---@field parent self?\n---@field children self[]\n---@field [string] fun(self: self): self\n---@overload fun(parent: self): self",
+        );
+        let class = &doc.classes[0];
+        let fields: Vec<String> = class.fields.iter().map(|f| f.ty.to_string()).collect();
+        assert_eq!(fields, ["Node?", "Node[]"]);
+        assert_eq!(class.indices[0].ty.to_string(), "fun(self: Node): Node");
+        assert_eq!(Type::Fun(class.call.clone().unwrap()).to_string(), "fun(parent: Node): Node");
+
+        let doc = parse("---@param other self\n---@return self");
+        assert_eq!(doc.params[0].ty.to_string(), "self", "a function's `self` depends on where it is defined");
     }
 
     #[test]

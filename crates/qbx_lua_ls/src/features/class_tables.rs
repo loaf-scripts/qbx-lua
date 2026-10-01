@@ -736,9 +736,9 @@ impl<'c> Finder<'_, '_, 'c> {
 impl<'c> Visitor<'c> for Finder<'_, '_, 'c> {
     fn visit_stmt(&mut self, stmt: &'c Stmt) {
         for (doc, functions) in self.classes.infer.ctx.function_docs(stmt) {
-            let returns: Vec<Type> = doc.returns.iter().map(|r| r.ty.clone()).collect();
             for func in functions {
-                self.documented.insert(func.params_span.start, returns.clone());
+                let returns = doc.returns.iter().map(|r| self.classes.infer.doc_type_for(stmt, func, &r.ty)).collect();
+                self.documented.insert(func.params_span.start, returns);
             }
         }
         match &stmt.kind {
