@@ -67,6 +67,30 @@ pub struct Element {
     pub value: Type,
 }
 
+/// The owner that the fields set on instances of the table `class` are indexed under, as `self.x`
+/// is in `local self = setmetatable({}, Class)`. An instance falls back on its class for the fields
+/// it lacks, and an instance of an instance shares its owner.
+pub fn instance_owner(class: &str) -> SmolStr {
+    match instance_class(class) {
+        Some(_) => SmolStr::new(class),
+        None => SmolStr::new(format!("%inst({class})")),
+    }
+}
+
+/// The class whose instances `owner` holds the fields of. A table in a field of an instance, such
+/// as `%inst(Class).data`, is no instance itself.
+pub fn instance_class(owner: &str) -> Option<&str> {
+    owner.strip_prefix("%inst(")?.strip_suffix(')')
+}
+
+/// A metatable that `setmetatable` gives the table `owner`, as `setmetatable(Child, { __index = Base })`
+/// does: the table falls back on the `__index` of `metatable` for the fields it lacks.
+#[derive(Clone, Debug)]
+pub struct Metatable {
+    pub owner: SmolStr,
+    pub metatable: Type,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassDef {
     pub name: SmolStr,
@@ -179,6 +203,7 @@ pub struct FileIndex {
     pub globals: Vec<Symbol>,
     pub members: Vec<Member>,
     pub elements: Vec<Element>,
+    pub metatables: Vec<Metatable>,
     pub classes: Vec<ClassDef>,
     pub aliases: Vec<AliasDef>,
     pub exports: Vec<Symbol>,
@@ -277,6 +302,7 @@ pub struct Index {
     globals: FxHashMap<SmolStr, Vec<Slot>>,
     members: FxHashMap<SmolStr, Vec<Slot>>,
     elements: FxHashMap<SmolStr, Vec<Slot>>,
+    metatables: FxHashMap<SmolStr, Vec<Slot>>,
     classes: FxHashMap<SmolStr, Vec<Slot>>,
     aliases: FxHashMap<SmolStr, Vec<Slot>>,
     /// The `members` on `exports` that declare the type of a resource's exports, by resource name.
@@ -378,6 +404,9 @@ impl Index {
         for (i, element) in entry.index.elements.iter().enumerate() {
             self.elements.entry(element.owner.clone()).or_default().push((id, i as u32));
         }
+        for (i, metatable) in entry.index.metatables.iter().enumerate() {
+            self.metatables.entry(metatable.owner.clone()).or_default().push((id, i as u32));
+        }
         for (i, class) in entry.index.classes.iter().enumerate() {
             self.classes.entry(class.name.clone()).or_default().push((id, i as u32));
         }
@@ -404,6 +433,7 @@ impl Index {
         remove_file_slots(&mut self.globals, old.index.globals.iter().map(|s| &s.name), id);
         remove_file_slots(&mut self.members, old.index.members.iter().map(|m| &m.owner), id);
         remove_file_slots(&mut self.elements, old.index.elements.iter().map(|e| &e.owner), id);
+        remove_file_slots(&mut self.metatables, old.index.metatables.iter().map(|m| &m.owner), id);
         remove_file_slots(&mut self.classes, old.index.classes.iter().map(|c| &c.name), id);
         remove_file_slots(&mut self.aliases, old.index.aliases.iter().map(|a| &a.name), id);
         let exports = old.index.members.iter().filter(|m| m.owner == "exports");
@@ -563,6 +593,18 @@ impl Index {
             .collect()
     }
 
+    pub fn has_metatables(&self, owner: &str) -> bool {
+        self.metatables.contains_key(owner)
+    }
+
+    /// The metatables set on the tables `owner` names, visible like its members.
+    pub fn metatables_of(&self, owner: &str, from: FileId) -> Vec<&Type> {
+        self.owner_slots(self.metatables.get(owner), owner, from)
+            .into_iter()
+            .filter_map(|(file, i)| Some(&self.file(file)?.index.metatables.get(i as usize)?.metatable))
+            .collect()
+    }
+
     fn owner_slots(&self, slots: Option<&Vec<Slot>>, owner: &str, from: FileId) -> Vec<Slot> {
         let Some(slots) = slots else { return Vec::new() };
         let reachable = |target: FileId| {
@@ -575,6 +617,8 @@ impl Index {
                     || self.is_related(from, target)
                     || self.imports_resource_of(from, target))
         };
+        // The instances of a class are seen where the class is.
+        let owner = instance_class(owner).unwrap_or(owner);
         // `%`-owners name one specific table of one file (a local or a module return), so whoever
         // holds a value of that type may see all of it.
         if owner.starts_with('%') {

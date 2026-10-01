@@ -13,9 +13,9 @@ use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
 use crate::callback_wrappers::Wrapper;
 use crate::index::{
     AliasDef, ClassDef, Element, EnumTable, EventDef, EventFamily, EventKind, FileId, FileIndex, Index, Member,
-    NuiCallbackDef, Symbol, SymbolKind,
+    Metatable, NuiCallbackDef, Symbol, SymbolKind,
 };
-use crate::infer::{table_elements, table_fields, FileContext, Infer};
+use crate::infer::{metatable_args, table_elements, table_fields, FileContext, Infer};
 use crate::luacats::{parse_doc_lines, DocGroup};
 use crate::types::{CallbackRole, DescribedValue, FunType, Type};
 
@@ -304,7 +304,10 @@ impl<'a> Indexer<'a> {
             ty.clone()
         } else {
             match value.map(|v| (&v.kind, v)) {
-                Some((_, expr)) if table_fields(expr).is_some_and(<[TableField]>::is_empty) => {
+                // An empty table that `setmetatable` gives a metatable still has fields to look up.
+                Some((_, expr))
+                    if table_fields(expr).is_some_and(<[TableField]>::is_empty) && metatable_args(expr).is_empty() =>
+                {
                     kind = SymbolKind::Table;
                     Type::Table
                 }
@@ -315,8 +318,10 @@ impl<'a> Indexer<'a> {
                         let (keys, side) = (doc.enum_keys, doc.enum_side);
                         self.enum_class(enum_name.clone(), keys, side, fields, name.span, nested_owner);
                     }
-                    self.table_members(SmolStr::new(nested_owner), fields, table_depth + 1);
-                    Type::GlobalTable(SmolStr::new(nested_owner))
+                    let owner = SmolStr::new(nested_owner);
+                    self.table_members(owner.clone(), fields, table_depth + 1);
+                    self.constructor_metatables(&owner, expr);
+                    Type::GlobalTable(owner)
                 }
                 Some((ExprKind::Function(func), _)) => {
                     kind = SymbolKind::Function;
@@ -390,6 +395,57 @@ impl<'a> Indexer<'a> {
         }
     }
 
+    fn push_metatable(&mut self, owner: SmolStr, metatable: &Expr) {
+        if self.out.metatables.len() < MAX_MEMBERS_PER_FILE {
+            let metatable = self.infer.expr(metatable);
+            if !metatable.is_unknown() {
+                self.out.metatables.push(Metatable { owner, metatable });
+            }
+        }
+    }
+
+    /// The metatables that `setmetatable({ ... }, metatable)` gives the table it builds, which is
+    /// indexed as `owner`.
+    fn constructor_metatables(&mut self, owner: &SmolStr, expr: &Expr) {
+        for metatable in metatable_args(expr) {
+            self.push_metatable(owner.clone(), metatable);
+        }
+    }
+
+    /// `setmetatable(Child, { __index = Base })` on a table that has members of its own: a top-level
+    /// local, a global or a field of one. A table written in the call takes the owner of the name it
+    /// is assigned to instead, and a `---@class` keeps the fields it declares.
+    fn metatable_call(&mut self, args: &[Expr]) {
+        let [table, metatable, ..] = args else { return };
+        if table_fields(table).is_some() {
+            return;
+        }
+        if let Some(owner) = self.table_owner(table) {
+            self.push_metatable(owner, metatable);
+        }
+    }
+
+    /// The owner that the members of the table `expr` names are indexed under, unless a `---@class`
+    /// declares it. A local names a table of its own only when it is declared with one at the top of
+    /// the file; others hold tables, such as an instance that has the type of its class.
+    fn table_owner(&self, expr: &Expr) -> Option<SmolStr> {
+        if let Some(path) = expr.dotted_path().filter(|_| self.root_is_global(expr)) {
+            if matches!(path.as_str(), "_ENV" | "_G") {
+                return None;
+            }
+            let class = match &expr.kind {
+                ExprKind::Name(root) => self.global_class(&root.text),
+                _ => None,
+            };
+            let typed_as_class = class.is_some() || matches!(self.infer.expr(expr), Type::Named(..));
+            return (!typed_as_class).then(|| SmolStr::new(path));
+        }
+        let ExprKind::Name(name) = &expr.kind else { return None };
+        let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(name.span.start) else { return None };
+        let own = self.ctx.local_owner_key(self.ctx.resolution.local(id).decl.start);
+        matches!(self.infer.expr(expr).without_nil(), Type::GlobalTable(owner) if owner == own).then_some(own)
+    }
+
     fn table_members(&mut self, owner: SmolStr, fields: &[TableField], depth: u32) {
         let fields = &fields[..fields.len().min(MAX_TABLE_FIELDS)];
         for field in fields {
@@ -448,7 +504,13 @@ impl<'a> Indexer<'a> {
                             let doc = self.ctx.doc_at(stmt.span.start);
                             let owner = match doc.classes.last() {
                                 Some(class) => class.name.clone(),
-                                None => self.ctx.local_owner_key(name.name.span.start),
+                                None => {
+                                    let owner = self.ctx.local_owner_key(name.name.span.start);
+                                    if let Some(expr) = exprs.get(i) {
+                                        self.constructor_metatables(&owner, expr);
+                                    }
+                                    owner
+                                }
                             };
                             if let Some(enum_name) = &doc.enum_name {
                                 let (keys, side) = (doc.enum_keys, doc.enum_side);
@@ -653,6 +715,7 @@ impl<'a> Indexer<'a> {
                     self.enum_class(enum_name.clone(), doc.enum_keys, doc.enum_side, fields, first.span, &owner);
                 }
                 self.table_members(owner.clone(), fields, 1);
+                self.constructor_metatables(&owner, first);
                 Type::GlobalTable(owner)
             }
             None => self.infer.expr(first).widen(),
@@ -866,6 +929,8 @@ impl<'a> Indexer<'a> {
                         }
                     } else if path == "AddStateBagChangeHandler" {
                         self.state_key(first);
+                    } else if path == "setmetatable" {
+                        self.metatable_call(args);
                     }
                 }
                 self.expr(callee);

@@ -9,7 +9,9 @@ use qbx_lua_syntax::{CommentKind, SmolStr, Span};
 use super::{lua_block, markdown, with_infer};
 use crate::callback_wrappers::{source_skip, target_of, Wrapper};
 use crate::document::Document;
-use crate::index::{AliasDef, ClassDef, EventDef, EventFamily, EventKind, FileId, FileOrigin, SymbolKind};
+use crate::index::{
+    instance_class, AliasDef, ClassDef, EventDef, EventFamily, EventKind, FileId, FileOrigin, SymbolKind,
+};
 use crate::indexer::{described_values, render_doc};
 use crate::infer::{Decl, Infer, MemberInfo};
 use crate::locate::locate;
@@ -287,10 +289,7 @@ fn global_hover(ws: &Workspace, infer: &Infer, name: &str, called: Option<Type>)
 }
 
 pub fn member_hover(infer: &Infer, info: &MemberInfo, owner: &Type) -> String {
-    let owner_label = match owner {
-        Type::GlobalTable(path) if path.starts_with('%') => String::new(),
-        other => other.without_nil().to_string(),
-    };
+    let owner_label = owner_label(owner);
     let is_method = info.ty.as_fun().is_some_and(|f| f.is_method);
     let qualified = match (owner_label.is_empty(), is_method) {
         (true, _) => info.name.to_string(),
@@ -307,6 +306,35 @@ pub fn member_hover(infer: &Infer, info: &MemberInfo, owner: &Type) -> String {
         out.push_str(doc);
     }
     out
+}
+
+/// How a member hover names the value of type `owner` the member is read from. An instance goes by
+/// its class, as what `Zone:new()` returns is `Zone`, without the table it was made from, which
+/// `setmetatable({ size = 1 }, Class)` keeps. A table of one file has no name to show.
+fn owner_label(owner: &Type) -> String {
+    let owner = owner.without_nil();
+    let parts = match &owner {
+        Type::Union(types) => types.as_slice(),
+        other => std::slice::from_ref(other),
+    };
+    let is_instance = |part: &Type| match part {
+        Type::GlobalTable(path) => instance_class(path).is_some(),
+        other => matches!(other, Type::Named(..)),
+    };
+    let label = if parts.iter().any(is_instance) {
+        let classes =
+            parts.iter().filter(|part| !matches!(part, Type::Shape(_) | Type::Table)).map(|part| match part {
+                Type::GlobalTable(path) => Type::GlobalTable(SmolStr::new(instance_class(path).unwrap_or(path))),
+                other => other.clone(),
+            });
+        Type::union(classes)
+    } else {
+        owner
+    };
+    match label {
+        Type::GlobalTable(path) if path.starts_with('%') => String::new(),
+        other => other.to_string(),
+    }
 }
 
 fn class_hover(infer: &Infer, class: &ClassDef) -> String {

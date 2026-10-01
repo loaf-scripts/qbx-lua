@@ -337,6 +337,13 @@ above; fields set through values of the class do not count. A `[string]` index, 
 `---@field [string] any`, takes any name, and so does a parent that is no class, like the `table`
 of `Name : table<string, any>`.
 
+A table that `setmetatable` gives a metatable whose `__index` is the class table, as
+`setmetatable(obj, Test)` does after `Test.__index = Test`, is a value of the class from the call
+on: `obj.more = 1` after the call is reported, and so is `self.more = 1` after
+`local self = setmetatable({}, Test)`. What is set on `obj` before the call is not. A table built
+with fields of its own, like `setmetatable({ id = 1 }, Test)`, keeps them, so its fields are not
+checked against the class.
+
 Other keys need an index of their type. With only `---@field [string] number`, `abc[1]`,
 `abc[1] = x` and array entries such as `{ 'a' }` are reported, since the class has no `integer`
 keys. A key held in a string variable, as in `abc[key]`, may name a field and is not reported.

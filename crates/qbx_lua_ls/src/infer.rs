@@ -12,7 +12,7 @@ use qbx_lua_syntax::{CommentKind, NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::callback_wrappers::{self, Wrapper};
-use crate::index::{FileId, Index, SymbolKind};
+use crate::index::{instance_class, instance_owner, FileId, Index, SymbolKind};
 use crate::locate::statement_at;
 use crate::luacats::{applies_on, parse_doc_lines, CastEntry, DocGroup};
 use crate::narrow::{Casts, Guards};
@@ -131,6 +131,11 @@ pub struct FileContext<'a> {
     call_anchors: FxHashMap<u32, u32>,
     /// Where each table constructor that a declared type may describe is written, by its start.
     tables: FxHashMap<u32, Expected<'a>>,
+    /// The `table.__index = value` assignments of the file, by the table and the value.
+    index_writes: Vec<(&'a Expr, &'a Expr)>,
+    /// The metatables that `setmetatable(name, metatable)` calls give each local, with where each
+    /// call ends.
+    set_metatables: FxHashMap<LocalId, Vec<(u32, &'a Expr)>>,
     docs: RefCell<FxHashMap<u32, Rc<DocGroup>>>,
     guards: OnceCell<Guards>,
     casts: OnceCell<Casts>,
@@ -143,8 +148,16 @@ impl<'a> FileContext<'a> {
             decls: FxHashMap::default(),
             call_anchors: FxHashMap::default(),
             tables: FxHashMap::default(),
+            index_writes: Vec::new(),
+            set_metatables: Vec::new(),
         };
         collector.block(&chunk.block);
+        let mut set_metatables: FxHashMap<LocalId, Vec<(u32, &'a Expr)>> = FxHashMap::default();
+        for (name, call_end, metatable) in collector.set_metatables {
+            if let Some(Resolved::Local(id)) = resolution.resolve_at(name.span.start) {
+                set_metatables.entry(id).or_default().push((call_end, metatable));
+            }
+        }
         Self {
             file,
             source,
@@ -153,6 +166,8 @@ impl<'a> FileContext<'a> {
             decls: collector.decls,
             call_anchors: collector.call_anchors,
             tables: collector.tables,
+            index_writes: collector.index_writes,
+            set_metatables,
             docs: RefCell::new(FxHashMap::default()),
             guards: OnceCell::new(),
             casts: OnceCell::new(),
@@ -262,6 +277,8 @@ struct DeclCollector<'a> {
     decls: FxHashMap<u32, Decl<'a>>,
     call_anchors: FxHashMap<u32, u32>,
     tables: FxHashMap<u32, Expected<'a>>,
+    index_writes: Vec<(&'a Expr, &'a Expr)>,
+    set_metatables: Vec<(&'a Name, u32, &'a Expr)>,
 }
 
 impl<'a> DeclCollector<'a> {
@@ -306,6 +323,19 @@ impl<'a> DeclCollector<'a> {
             }
             StmtKind::Assign { targets, exprs } => {
                 targets.iter().for_each(|e| self.expr(e, None));
+                for (target, value) in targets.iter().zip(exprs) {
+                    match &target.kind {
+                        ExprKind::Field { base, name, .. } if name.text == "__index" => {
+                            self.index_writes.push((base, value));
+                        }
+                        ExprKind::Index { base, index, .. }
+                            if index.as_string().is_some_and(|key| key == "__index") =>
+                        {
+                            self.index_writes.push((base, value));
+                        }
+                        _ => {}
+                    }
+                }
                 for (index, expr) in exprs.iter().enumerate() {
                     self.value(expr, anchor, Expected::Value { stmt, index });
                 }
@@ -358,6 +388,13 @@ impl<'a> DeclCollector<'a> {
         match &expr.kind {
             ExprKind::Function(func) => self.func(func, doc_anchor, None),
             ExprKind::Call { callee, args, .. } => {
+                if let (ExprKind::Name(callee), [Expr { kind: ExprKind::Name(name), .. }, metatable, ..]) =
+                    (&callee.kind, &args[..])
+                {
+                    if callee.text == "setmetatable" {
+                        self.set_metatables.push((name, expr.span.end, metatable));
+                    }
+                }
                 self.expr(callee, None);
                 self.call_args(expr, args, doc_anchor);
             }
@@ -455,7 +492,16 @@ pub struct Infer<'a> {
     /// The sets of values returned by the call of each `local a, b = f()` statement read so far,
     /// by the start of the statement.
     linked_sets: RefCell<FxHashMap<u32, Option<ReturnSets>>>,
+    /// The tables that each owner falls back on through the `__index` of its metatables, by owner.
+    fallbacks: RefCell<FxHashMap<SmolStr, Type>>,
+    /// The owners whose fallbacks are being looked up, which a metatable chain that loops back stops at.
+    following: RefCell<FxHashSet<SmolStr>>,
+    /// What the `__index` of the metatable passed to each `setmetatable` call gives, by the start of
+    /// that argument.
+    passed_indexes: RefCell<FxHashMap<u32, Type>>,
     depth: Cell<u32>,
+    /// Set when `guarded` cuts a lookup short at `MAX_DEPTH`, so that what it found is not cached.
+    truncated: Cell<bool>,
 }
 
 /// Natives call their handles `Vehicle`, `Ped` and so on. They are integers, and resources (ox_lib,
@@ -495,7 +541,11 @@ impl<'a> Infer<'a> {
             locals: RefCell::new(FxHashMap::default()),
             in_progress: RefCell::new(FxHashSet::default()),
             linked_sets: RefCell::new(FxHashMap::default()),
+            fallbacks: RefCell::new(FxHashMap::default()),
+            following: RefCell::new(FxHashSet::default()),
+            passed_indexes: RefCell::new(FxHashMap::default()),
             depth: Cell::new(0),
+            truncated: Cell::new(false),
         }
     }
 
@@ -511,12 +561,23 @@ impl<'a> Infer<'a> {
 
     fn guarded<T: Default>(&self, f: impl FnOnce() -> T) -> T {
         if self.depth.get() >= MAX_DEPTH {
+            self.truncated.set(true);
             return T::default();
         }
         self.depth.set(self.depth.get() + 1);
         let out = f();
         self.depth.set(self.depth.get() - 1);
         out
+    }
+
+    /// What `f` gives, and whether it is complete: a lookup that `MAX_DEPTH` cut short may find
+    /// more when it starts from a shallower point, so it is not cached.
+    fn complete<T>(&self, f: impl FnOnce() -> T) -> (T, bool) {
+        let outer = self.truncated.replace(false);
+        let out = f();
+        let truncated = self.truncated.get();
+        self.truncated.set(outer || truncated);
+        (out, !truncated)
     }
 
     pub fn expr(&self, expr: &Expr) -> Type {
@@ -608,7 +669,48 @@ impl<'a> Infer<'a> {
     /// the read change it, without what the guards around the read rule out, such as the `nil` of a
     /// `string?` after `if not name then return end`.
     pub fn local_type_at(&self, id: LocalId, offset: u32) -> Type {
-        self.narrowed(id, offset, self.local_type(id))
+        self.narrowed(id, offset, self.with_metatables(id, offset, self.local_type(id)))
+    }
+
+    /// `ty`, the type of the local `id`, with what the `setmetatable` calls on the local make of it
+    /// where it is read at `offset`: `setmetatable(obj, Class)` makes `obj` an instance of `Class`.
+    /// For a table class that holds before the call too, so the fields a constructor sets on `obj`
+    /// first are those of its instances. A `---@class` is a type that `obj` takes only once the
+    /// call gives it, so what is set on `obj` before stays out of the class.
+    fn with_metatables(&self, id: LocalId, offset: u32, ty: Type) -> Type {
+        let Some(metatables) = self.ctx.set_metatables.get(&id) else { return ty };
+        // The index gives a table of its own the metatables set on it.
+        if self.is_own_table(id, &ty) {
+            return ty;
+        }
+        metatables.iter().fold(ty, |ty, (call_end, metatable)| {
+            let index = self.passed_index(metatable);
+            if offset < *call_end && matches!(index, Type::Named(..)) {
+                return ty;
+            }
+            self.instance_type(ty, index, false)
+        })
+    }
+
+    /// Whether `ty`, the type of the local `id`, is the table the local is declared with, as the
+    /// top-level `local Base = {}` has, rather than one it holds, as an instance has the type of its
+    /// class.
+    fn is_own_table(&self, id: LocalId, ty: &Type) -> bool {
+        let own = self.ctx.local_owner_key(self.ctx.resolution.local(id).decl.start);
+        matches!(ty.without_nil(), Type::GlobalTable(owner) if owner == own)
+    }
+
+    /// Whether `expr`, of type `ty`, names a table of its own, which the index gives the metatables
+    /// that `setmetatable` sets on it: a top-level local declared with a table, or a global or a
+    /// field of one that holds its own table rather than an instance of another.
+    fn names_own_table(&self, expr: &Expr, ty: &Type) -> bool {
+        if let ExprKind::Name(name) = &expr.kind {
+            if let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(name.span.start) {
+                return self.is_own_table(id, ty);
+            }
+        }
+        let path = expr.dotted_path();
+        matches!(ty.without_nil(), Type::GlobalTable(owner) if path.is_some_and(|path| owner == path))
     }
 
     /// `ty`, the type of the local `id`, as the casts before a read at `offset` change it and
@@ -841,8 +943,15 @@ impl<'a> Infer<'a> {
         }
         if let Some(expr) = exprs.get(index) {
             let is_last = index + 1 == exprs.len();
-            if top_level && table_fields(expr).is_some() {
-                return Type::GlobalTable(self.ctx.local_owner_key(names[index].name.span.start));
+            if let Some(fields) = table_fields(expr).filter(|_| top_level) {
+                let own = Type::GlobalTable(self.ctx.local_owner_key(names[index].name.span.start));
+                // `setmetatable({}, Class)` makes an instance of a `---@class`, which is that class,
+                // and one built with fields keeps those.
+                let metatable = metatable_args(expr).first().map(|mt| self.expr(mt));
+                if let Some(class @ Type::Named(..)) = metatable.map(|mt| self.metatable_index(&mt)) {
+                    return if fields.is_empty() { class } else { Type::union([own, class]) };
+                }
+                return own;
             }
             let ty =
                 if is_last { self.expr_multi(expr).into_iter().next().unwrap_or_default() } else { self.expr(expr) };
@@ -1161,7 +1270,11 @@ impl<'a> Infer<'a> {
         let mut keys = Vec::new();
         let mut values = Vec::new();
         if !array_only {
-            for member in self.members(&Type::GlobalTable(owner.clone())) {
+            // `pairs` visits the table's own fields, not those its metatable's `__index` gives.
+            let mut members = Vec::new();
+            self.guarded(|| self.own_members(owner, None, &mut members));
+            let mut seen = FxHashSet::default();
+            for member in members.into_iter().filter(|m| seen.insert(m.name.clone())) {
                 keys.push(Type::String);
                 values.push(member.ty);
             }
@@ -1372,6 +1485,117 @@ impl<'a> Infer<'a> {
         Type::Shape(Arc::new(shape))
     }
 
+    /// What `setmetatable(t, metatable)` makes of a table of type `own`: a table that also has the
+    /// fields of `index`, the tables the `__index` of `metatable` gives, as an instance has the
+    /// methods of its class. A table with members of its own (`own_table`) is indexed with its
+    /// metatables instead, and a declared type is kept.
+    fn instance_type(&self, own: Type, index: Type, own_table: bool) -> Type {
+        if index.is_unknown() || own_table {
+            return own;
+        }
+        let bare = own.without_nil();
+        let parts = match &bare {
+            Type::Union(types) => types.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        if parts.iter().any(|part| matches!(part, Type::Named(..) | Type::Require(_) | Type::Exports(_))) {
+            return own;
+        }
+        // An instance of a `---@class` is that class. The fields set on an instance of a table class
+        // are its own, and it falls back on its class for the others.
+        let class = match index {
+            Type::Named(..) => index,
+            other => instances_of(other),
+        };
+        // An empty table holds nothing of its own.
+        if matches!(bare, Type::Table | Type::Unknown) {
+            return class;
+        }
+        // The fields the table holds itself come first, as Lua finds them before those of its
+        // metatable. The class goes before the tables the value was an instance of so far, so that
+        // the fields set on it are those of its new instances.
+        let (held, owners): (Vec<&Type>, Vec<&Type>) =
+            parts.iter().partition(|part| !matches!(part, Type::GlobalTable(_)));
+        Type::union(held.into_iter().cloned().chain([class]).chain(owners.into_iter().cloned()))
+    }
+
+    /// The tables that the `__index` of the metatable passed to a `setmetatable` call as `metatable`
+    /// gives.
+    fn passed_index(&self, metatable: &Expr) -> Type {
+        if let Some(index) = self.passed_indexes.borrow().get(&metatable.span.start) {
+            return index.clone();
+        }
+        // A metatable read from the table it is set on, as in `setmetatable(t, t)`, stops here.
+        self.passed_indexes.borrow_mut().insert(metatable.span.start, Type::Unknown);
+        let (index, complete) = self.complete(|| self.metatable_index(&self.expr(metatable)));
+        if complete {
+            self.passed_indexes.borrow_mut().insert(metatable.span.start, index.clone());
+        } else {
+            self.passed_indexes.borrow_mut().remove(&metatable.span.start);
+        }
+        index
+    }
+
+    /// The tables that the `__index` of a metatable of type `metatable` gives, whose fields a table
+    /// with that metatable falls back on. A function there decides them at runtime, so it gives none.
+    fn metatable_index(&self, metatable: &Type) -> Type {
+        let mut found = Vec::new();
+        self.guarded(|| self.raw_index(metatable, &mut found, 0));
+        let parts = found.into_iter().flat_map(|ty| match ty {
+            Type::Union(types) => types,
+            other => vec![other],
+        });
+        Type::union(parts.filter(|ty| match ty {
+            Type::GlobalTable(_) | Type::Shape(_) | Type::Require(_) => true,
+            Type::Named(name, _) => self.index.class(name, self.side).is_some(),
+            _ => false,
+        }))
+    }
+
+    /// The values of the `__index` field of a metatable of type `metatable`, read from the metatable
+    /// itself as Lua reads it, not through a metatable of its own.
+    fn raw_index(&self, metatable: &Type, out: &mut Vec<Type>, depth: u32) {
+        if depth > 8 {
+            return;
+        }
+        match self.resolve_alias(metatable) {
+            Type::Union(types) => {
+                for part in types.iter().filter(|t| !matches!(t, Type::Nil)) {
+                    self.raw_index(part, out, depth + 1);
+                }
+            }
+            Type::Shape(shape) => out.extend(shape.fields.iter().filter(|f| f.name == "__index").map(|f| f.ty.clone())),
+            Type::GlobalTable(owner) => {
+                let written = self.written_index(&owner);
+                if !written.is_empty() {
+                    out.extend(written);
+                    return;
+                }
+                let mut members = Vec::new();
+                self.own_members(&owner, Some("__index"), &mut members);
+                out.extend(members.into_iter().map(|m| m.ty));
+            }
+            ty @ Type::Named(..) => out.extend(self.members_matching(&ty, Some("__index")).into_iter().map(|m| m.ty)),
+            _ => {}
+        }
+    }
+
+    /// The values this file writes to the `__index` field of the table `owner`: in the constructor
+    /// of a top-level local, or with `table.__index = value`, as `self.__index = self` in a method
+    /// does. The index does not hold them yet while the file is indexed for the first time.
+    fn written_index(&self, owner: &str) -> Vec<Type> {
+        let fields = self.local_table_fields(owner).unwrap_or_default();
+        let in_constructor = fields.iter().filter_map(|field| match field {
+            TableField::Named { name, value } if name.text == "__index" => Some(value),
+            TableField::Keyed { key, value } if key.as_string().is_some_and(|key| key == "__index") => Some(value),
+            _ => None,
+        });
+        let table = Type::GlobalTable(SmolStr::new(owner));
+        let assigned =
+            self.ctx.index_writes.iter().filter(|(base, _)| self.expr(base) == table).map(|(_, value)| *value);
+        in_constructor.chain(assigned).map(|value| self.expr(value)).collect()
+    }
+
     fn binary(&self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Type {
         match op {
             BinOp::Concat => Type::String,
@@ -1460,7 +1684,17 @@ impl<'a> Infer<'a> {
                         return only(Type::Require(path.clone()), false);
                     }
                 }
-                (Some("setmetatable"), Some(arg)) => return only(self.expr(arg), false),
+                (Some("setmetatable"), Some(arg)) => {
+                    let own = self.expr(arg);
+                    let ty = match args.get(1) {
+                        Some(metatable) => {
+                            let own_table = self.names_own_table(arg, &own);
+                            self.instance_type(own, self.passed_index(metatable), own_table)
+                        }
+                        None => own,
+                    };
+                    return only(ty, false);
+                }
                 (Some("tostring"), _) => return only(Type::String, true),
                 (Some("tonumber"), _) => return only(Type::Number.optional(), true),
                 _ => {}
@@ -2204,7 +2438,65 @@ impl<'a> Infer<'a> {
         out
     }
 
+    /// The members of the tables `owner` names, and of the tables they fall back on through the
+    /// `__index` of their metatables for the fields they lack themselves.
     fn owner_members(&self, owner: &str, filter: Option<&str>, out: &mut Vec<MemberInfo>) {
+        let start = out.len();
+        self.own_members(owner, filter, out);
+        let is_instance = instance_class(owner).is_some();
+        if filter.is_some() && out.len() > start && !is_instance {
+            return;
+        }
+        let fallback = self.fallback(owner);
+        if fallback.is_unknown() || !self.following.borrow_mut().insert(SmolStr::new(owner)) {
+            return;
+        }
+        let mut own: FxHashMap<SmolStr, usize> = FxHashMap::default();
+        for (i, member) in out.iter().enumerate().skip(start) {
+            own.entry(member.name.clone()).or_insert(i);
+        }
+        let inherited = self.guarded(|| self.members_matching(&fallback, filter));
+        self.following.borrow_mut().remove(owner);
+        for member in inherited {
+            match own.get(&member.name) {
+                // The methods of a class set the fields of its instances through `self`, so a field
+                // that both set takes the more specific type, as `self.item = nil` in a constructor
+                // does not hide the `Item` that `Holder:set(item)` stores.
+                Some(&i) if is_instance && member.ty.specificity() > out[i].ty.specificity() => out[i] = member,
+                Some(_) => {}
+                None => out.push(member),
+            }
+        }
+    }
+
+    /// The tables that `owner` falls back on: its class for an instance, or the `__index` of the
+    /// metatables that `setmetatable` gives it.
+    fn fallback(&self, owner: &str) -> Type {
+        // The instances of a class fall back on the class.
+        if let Some(class) = instance_class(owner) {
+            return Type::GlobalTable(SmolStr::new(class));
+        }
+        if !self.index.has_metatables(owner) {
+            return Type::Unknown;
+        }
+        if let Some(ty) = self.fallbacks.borrow().get(owner) {
+            return ty.clone();
+        }
+        let metatables = self.index.metatables_of(owner, self.ctx.file);
+        if metatables.is_empty() || !self.following.borrow_mut().insert(SmolStr::new(owner)) {
+            return Type::Unknown;
+        }
+        let (ty, complete) =
+            self.complete(|| Type::union(metatables.into_iter().map(|metatable| self.metatable_index(metatable))));
+        self.following.borrow_mut().remove(owner);
+        if complete {
+            self.fallbacks.borrow_mut().insert(SmolStr::new(owner), ty.clone());
+        }
+        ty
+    }
+
+    /// The members set on the tables `owner` names themselves.
+    fn own_members(&self, owner: &str, filter: Option<&str>, out: &mut Vec<MemberInfo>) {
         for (file, symbol) in self.index.members_of(owner, self.ctx.file) {
             if filter.is_none_or(|f| f == symbol.name) {
                 let mut member = member_from_symbol(file, symbol);
@@ -2360,6 +2652,29 @@ pub fn table_fields(expr: &Expr) -> Option<&[TableField]> {
         }
         _ => None,
     }
+}
+
+/// The instances of the tables in `index`, where each table a class is indexed as becomes the owner
+/// of its instances' own fields.
+fn instances_of(index: Type) -> Type {
+    match index {
+        Type::GlobalTable(owner) => Type::GlobalTable(instance_owner(&owner)),
+        Type::Union(types) => Type::union(types.into_iter().map(instances_of)),
+        other => other,
+    }
+}
+
+/// The metatables that the `setmetatable({...}, mt)` calls of a table-valued initialiser give the
+/// table it builds.
+pub fn metatable_args(expr: &Expr) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    let mut current = expr.unparen();
+    while let ExprKind::Call { callee, args, .. } = &current.kind {
+        let (Some("setmetatable"), Some(table)) = (callee.dotted_path().as_deref(), args.first()) else { break };
+        out.extend(args.get(1));
+        current = table.unparen();
+    }
+    out
 }
 
 /// The entries of a table constructor that have no name: the array part `ipairs` visits, which

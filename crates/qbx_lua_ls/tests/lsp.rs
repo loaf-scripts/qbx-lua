@@ -4866,6 +4866,441 @@ sleep(1)
 }
 
 #[test]
+fn tables_with_a_metatable_have_the_members_of_its_index() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-metatables-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    let write = |relative: &str, text: &str| {
+        let path = fixture.0.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "fxmanifest.lua",
+        "fx_version 'cerulean'\ngame 'gta5'\nshared_script 'shared/*.lua'\nclient_scripts { 'client/*.lua' }\n",
+    );
+    write(
+        "shared/vehicle.lua",
+        "\
+Vehicle = {}
+Vehicle.__index = Vehicle
+
+function Vehicle.new(plate)
+    local self = setmetatable({}, Vehicle)
+    self.plate = plate
+    self.speed = 0
+    return self
+end
+",
+    );
+    // A method another file adds to the global class table.
+    write("client/honk.lua", "function Vehicle:honk() end\n");
+    // Global classes whose constructors set `self.__index = self`, one inheriting from the other.
+    write(
+        "client/zones.lua",
+        "\
+Zone = {}
+
+function Zone:new()
+    local zone = { size = 1 }
+    setmetatable(zone, self)
+    self.__index = self
+    return zone
+end
+
+function Zone:contains()
+    return true
+end
+
+function Zone:resize(size)
+    self.size = size
+end
+
+BoxZone = {}
+setmetatable(BoxZone, { __index = Zone })
+
+function BoxZone:new()
+    local zone = Zone:new()
+    zone.width = 2
+    setmetatable(zone, self)
+    self.__index = self
+    return zone
+end
+
+function BoxZone:corners() end
+",
+    );
+    let text = "\
+local Base = {}
+Base.__index = Base
+
+function Base.new()
+    return setmetatable({}, Base)
+end
+
+function Base:greet() end
+
+local Child = setmetatable({}, { __index = Base })
+Child.__index = Child
+
+function Child.new()
+    local self = setmetatable({}, Child)
+    self.level = 1
+    return self
+end
+
+function Child:wave() end
+
+local Other = {}
+Other.__index = Other
+setmetatable(Other, Base)
+
+local Animal = {}
+
+function Animal:new(o)
+    o = o or {}
+    setmetatable(o, self)
+    self.__index = self
+    return o
+end
+
+function Animal:speak() end
+
+local function make()
+    local made = {}
+    setmetatable(made, Animal)
+    return made
+end
+
+---@class Point
+---@field x number
+local Point = {}
+Point.__index = Point
+
+function Point.new()
+    return setmetatable({}, Point)
+end
+
+---@class Bar
+---@field name string
+local Bar = setmetatable({}, { __index = Base })
+
+---@class Thing
+---@field name string
+
+local Holder = {}
+Holder.__index = Holder
+
+function Holder.new()
+    local self = setmetatable({}, Holder)
+    self.item = nil
+    return self
+end
+
+---@param thing Thing
+function Holder:set(thing)
+    self.item = thing
+end
+
+local Looped = {}
+Looped.__index = Looped
+setmetatable(Looped, Looped)
+
+function Looped:loop() end
+
+local Left = {}
+local Right = {}
+setmetatable(Left, { __index = Right })
+setmetatable(Right, { __index = Left })
+
+function Left:left() end
+function Right:right() end
+
+local Late = {}
+local late = setmetatable({}, Late)
+Late.__index = Late
+
+function Late:later() end
+
+local base = Base.new()
+local child = Child.new()
+local other = setmetatable({}, Other)
+local dog = Animal:new()
+local built = make()
+local point = Point.new()
+local bar = Bar
+local vehicle = Vehicle.new('abc')
+local literal = setmetatable({}, { __index = { hello = 1 } })
+local proxy = setmetatable({}, { __index = function(_, key) return key end })
+local hello = literal.hello
+local level = child.level
+local missing = proxy.anything
+local zone = Zone:new()
+local zoneSize = zone.size
+local box = BoxZone:new()
+local inside = box:contains()
+local childClass = Child
+local vehicleClass = Vehicle
+local animal = Animal
+local held = Holder.new().item
+---@type Thing
+local typed = Holder.new().item
+local looped = setmetatable({}, Looped)
+local loopedMissing = looped.nothing
+local fromRight = Left.right
+local fromLeft = Right.left
+local neither = Left.neither
+function dog:bark() end
+base:greet()
+child:greet()
+child:wave()
+vehicle:honk()
+print(other, built, point, bar, hello, level, missing, zone, zoneSize, inside, childClass, vehicleClass, animal)
+print(held, typed, late, looped, loopedMissing, fromRight, fromLeft, neither)
+";
+    write("client/main.lua", text);
+    let main = "client/main.lua";
+    let mut client = Client::start(fixture.0.clone());
+    client.open_with(main, text);
+
+    let cases: [(&str, &[&str], &[&str]); 24] = [
+        ("local base =", &["greet: function", "new: function"], &[]),
+        // Each level of `__index`: `Child`'s own methods, and `Base`'s through its metatable.
+        ("local child =", &["wave: function", "greet: function", "level: integer"], &[]),
+        // `setmetatable(Other, Base)` gives `Other` the methods of `Base`.
+        ("local other =", &["greet: function"], &[]),
+        // `setmetatable(o, self)` inside `Animal:new`, and on a local before it is returned. A method
+        // defined on an instance is one of the instances, not of the class.
+        ("local dog =", &["speak: function", "bark: function"], &[]),
+        ("local built =", &["speak: function"], &[]),
+        // An instance of a `---@class` is that class, and the class keeps its own fields.
+        ("local point =", &["local point: Point"], &[]),
+        ("local bar =", &["local bar: Bar", "name: string"], &["greet"]),
+        ("local vehicle =", &["honk: function", "speed: integer"], &[]),
+        ("local hello =", &["local hello: integer"], &[]),
+        ("local level =", &["local level: integer"], &[]),
+        // An `__index` function decides the fields at runtime.
+        ("local missing =", &["local missing: unknown"], &[]),
+        // `self.__index = self` in the constructor of a global class, and in its subclass's. Making
+        // an instance of `Zone` one of `BoxZone` leaves `Zone` as it is, also for the fields set on
+        // the instance before. The `size` the instance holds shows over the one `Zone:resize` sets.
+        ("local zone =", &["contains: function", "size: integer"], &["corners", "width", "size: unknown"]),
+        ("local box =", &["corners: function", "contains: function", "width: integer"], &[]),
+        ("local inside =", &["local inside: boolean"], &[]),
+        // The fields a constructor sets on the new table belong to the instances, not to the class.
+        ("local childClass =", &["wave: function", "greet: function"], &["level"]),
+        ("local vehicleClass =", &["honk: function"], &["plate", "speed"]),
+        ("local animal =", &["speak: function"], &["bark"]),
+        // A method sets the field of an instance through `self`, so the `nil` the constructor sets
+        // first does not hide it.
+        ("local held =", &["local held: Thing"], &[]),
+        // A metatable that is its own `__index`, and two tables falling back on each other.
+        ("local looped =", &["loop: function"], &[]),
+        ("local loopedMissing =", &["local loopedMissing: unknown"], &[]),
+        ("local fromRight =", &["local function fromRight"], &[]),
+        ("local fromLeft =", &["local function fromLeft"], &[]),
+        ("local neither =", &["local neither: unknown"], &[]),
+        // An `__index` set after the call.
+        ("local late =", &["later: function"], &[]),
+    ];
+    for (needle, expected, absent) in cases {
+        let (l, c) = pos(text, needle, 6);
+        let hover = client.hover_text(main, l, c);
+        for expected in expected {
+            assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+        }
+        for absent in absent {
+            assert!(!hover.contains(absent), "{needle}: unexpected {absent:?} in {hover}");
+        }
+    }
+    // A field of an instance is named as one of its class, not of the table it was made from.
+    let (l, c) = pos(text, "zone.size", 5);
+    let hover = client.hover_text(main, l, c);
+    assert!(hover.contains("(field) Zone.size: integer"), "{hover}");
+    let mismatches: Vec<(String, u64)> =
+        client.diagnostics_for(main).into_iter().filter(|(code, _)| code == "assign-type-mismatch").collect();
+    assert!(mismatches.is_empty(), "`typed` takes the `Thing` that `Holder:set` stores: {mismatches:?}");
+
+    let (l, c) = pos(text, "child:wave", 6);
+    let labels = client.completion_labels(main, l, c);
+    for method in ["new", "wave", "greet"] {
+        assert!(labels.iter().any(|label| label == method), "{method} in {labels:?}");
+    }
+
+    // Where a location is, as (file, line).
+    let places = |result: &Value| -> Vec<(String, u64)> {
+        let mut places: Vec<(String, u64)> = result
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .map(|location| {
+                let uri = location["uri"].as_str().unwrap();
+                (uri.rsplit('/').next().unwrap().to_string(), location["range"]["start"]["line"].as_u64().unwrap())
+            })
+            .collect();
+        places.sort();
+        places
+    };
+    let line = |needle: &str| u64::from(pos(text, needle, 0).0);
+    let (l, c) = pos(text, "child:greet", 6);
+    let definition = client.request("textDocument/definition", client.position_params(main, l, c));
+    assert_eq!(places(&definition), [("main.lua".to_string(), line("function Base:greet"))]);
+    let (l, c) = pos(text, "vehicle:honk", 8);
+    let definition = client.request("textDocument/definition", client.position_params(main, l, c));
+    assert_eq!(places(&definition), [("honk.lua".to_string(), 0)]);
+    let (l, c) = pos(text, "child.level", 6);
+    let definition = client.request("textDocument/definition", client.position_params(main, l, c));
+    assert_eq!(places(&definition), [("main.lua".to_string(), line("self.level = 1"))]);
+
+    let greets =
+        ["function Base:greet", "base:greet", "child:greet"].map(|needle| ("main.lua".to_string(), line(needle)));
+    let (l, c) = pos(text, "Base:greet", 5);
+    let mut params = client.position_params(main, l, c);
+    params["context"] = json!({ "includeDeclaration": true });
+    assert_eq!(places(&client.request("textDocument/references", params)), greets);
+    let mut params = client.position_params(main, l, c);
+    params["newName"] = json!("hello");
+    let edit = client.request("textDocument/rename", params);
+    let edits = edit["changes"][client.uri(main).as_str()].as_array().cloned().unwrap_or_default();
+    let mut renamed: Vec<u64> = edits.iter().map(|e| e["range"]["start"]["line"].as_u64().unwrap()).collect();
+    renamed.sort();
+    assert_eq!(renamed, greets.map(|(_, line)| line), "{edit}");
+}
+
+#[test]
+fn tables_become_values_of_a_class_metatable_at_the_call() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class (exact) Meta.Foo
+---@field a number
+local Foo = {}
+Foo.__index = Foo
+
+function Foo:get() return self.a end
+
+local function fromFields()
+    local self = { a = 1, b = 2 }
+    self.extra = 3
+    return setmetatable(self, Foo)
+end
+
+local function filledFirst()
+    local o = {}
+    o.a = 'one'
+    o.tmp = true
+    setmetatable(o, Foo)
+    o.a = 2
+    return o
+end
+
+local function readFirst()
+    local p = { b = 1 }
+    local early = p.b
+    return setmetatable(p, Foo), early
+end
+
+---@class (exact) Meta.Indexed
+---@field x number
+local Indexed = {}
+
+local function viaIndex()
+    local self = setmetatable({}, { __index = Indexed })
+    self.y = 1
+    local t = { w = 1 }
+    setmetatable(t, { __index = Indexed })
+    t.q = 2
+    return self, t
+end
+
+local made = fromFields()
+local filled = filledFirst()
+local built, early = readFirst()
+local literal = setmetatable({ c = 1 }, Foo)
+local plain = setmetatable({}, Foo)
+local fromMade = made.b
+---@param foo Meta.Foo
+local function use(foo) return foo.a end
+print(viaIndex, made, filled, built, early, literal, plain, fromMade, use)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    // What is set on a table before `setmetatable` gives it a class is no field of the class, and a
+    // table built with fields of its own keeps them, so it is no value of the class alone. An empty
+    // table is one from the call on.
+    assert_eq!(
+        undeclared_fields(&mut client, CLIENT),
+        [(line("self.y = 1"), "Field `y` is not declared in strict class `Meta.Indexed`".to_string())]
+    );
+    let mismatches: Vec<(String, u64)> =
+        client.diagnostics_for(CLIENT).into_iter().filter(|(code, _)| code == "assign-type-mismatch").collect();
+    assert!(mismatches.is_empty(), "{mismatches:?}");
+
+    let cases: [(&str, u32, &[&str]); 7] = [
+        ("local made =", 6, &["b: integer", "get: function"]),
+        ("local early = p.b", 6, &["local early: integer"]),
+        ("local literal =", 6, &["c: integer", "get: function"]),
+        ("local plain =", 6, &["local plain: Meta.Foo"]),
+        ("local fromMade =", 6, &["local fromMade: integer"]),
+        ("made.b", 5, &["(field) Meta.Foo.b: integer"]),
+        ("---@param foo Meta.Foo", 14, &["(class) Meta.Foo", "a: number"]),
+    ];
+    for (needle, delta, expected) in cases {
+        let (l, c) = pos(text, needle, delta);
+        let hover = client.hover_text(CLIENT, l, c);
+        for expected in expected {
+            assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+        }
+    }
+    let (l, c) = pos(text, "---@param foo Meta.Foo", 14);
+    let class = client.hover_text(CLIENT, l, c);
+    for absent in ["extra", "tmp", "b: integer", "a: string"] {
+        assert!(!class.contains(absent), "the class takes nothing set before the call: {absent:?} in {class}");
+    }
+}
+
+#[test]
+fn deep_metatable_chains_leave_shallower_lookups_whole() {
+    // Each table falls back on the one before, deeper than a lookup follows.
+    let mut chain = String::from("local C1 = {}\nC1.v = 1\n");
+    for i in 2..=40 {
+        chain.push_str(&format!("local C{i} = setmetatable({{}}, {{ __index = C{} }})\n", i - 1));
+    }
+    let reads: String = (1..40).map(|i| format!("---@type string\nlocal s{i} = C{i}.v\n")).collect();
+    let mut client = Client::start(fixture_root());
+    client.open_with(CLIENT, &format!("{chain}{reads}"));
+    // Reading the deepest table first stops at the depth limit, which leaves the tables it passed
+    // whole for the reads after it.
+    client.open_with(SERVER, &format!("{chain}---@type string\nlocal deep = C40.v\n{reads}"));
+    let mut mismatched = |file: &str| -> Vec<String> {
+        client.diagnostics_for(file);
+        let uri = client.uri(file).to_string();
+        client.diagnostics[&uri]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["code"] == "assign-type-mismatch")
+            .map(|d| d["message"].as_str().unwrap().to_string())
+            .filter(|message| !message.contains("`deep`"))
+            .collect()
+    };
+    let resolved = mismatched(CLIENT);
+    assert!(resolved.len() >= 10, "{resolved:?}");
+    assert_eq!(mismatched(SERVER), resolved);
+}
+
+#[test]
 fn hover_expands_aliases_and_lists_members_only_for_tables() {
     let mut client = Client::start(fixture_root());
     let text = "\

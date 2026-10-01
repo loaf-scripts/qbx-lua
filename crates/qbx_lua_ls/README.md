@@ -44,6 +44,10 @@ Available features depend on the editor's LSP client.
   unions, arrays, `table<K, V>` and what a function returns, and the classes an alias of a union
   stands for. Go to implementation: where code sets a field or method, without the `---@field`
   lines that declare it.
+- Classes written with metatables and no annotations: what `setmetatable({}, Class)` returns, and
+  a table given a metatable by `setmetatable`, have the fields of its `__index` table at every
+  level, as `Class.__index = Class` sets up, for completion, hover and navigation. A `---@class`
+  keeps the fields it declares.
 - Exports typed by LuaLS definitions, as `---@type PhoneExports` above `exports.phone = {}`, or
   `---@class qbx_core` above `exports.qbx_core = {}` with `function exports.qbx_core:GetCid()`
   methods: `exports.phone` and `exports['phone']` take the members of the declared type before the
