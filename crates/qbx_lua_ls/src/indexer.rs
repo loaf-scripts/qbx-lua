@@ -198,6 +198,7 @@ impl<'a> Indexer<'a> {
         for mut class in doc.classes {
             let range = self.range(group[class.line.min(group.len() - 1)].span);
             let field_sides = class.fields.iter().map(|field| field.side).collect();
+            let field_visibility = class.fields.iter().map(|field| field.visibility).collect();
             let field_values = class.fields.iter_mut().map(|field| std::mem::take(&mut field.values)).collect();
             let fields = class
                 .fields
@@ -217,6 +218,7 @@ impl<'a> Indexer<'a> {
                 parents: class.parents,
                 fields,
                 field_sides,
+                field_visibility,
                 field_values,
                 indices: class.indices,
                 literal_fields: class.literal_fields,
@@ -269,9 +271,12 @@ impl<'a> Indexer<'a> {
         own.map_or_else(|| self.infer.is_class_table(name), Symbol::is_class_table)
     }
 
-    fn push_member(&mut self, owner: SmolStr, symbol: Symbol, injected: bool) {
+    /// Records a member set by the statement or table field whose doc comment starts at `doc_anchor`,
+    /// which may declare it `---@private`.
+    fn push_member(&mut self, owner: SmolStr, symbol: Symbol, injected: bool, doc_anchor: Option<u32>) {
         if self.out.members.len() < MAX_MEMBERS_PER_FILE {
-            self.out.members.push(Member { owner, symbol, injected });
+            let visibility = doc_anchor.map(|anchor| self.ctx.doc_at(anchor).visibility).unwrap_or_default();
+            self.out.members.push(Member { owner, symbol, injected, visibility });
         }
     }
 
@@ -381,7 +386,7 @@ impl<'a> Indexer<'a> {
             if symbol.kind == SymbolKind::Variable {
                 symbol.kind = SymbolKind::Field;
             }
-            self.push_member(owner.clone(), symbol, false);
+            self.push_member(owner.clone(), symbol, false, Some(name.span.start));
         }
         let elements = table_elements(fields);
         if !elements.array.is_empty() {
@@ -515,11 +520,40 @@ impl<'a> Indexer<'a> {
                 None => return,
             }
         };
-        let injected = typed_as_class && owner_path.is_empty() && !self.is_class_table(&name.base);
+        let mut injected = typed_as_class && owner_path.is_empty() && !self.is_class_table(&name.base);
         for segment in owner_path {
-            owner = SmolStr::new(format!("{owner}.{}", segment.text));
+            // `function lib.array:map()` below `---@class Array` `lib.array = lib.class('Array')`
+            // sets a method of the class on its table, as `function Array:map()` would.
+            owner = match self.class_table_member(&owner, &segment.text) {
+                Some(class) => {
+                    injected = false;
+                    class
+                }
+                None => SmolStr::new(format!("{owner}.{}", segment.text)),
+            };
         }
-        self.push_member(owner, symbol, injected);
+        self.push_member(owner, symbol, injected, Some(stmt.span.start));
+    }
+
+    /// The class whose table the member `name` of `owner` is, when a `---@class` annotation declares
+    /// it there, preferring this file like `global_class`. The exports of a resource stay under
+    /// `exports.name`, where what definition files declare for them is looked up.
+    fn class_table_member(&self, owner: &str, name: &str) -> Option<SmolStr> {
+        if owner == "exports" {
+            return None;
+        }
+        let own = self.out.members.iter().rev().find(|member| member.owner == owner && member.symbol.name == name);
+        let symbol = match own {
+            Some(member) => &member.symbol,
+            None => {
+                let members = self.infer.index.members_named(owner, name, self.file);
+                members.into_iter().map(|(_, member)| &member.symbol).find(|symbol| symbol.is_class_table())?
+            }
+        };
+        match &symbol.ty {
+            Type::Named(class, _) if symbol.is_class_table() => Some(class.clone()),
+            _ => None,
+        }
     }
 
     fn assignment(&mut self, stmt: &Stmt, target: &Expr, position: usize, value: Option<&Expr>) {
@@ -580,7 +614,7 @@ impl<'a> Indexer<'a> {
                 self.out.typed_exports.push(self.out.members.len() as u32);
             }
         }
-        self.push_member(owner, symbol, typed_as_class && !class_table);
+        self.push_member(owner, symbol, typed_as_class && !class_table, Some(stmt.span.start));
     }
 
     fn root_is_global(&self, expr: &Expr) -> bool {
@@ -684,7 +718,7 @@ impl<'a> Indexer<'a> {
             literal: None,
             range: self.range(key.span),
         };
-        self.push_member(owner, symbol, false);
+        self.push_member(owner, symbol, false, None);
     }
 
     /// The handler a framework or `@callback` registration passes: a function literal typed by the

@@ -37,6 +37,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "duplicate-doc-field",
     "missing-fields",
     "assign-type-mismatch",
+    "invisible",
     "return-type-mismatch",
     "missing-return",
     "cast-type-mismatch",

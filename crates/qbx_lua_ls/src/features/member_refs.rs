@@ -12,6 +12,7 @@ use crate::document::Document;
 use crate::index::{FileId, FileOrigin};
 use crate::infer::{table_fields, Infer};
 use crate::locate::string_content_span;
+use crate::luacats::field_head;
 use crate::server::Documents;
 use crate::types::Type;
 use crate::workspace::Workspace;
@@ -98,16 +99,13 @@ fn declaration_range(doc: &Document, name: &str, range: Range) -> Option<Range> 
     if string_content_span(span, &doc.text).is_some() {
         return string_range(span);
     }
-    let mut rest = raw.strip_prefix("---")?.trim_start().strip_prefix("@field")?;
+    let rest = raw.strip_prefix("---")?.trim_start().strip_prefix("@field")?;
     if !rest.starts_with(char::is_whitespace) {
         return None;
     }
-    rest = rest.trim_start();
-    for scope in ["public ", "private ", "protected ", "package "] {
-        if let Some(stripped) = rest.strip_prefix(scope) {
-            rest = stripped.trim_start();
-        }
-    }
+    // Past `(client)` and `private` the way the annotation parser reads them, which takes the
+    // `private` of `---@field private integer` for the name.
+    let (_, _, mut rest) = field_head(rest.trim_start());
     if let Some(index) = rest.strip_prefix('[') {
         rest = index.trim_start();
         let tokens = lex(rest);

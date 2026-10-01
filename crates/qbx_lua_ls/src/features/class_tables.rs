@@ -175,11 +175,13 @@ impl<'a, 'b> Classes<'a, 'b> {
         }
     }
 
-    fn class_defs(&self, name: &str, from: FileId) -> Vec<(FileId, &'b ClassDef)> {
+    /// The classes called `name` that code in `from` sees, as `declarations` finds them.
+    pub(crate) fn class_defs(&self, name: &str, from: FileId) -> Vec<(FileId, &'b ClassDef)> {
         self.declarations(name, from).0
     }
 
-    fn alias_defs(&self, name: &str, from: FileId) -> Vec<(FileId, &'b AliasDef)> {
+    /// The aliases and enums called `name` that code in `from` sees, as `declarations` finds them.
+    pub(crate) fn alias_defs(&self, name: &str, from: FileId) -> Vec<(FileId, &'b AliasDef)> {
         self.declarations(name, from).1
     }
 
@@ -680,6 +682,8 @@ impl<'c> Visitor<'c> for Innermost {
 }
 
 /// Each class-typed table constructor that leaves out required fields, with the message naming them.
+/// Fields that its class keeps from the code there, like `---@field private`, are required too, as
+/// in LuaLS.
 pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
     class_tables(infer, chunk)

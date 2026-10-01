@@ -2891,6 +2891,347 @@ print(own, ownLoose, vendor, vendorStrict, api)
 }
 
 #[test]
+fn private_protected_and_package_members_stay_in_their_class_or_file() {
+    let mut client = Client::start(fixture_root());
+    const SHARED: &str = "myresource/shared/config.lua";
+    let shared = "\
+---@class Test.Secret
+---@field private hidden integer
+---@field protected guarded integer
+---@field package pkg integer
+---@field shown integer
+Secret = {}
+
+---@param others Test.Secret[]
+function Secret:peek(others)
+    CreateThread(function()
+        ---@type Test.Secret
+        local other = others[1]
+        print(other.hidden)
+    end)
+    return self.hidden + self.guarded + self.pkg
+end
+
+---@param other Test.Secret
+Secret.copy = function(other) return other.hidden end
+
+---@private
+function Secret:tidy() end
+
+---@protected
+function Secret:prepare() end
+
+---@class Test.Child : Test.Secret
+Child = {}
+
+function Child:peek()
+    return self.guarded, self:prepare(), self.hidden
+end
+
+---@class Test.Counter
+---@field private count integer
+local Counter = {
+    ---@param self Test.Counter
+    increment = function(self)
+        self.count = self.count + 1
+    end,
+}
+
+---@param counter Test.Counter
+local function reset(counter)
+    counter.count = 0
+end
+print(Counter, reset)
+
+Classes = {}
+---@class Test.Nested : Test.Secret
+Classes.nested = {}
+
+function Classes.nested:tidy() end
+Classes.nested.hidden = 1
+";
+    let main = "\
+---@type Test.Secret
+local secret = Secret
+print(secret.shown, secret.hidden, secret.guarded, secret.pkg)
+secret.hidden = 1
+secret:tidy()
+secret:prepare()
+print(Secret.hidden, Secret['guarded'], Child.guarded)
+print(Child.hidden)
+function secret:hidden() end
+---@diagnostic disable-next-line: invisible
+print(secret.hidden)
+";
+    client.open_with(SHARED, shared);
+    client.open_with(CLIENT, main);
+    let private =
+        |field: &str, class: &str| format!("Field `{field}` is private, it can only be accessed in class `{class}`");
+    let protected = |field: &str| {
+        format!("Field `{field}` is protected, it can only be accessed in class `Test.Secret` and its subclasses")
+    };
+    let finding = |line: u64, message: String| ("invisible".to_string(), line, message);
+    // Closures in a method, functions set on the class table and those its own constructor holds
+    // are inside the class; a subclass reaches protected members, not private ones, but may set its
+    // own on its table.
+    assert_eq!(
+        findings(&mut client, SHARED, &["invisible"]),
+        [finding(30, private("hidden", "Test.Secret")), finding(44, private("count", "Test.Counter"))]
+    );
+    // The class table itself reaches its members anywhere, as LuaLS has ox_lib's `lib.array:new()`.
+    assert_eq!(
+        findings(&mut client, CLIENT, &["invisible"]),
+        [
+            finding(2, private("hidden", "Test.Secret")),
+            finding(2, protected("guarded")),
+            finding(2, "Field `pkg` can only be accessed in same file `shared/config.lua`".into()),
+            finding(3, private("hidden", "Test.Secret")),
+            finding(4, private("tidy", "Test.Secret")),
+            finding(5, protected("prepare")),
+            finding(7, private("hidden", "Test.Secret")),
+            finding(8, private("hidden", "Test.Secret")),
+        ]
+    );
+}
+
+#[test]
+fn completion_and_missing_fields_leave_out_members_the_code_cannot_use() {
+    let mut client = Client::start(fixture_root());
+    // `|` marks where completion is asked for.
+    let marked = "\
+---@class Secret
+---@field private hidden integer
+---@field shown integer
+---@type Secret
+local s = { shown = 1 }
+print(s.hidden)
+
+---@class Test.Account
+---@field private balance number
+---@field owner string
+local Account = {}
+
+function Account.new()
+    ---@type Test.Account
+    local account = { | }
+    return account
+end
+
+---@type Test.Account
+local outside = { | }
+print(outside, s.|)
+";
+    let text = marked.replace('|', "");
+    client.open_with(CLIENT, &text);
+    let mut cursors = Vec::new();
+    for (i, _) in marked.match_indices('|') {
+        let offset = i - cursors.len();
+        let line = text[..offset].matches('\n').count() as u32;
+        let column = (offset - text[..offset].rfind('\n').map_or(0, |n| n + 1)) as u32;
+        cursors.push((line, column));
+    }
+    let mut fields = |(line, column): (u32, u32)| -> Vec<String> {
+        let result = client.request("textDocument/completion", client.position_params(CLIENT, line, column));
+        let items = result["items"].as_array().cloned().unwrap_or_default();
+        let mut labels: Vec<String> =
+            items.iter().filter(|item| item["kind"] == 10).map(|item| item["label"].as_str().unwrap().into()).collect();
+        labels.sort();
+        labels
+    };
+    assert_eq!(fields(cursors[0]), ["balance", "owner"], "its own methods may set the private field");
+    assert_eq!(fields(cursors[1]), ["owner"]);
+    let (line, column) = cursors[2];
+    assert_eq!(client.completion_labels(CLIENT, line, column), ["shown"], "the private field of a typed local");
+
+    let found = findings(&mut client, CLIENT, &["invisible", "missing-fields"]);
+    let found: Vec<(&str, u64, &str)> =
+        found.iter().map(|(code, line, message)| (code.as_str(), *line, message.as_str())).collect();
+    assert_eq!(
+        found,
+        [
+            ("missing-fields", 4, "Missing required fields in type `Secret`: `hidden`"),
+            ("invisible", 5, "Field `hidden` is private, it can only be accessed in class `Secret`"),
+            ("missing-fields", 14, "Missing required fields in type `Test.Account`: `balance`, `owner`"),
+            ("missing-fields", 19, "Missing required fields in type `Test.Account`: `balance`, `owner`"),
+        ],
+        "a private field is required wherever a table of the class is built, as in LuaLS"
+    );
+}
+
+#[test]
+fn members_are_restricted_by_the_declaration_of_the_class_the_file_sees() {
+    let mut client = Client::start(fixture_root());
+    // Another resource keeps the members of its own `Test.Vehicle` to itself.
+    let other = "\
+---@class Test.Vehicle
+---@field private new fun(): Test.Vehicle
+---@field private secret integer
+Vehicle = {}
+";
+    client.open_with("shop/shared.lua", other);
+    let marked = "\
+---@class Test.Vehicle
+---@field new fun(): Test.Vehicle
+---@field secret integer
+
+---@type Test.Vehicle
+local vehicle = { new = function() end }
+print(vehicle.new(), vehicle.secret, vehicle.|)
+";
+    let (line, column) = pos(marked, "|", 0);
+    client.open_with(CLIENT, &marked.replace('|', ""));
+    let mut labels = client.completion_labels(CLIENT, line, column);
+    labels.sort();
+    assert_eq!(labels, ["new", "secret"]);
+    let found = findings(&mut client, CLIENT, &["invisible", "missing-fields"]);
+    assert_eq!(
+        found,
+        [("missing-fields".to_string(), 5, "Missing required fields in type `Test.Vehicle`: `secret`".to_string())]
+    );
+}
+
+#[test]
+fn members_are_restricted_through_parents_that_name_each_other() {
+    let mut client = Client::start(fixture_root());
+    // Parents that lead back to a class are read once, also where none declares the member.
+    let text = "\
+---@class Test.Loop1 : Test.Loop2, Test.Loop3, Test.Loop4, Test.Loop5
+---@field private hidden integer
+local Loop1 = {}
+
+---@class Test.Loop2 : Test.Loop3, Test.Loop4, Test.Loop5, Test.Loop1
+---@field protected guarded integer
+
+---@class Test.Loop3 : Test.Loop4, Test.Loop5, Test.Loop1, Test.Loop2
+
+---@class Test.Loop4 : Test.Loop5, Test.Loop1, Test.Loop2, Test.Loop3
+
+---@class Test.Loop5 : Test.Loop1, Test.Loop2, Test.Loop3, Test.Loop4
+
+---@class Test.Elsewhere
+---@field private unrelated integer
+---@field protected kept integer
+
+---@type Test.Loop3
+local loop = {}
+print(loop.hidden, loop.guarded, loop.unrelated)
+
+---@param other Test.Elsewhere
+function Loop1:peek(other)
+    print(self.guarded, other.kept)
+end
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("invisible".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["invisible"]),
+        [
+            finding("print(loop", "Field `hidden` is private, it can only be accessed in class `Test.Loop1`"),
+            finding(
+                "print(loop",
+                "Field `guarded` is protected, it can only be accessed in class `Test.Loop2` and its subclasses"
+            ),
+            finding(
+                "other.kept",
+                "Field `kept` is protected, it can only be accessed in class `Test.Elsewhere` and its subclasses"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn private_members_complete_in_a_method_that_is_not_closed_yet() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Counter
+---@field private count integer
+local Counter = {}
+
+---@private
+function Counter:reset() end
+
+function Counter:increment()
+    local before = self.";
+    client.open_with(CLIENT, text);
+    let line = text.lines().count() as u32 - 1;
+    let mut labels = client.completion_labels(CLIENT, line, text.lines().last().unwrap().len() as u32);
+    labels.sort();
+    assert_eq!(labels, ["count", "increment", "reset"], "the method runs to the end of the file");
+}
+
+#[test]
+fn renames_fields_declared_with_a_side_or_named_like_a_visibility() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Box
+---@field private integer
+---@field (client) side integer
+---@field private (client) both integer
+local Box = {}
+
+function Box:read()
+    return self.private, self.side, self.both
+end
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        ("self.private", "@field private integer", "@field renamed integer"),
+        ("self.side", "@field (client) side", "@field (client) renamed"),
+        ("self.both", "@field private (client) both", "@field private (client) renamed"),
+    ];
+    for (used, declared, renamed) in cases {
+        let expected = text.replace(declared, renamed).replace(used, "self.renamed");
+        assert_eq!(renamed_text(&mut client, CLIENT, text, used, 5), expected, "{declared}");
+    }
+}
+
+#[test]
+fn methods_set_on_a_class_table_at_a_nested_path_belong_to_the_class() {
+    let mut client = Client::start(fixture_root());
+    const SHARED: &str = "myresource/shared/config.lua";
+    let shared = "\
+Shared = {}
+
+---@class Test.Nested
+Shared.Nested = {}
+
+---@private
+function Shared.Nested:tidy() end
+
+function Shared.Nested:size() return 1 end
+
+function Shared.Nested:clear()
+    self:tidy()
+end
+";
+    client.open_with(SHARED, shared);
+    client.diagnostics_for(SHARED);
+    let marked = "\
+---@type Test.Nested
+local nested = {}
+print(nested:size())
+nested:tidy()
+Shared.Nested:tidy()
+print(nested:|)
+";
+    let (line, column) = pos(marked, "|", 0);
+    client.open_with(CLIENT, &marked.replace('|', ""));
+    let mut labels = client.completion_labels(CLIENT, line, column);
+    labels.sort();
+    assert_eq!(labels, ["clear", "size"], "the methods of the class, without the private one");
+    assert_eq!(findings(&mut client, SHARED, &["invisible"]), []);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["invisible"]),
+        [(
+            "invisible".to_string(),
+            3,
+            "Field `tidy` is private, it can only be accessed in class `Test.Nested`".into()
+        )]
+    );
+}
+
+#[test]
 fn no_unknown_reports_names_without_a_type_when_turned_on() {
     struct Fixture(PathBuf);
     impl Drop for Fixture {

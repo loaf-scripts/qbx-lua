@@ -100,7 +100,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `return-type-mismatch`, `missing-return`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `return-type-mismatch`, `missing-return`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
@@ -367,6 +367,55 @@ only covers classes declared in workspace files outside `exclude` and `ignore_di
 classes of third-party resources stay as they are unless they say `(strict)` themselves. When one
 class is declared in several places, one `(strict)` makes it strict, and otherwise one `(loose)`
 keeps it loose.
+
+## Member visibility
+
+A class can keep fields and methods to itself, as in LuaLS:
+
+```lua
+---@class Account
+---@field private balance number
+---@field owner string
+local Account = {}
+
+---@private
+function Account:audit() end
+
+function Account:deposit(amount)
+    self.balance = self.balance + amount
+end
+
+---@type Account
+local account = Account
+print(account.balance) -- invisible
+account:audit() -- invisible
+```
+
+`---@field private`, `protected` and `package` mark a field. `---@private`, `---@protected` and
+`---@package` above `function Account:name()`, `Account.name = value` or `self.name = value` mark
+what the statement sets, and `---@public` changes nothing. qbx-lua-ls reports `invisible` where
+code reads, sets or calls such a member, or defines it with `function value:name()`, outside where
+it may:
+
+- A private member is used through the table the `---@class` annotation declares, like
+  `Account.balance` or ox_lib's `lib.array:new()`, from anywhere, or inside a function defined on
+  that table: `function Account:name()`, `function Account.name()`, `Account.name = function() end`
+  or a function written in the table's own constructor, with the functions nested in it.
+- A protected member is also used through the table of a subclass, or inside its functions.
+- A package member is used in the file that declares it.
+
+The nearest class that declares a name decides, and one restrictive declaration there makes the
+member restrictive, so a subclass that declares the name again without a keyword makes it public.
+Setting a member on the table of a class declares it for that class, so a subclass may define a
+member its parent keeps private, as ox_lib's `function lib.ped:__index()` does.
+Keys of table constructors are not checked, and `missing-fields` asks for private and protected
+fields wherever a table of the class is built, as LuaLS does. Completion leaves such members out
+where the code may not use them.
+
+Unlike LuaLS, functions nested in a method, such as a `table.sort` comparator or a `CreateThread`
+body, and functions written in the class table's constructor count as inside the class. LuaLS's
+`doc.privateName`, `doc.protectedName` and `doc.packageName` settings, which make fields private by
+their names, are not read.
 
 ## Return values
 

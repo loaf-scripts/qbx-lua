@@ -17,6 +17,7 @@ use serde_json::json;
 use super::class_tables::{class_table_at, named_field, Classes};
 use super::expected::{expected_type, Place};
 use super::hover::{event_handler_signature, event_string_context};
+use super::visibility::Scope;
 use super::{lua_block, markdown, with_infer};
 use crate::callback_wrappers::{families, takes_function, Wrapper};
 use crate::document::Document;
@@ -1225,7 +1226,11 @@ fn member_items(
         Some(access) => infer.expr(access.base()),
         None => type_of_path(infer, &head[..head.len() - 1], offset),
     };
-    let members = infer.members(&base_type);
+    // Members that their class keeps from the code here, like `---@field private`, are left out.
+    let scope = Scope::new(infer, &doc.chunk);
+    let base = located.member.as_ref().map(|access| access.base());
+    let mut members = infer.members(&base_type);
+    members.retain(|m| scope.allows(&base_type, base, &m.name, offset));
     let has_methods = members.iter().any(|m| m.ty.as_fun().is_some());
     let mut items = Vec::new();
     for m in members.iter().filter(|m| !via_colon || !has_methods || m.ty.as_fun().is_some()) {
@@ -1266,14 +1271,17 @@ fn type_of_path(infer: &Infer, text: &str, offset: u32) -> Type {
 /// Field names of the table type a call expects, when the cursor is inside a table argument.
 fn expected_field_items(infer: &Infer, doc: &Document, offset: u32) -> Vec<CompletionItem> {
     // A table typed as a class, by `---@type`, a parameter, an assignment, `@return` or the field
-    // of another such table, offers the `@field`s it does not set yet.
+    // of another such table, offers the `@field`s it does not set yet and the code here may set.
+    let scope = Scope::new(infer, &doc.chunk);
     if let Some(found) = class_table_at(infer, &doc.chunk, offset) {
         let ExprKind::Table(existing) = &found.table.kind else { return Vec::new() };
         let present: FxHashSet<&str> = existing.iter().filter_map(named_field).map(|(name, _)| name).collect();
+        let class = Type::Named(found.class.clone(), Vec::new());
         return Classes::new(infer)
             .fields(&found.class, found.from)
             .into_iter()
             .filter(|field| !present.contains(field.name.as_str()) && is_identifier(&field.name))
+            .filter(|field| scope.allows(&class, None, &field.name, offset))
             .map(|field| {
                 let mut out = item(&field.name, CompletionItemKind::PROPERTY, 0);
                 out.detail = Some(field.ty.to_string());
@@ -1302,10 +1310,12 @@ fn expected_field_items(infer: &Infer, doc: &Document, offset: u32) -> Vec<Compl
             _ => None,
         })
         .collect();
+    let expected = param.ty.without_nil();
     infer
-        .members(&param.ty.without_nil())
+        .members(&expected)
         .iter()
         .filter(|m| !present.contains(m.name.as_str()) && is_identifier(&m.name))
+        .filter(|m| scope.allows(&expected, None, &m.name, offset))
         .map(|m| {
             let mut out = member_item(m);
             out.kind = Some(CompletionItemKind::PROPERTY);

@@ -4,8 +4,8 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
-    ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, IMPOSSIBLE_COMPARISON, MISSING_FIELDS, MISSING_PARAMETER, MISSING_RETURN,
-    NO_UNKNOWN, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
+    ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, IMPOSSIBLE_COMPARISON, INVISIBLE, MISSING_FIELDS, MISSING_PARAMETER,
+    MISSING_RETURN, NO_UNKNOWN, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -23,6 +23,7 @@ use super::doc_names::undefined_doc_names;
 use super::returns::{mismatched_returns, missing_returns};
 use super::strict_classes::undeclared_fields;
 use super::unknown_types::unknown_types;
+use super::visibility::invisible_members;
 use super::with_infer;
 use crate::document::Document;
 use crate::index::{FileId, FileOrigin};
@@ -55,7 +56,7 @@ fn strict_by_default(ws: &Workspace, file: FileId) -> bool {
 /// linter's own.
 fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<qbx_lua_analysis::Diagnostic> {
     type Check = fn(&Workspace, &Document) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 10] = [
+    let checks: [(&'static str, Check); 11] = [
         (UNDEFINED_DOC_NAME, |ws, doc| {
             let side = ws.index.file(doc.file).and_then(|f| f.side);
             undefined_doc_names(&ws.index, &doc.text, &doc.chunk, side)
@@ -69,6 +70,7 @@ fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<
             }
             with_infer(ws, doc, |infer| undeclared_fields(infer, &doc.chunk, |file| strict_by_default(ws, file)))
         }),
+        (INVISIBLE, |ws, doc| with_infer(ws, doc, |infer| invisible_members(infer, &doc.chunk))),
         (RETURN_TYPE_MISMATCH, |ws, doc| with_infer(ws, doc, |infer| mismatched_returns(infer, &doc.chunk))),
         (MISSING_RETURN, |ws, doc| with_infer(ws, doc, |infer| missing_returns(infer, &doc.chunk))),
         (CAST_TYPE_MISMATCH, |ws, doc| with_infer(ws, doc, mismatched_casts)),

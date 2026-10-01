@@ -6,10 +6,10 @@ use qbx_fivem_data::Side;
 use qbx_lua_analysis::manifest::Manifest;
 use qbx_lua_analysis::project::{split_import, Declaration, Declarations};
 use qbx_lua_analysis::summary::FileSummary;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
-use crate::luacats::{applies_on, DocIndexField};
+use crate::luacats::{applies_on, DocIndexField, Visibility};
 use crate::types::{DescribedValue, FunType, Type};
 
 pub type FileId = u32;
@@ -54,6 +54,8 @@ pub struct Member {
     /// Set through a value typed as the class rather than on the table its `---@class` declares,
     /// like `abc.x = 1` below `---@type Test` `local abc`. Strict classes do not count it as declared.
     pub injected: bool,
+    /// The `---@private`, `---@protected` or `---@package` above the statement that sets it.
+    pub visibility: Visibility,
 }
 
 /// The entries of a table constructor that have no name: its array part (`key` is `None`), or its
@@ -72,6 +74,8 @@ pub struct ClassDef {
     pub fields: Vec<Symbol>,
     /// The side each of `fields` is scoped to by `@field (server) name type`.
     pub field_sides: Vec<Option<Side>>,
+    /// The visibility each of `fields` is declared with by `@field private name type`.
+    pub field_visibility: Vec<Visibility>,
     /// The values that `---|` lines list under each of `fields`, with their descriptions.
     pub field_values: Vec<Vec<DescribedValue>>,
     pub indices: Vec<DocIndexField>,
@@ -268,6 +272,9 @@ pub struct Index {
     export_types: FxHashMap<SmolStr, Vec<Slot>>,
     /// Built on first use after the files change, since every lint of a resource needs them.
     declarations: OnceLock<Arc<Declarations>>,
+    /// The names of the fields and methods some class keeps from other code, built on first use
+    /// after the files change.
+    restricted_names: OnceLock<Arc<FxHashSet<SmolStr>>>,
 }
 
 pub fn normalize_path(path: &Path) -> PathBuf {
@@ -381,6 +388,7 @@ impl Index {
 
     fn clear_slots(&mut self, id: FileId) {
         self.declarations.take();
+        self.restricted_names.take();
         let Some(old) = self.files.get_mut(id as usize).and_then(Option::take) else { return };
         remove_file_slots(&mut self.globals, old.index.globals.iter().map(|s| &s.name), id);
         remove_file_slots(&mut self.members, old.index.members.iter().map(|m| &m.owner), id);
@@ -507,6 +515,33 @@ impl Index {
             .filter(|member| !member.injected)
             .map(|member| &member.symbol)
             .collect()
+    }
+
+    /// The members of `owner` called `name` that code in `from` sees, with the file that sets each.
+    pub fn members_named(&self, owner: &str, name: &str, from: FileId) -> Vec<(FileId, &Member)> {
+        self.owner_slots(self.members.get(owner), owner, from)
+            .into_iter()
+            .filter_map(|(file, i)| Some((file, self.file(file)?.index.members.get(i as usize)?)))
+            .filter(|(_, member)| member.symbol.name == name)
+            .collect()
+    }
+
+    /// The names of the fields and methods that some class declares `private`, `protected` or
+    /// `package`, so that code using none of them needs no check.
+    pub fn restricted_names(&self) -> Arc<FxHashSet<SmolStr>> {
+        let build = || {
+            let mut names = FxHashSet::default();
+            for (_, file) in self.files() {
+                for class in &file.index.classes {
+                    let fields = class.fields.iter().zip(&class.field_visibility);
+                    names.extend(fields.filter(|(_, v)| **v != Visibility::Public).map(|(f, _)| f.name.clone()));
+                }
+                let members = file.index.members.iter().filter(|m| m.visibility != Visibility::Public);
+                names.extend(members.map(|m| m.symbol.name.clone()));
+            }
+            Arc::new(names)
+        };
+        self.restricted_names.get_or_init(build).clone()
     }
 
     /// The array parts and `[key]` entries of the tables `owner` names, visible like its members.

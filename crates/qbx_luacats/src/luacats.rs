@@ -24,6 +24,20 @@ pub struct DocReturn {
     pub values: Vec<DescribedValue>,
 }
 
+/// Where a field or method of a class may be used: `---@field private name type`, or `---@private`
+/// above the function or assignment that sets it. Later variants are more restrictive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Visibility {
+    #[default]
+    Public,
+    /// In the file that declares it.
+    Package,
+    /// In the class and its subclasses.
+    Protected,
+    /// In the class only.
+    Private,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DocField {
     pub name: SmolStr,
@@ -34,6 +48,7 @@ pub struct DocField {
     pub line: usize,
     /// The side of `@field (server) name type`.
     pub side: Option<Side>,
+    pub visibility: Visibility,
     /// The values that the `---|` lines under it list, with their descriptions.
     pub values: Vec<DescribedValue>,
 }
@@ -106,6 +121,9 @@ pub struct DocGroup {
     pub nodiscard: bool,
     pub is_meta: bool,
     pub callback: Option<CallbackTag>,
+    /// `---@private`, `---@protected` or `---@package` above the function or assignment that sets a
+    /// member. `---@public` changes nothing, as in LuaLS.
+    pub visibility: Visibility,
 }
 
 impl DocGroup {
@@ -195,14 +213,26 @@ fn split_tag(line: &str) -> Option<(&str, &str)> {
     Some((&rest[..end], rest[end..].trim_start()))
 }
 
-/// Removes the `public`, `private`, `protected` and `package` keywords in front of a `@field` name.
-fn strip_visibility(mut rest: &str) -> &str {
-    for scope in ["public ", "private ", "protected ", "package "] {
-        if let Some(stripped) = rest.strip_prefix(scope) {
-            rest = stripped.trim_start();
+/// Splits the `public`, `private`, `protected` or `package` keyword off the front of a `@field`
+/// name. A keyword that only one word follows, as in `---@field private integer`, is the name
+/// itself, the way LuaLS reads it.
+fn split_visibility(rest: &str) -> (Visibility, &str) {
+    let keywords = [
+        ("public", Visibility::Public),
+        ("private", Visibility::Private),
+        ("protected", Visibility::Protected),
+        ("package", Visibility::Package),
+    ];
+    for (keyword, visibility) in keywords {
+        let Some(after) = rest.strip_prefix(keyword).filter(|after| after.starts_with(char::is_whitespace)) else {
+            continue;
+        };
+        let after = after.trim_start();
+        if after.split_whitespace().nth(1).is_some() {
+            return (visibility, after);
         }
     }
-    rest
+    (Visibility::Public, rest)
 }
 
 /// The type on a `---| value` line, without its `>` or `+` marker.
@@ -467,6 +497,9 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
             "nodiscard" => group.nodiscard = true,
             "meta" => group.is_meta = true,
             "callback" => group.callback = CallbackTag::parse(rest),
+            "private" => group.visibility = group.visibility.max(Visibility::Private),
+            "protected" => group.visibility = group.visibility.max(Visibility::Protected),
+            "package" => group.visibility = group.visibility.max(Visibility::Package),
             _ => {}
         }
     }
@@ -476,11 +509,12 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
 }
 
 /// The text of a `@field` after its `(server)` attributes and `private` keyword, in either order,
-/// with the side the attributes name.
-fn field_head(rest: &str) -> (Option<Side>, &str) {
+/// with the side the attributes name and the visibility the keyword gives.
+pub fn field_head(rest: &str) -> (Option<Side>, Visibility, &str) {
     let (before, rest) = split_attributes(rest);
-    let (after, rest) = split_attributes(strip_visibility(rest));
-    (side_attribute(before).or(side_attribute(after)), rest)
+    let (visibility, rest) = split_visibility(rest);
+    let (after, rest) = split_attributes(rest);
+    (side_attribute(before).or(side_attribute(after)), visibility, rest)
 }
 
 /// `ty`, declared for the class `class`, with `self` standing for that class.
@@ -495,7 +529,7 @@ fn in_class(class: &DocClass, ty: Type) -> Type {
 /// last of `fields`, which `---| value` lines after it list more values of.
 fn parse_field(rest: &str, line: usize, group: &mut DocGroup) -> bool {
     let Some(class) = group.classes.last_mut() else { return false };
-    let (side, rest) = field_head(rest);
+    let (side, visibility, rest) = field_head(rest);
     if let Some(index) = rest.strip_prefix('[') {
         let mut parser = TypeParser::new(index);
         let key = in_class(class, parser.parse());
@@ -503,7 +537,7 @@ fn parse_field(rest: &str, line: usize, group: &mut DocGroup) -> bool {
         let value = in_class(class, TypeParser::new(after).parse());
         match key {
             Type::StringLit(name) => {
-                class.fields.push(DocField { name, ty: value, line, side, ..DocField::default() });
+                class.fields.push(DocField { name, ty: value, line, side, visibility, ..DocField::default() });
                 return true;
             }
             key @ (Type::IntLit(_) | Type::BooleanLit(_)) => {
@@ -518,15 +552,9 @@ fn parse_field(rest: &str, line: usize, group: &mut DocGroup) -> bool {
     let optional = parser.rest().starts_with('?');
     let mut parser = TypeParser::new(parser.rest().trim_start_matches('?'));
     let ty = in_class(class, parser.parse());
-    let field = DocField {
-        name: SmolStr::new(name),
-        ty,
-        optional,
-        description: clean_description(parser.rest()),
-        line,
-        side,
-        values: Vec::new(),
-    };
+    let description = clean_description(parser.rest());
+    let field =
+        DocField { name: SmolStr::new(name), ty, optional, description, line, side, visibility, values: Vec::new() };
     let Some(field) = add_signature(&mut class.fields, field) else { return false };
     class.fields.push(field);
     true
@@ -731,7 +759,7 @@ pub fn declared_name(line: &str) -> Option<(usize, &str)> {
         "param" if rest.starts_with("...") => return Some((line.len() - rest.len(), "...")),
         "param" => rest,
         "field" => {
-            let rest = field_head(rest).1;
+            let rest = field_head(rest).2;
             if let Some(key) = rest.strip_prefix('[') {
                 let mut parser = TypeParser::new(key);
                 parser.parse();
@@ -787,7 +815,7 @@ fn type_names(line: &str) -> Option<(&str, Vec<FoundName<'_>>)> {
             }
         }
         "field" => {
-            let (_, rest) = field_head(rest);
+            let (_, _, rest) = field_head(rest);
             let value = match rest.strip_prefix('[') {
                 Some(key) => names.ty(key).trim_start().strip_prefix(']'),
                 None => skip_name(rest),
@@ -1103,6 +1131,35 @@ mod tests {
         assert!(applies_on(Some(Side::Server), Some(Side::Shared)));
         assert!(applies_on(Some(Side::Server), Some(Side::Server)));
         assert!(!applies_on(Some(Side::Server), Some(Side::Client)));
+    }
+
+    #[test]
+    fn visibility_keywords_and_tags() {
+        use Visibility::*;
+        let doc = parse(
+            "---@class Bank\n---@field private balance number\n---@field protected (server) owner string\n---@field (client) package id integer\n---@field public name string\n---@field private integer\n---@field private private { pin: string }\n---@field private ['quoted-key'] number",
+        );
+        let fields: Vec<(&str, Visibility, Option<Side>)> =
+            doc.classes[0].fields.iter().map(|f| (f.name.as_str(), f.visibility, f.side)).collect();
+        assert_eq!(
+            fields,
+            [
+                ("balance", Private, None),
+                ("owner", Protected, Some(Side::Server)),
+                ("id", Package, Some(Side::Client)),
+                ("name", Public, None),
+                ("private", Public, None),
+                ("private", Private, None),
+                ("quoted-key", Private, None),
+            ]
+        );
+        assert_eq!(doc.classes[0].fields[4].ty.to_string(), "integer", "a keyword that one word follows is the name");
+
+        let visibility = |text: &str| parse(text).visibility;
+        assert_eq!(visibility("---@private\n---@param value string"), Private);
+        assert_eq!(visibility("---@package\n---@protected"), Protected, "the most restrictive tag wins");
+        assert_eq!(visibility("---@public"), Public);
+        assert_eq!(visibility("---@param value string"), Public);
     }
 
     #[test]
