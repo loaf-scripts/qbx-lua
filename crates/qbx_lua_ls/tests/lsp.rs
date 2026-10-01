@@ -5104,6 +5104,87 @@ print(result, send)
 }
 
 #[test]
+fn table_types_named_as_parents_pass_their_fields_and_indices_on() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Array<T> : { [number]: T }
+
+---@alias Test.ArrayLike<T> Test.Array | { [number]: T }
+
+---@class Test.Dict<K, V> : table<K, V>
+
+---@class Test.Flags : table<string, boolean>
+
+---@class Test.Point : { x: number, y?: number }
+
+---@class (strict) Test.Named : table<string, any>
+
+---@class (strict) Test.Open : table
+
+---@class Test.Indexed<T>
+---@field [number] T
+
+---@type Test.Array<string>
+local array = {}
+---@type Test.Array
+local anyArray = {}
+---@type Test.Indexed
+local anyIndexed = {}
+---@type Test.ArrayLike<integer>
+local arrayLike = {}
+---@type Test.Dict<string, integer>
+local dict = {}
+---@type Test.Flags
+local flags = {}
+---@type Test.Point
+local point = {}
+---@type Test.Named
+local named = { anything = 1, [1] = 2 }
+---@type Test.Open
+local open = { anything = 1, [1] = 2 }
+
+local element = array[1]
+local anyElement = anyArray[1]
+local anyIndexedElement = anyIndexed[1]
+local likeElement = arrayLike[1]
+local counted = dict.anything
+local flagged = flags.anything
+local x = point.x
+local y = point.y
+for _, item in ipairs(array) do print(item) end
+for key, count in pairs(dict) do print(key, count) end
+print(named, open)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("local element", "element: string"),
+        // Without type arguments a table type named as a parent holds unknown values, as
+        // lua-language-server reads it, while an index of the class keeps its parameter. So the
+        // `Test.Array` of ox_lib's `ArrayLike` adds nothing to the `integer` of its other part.
+        ("local anyElement", "anyElement: unknown"),
+        ("local anyIndexedElement", "anyIndexedElement: T"),
+        ("local likeElement", "likeElement: integer\n"),
+        ("local counted", "counted: integer"),
+        ("local flagged", "flagged: boolean"),
+        ("local x", "x: number"),
+        ("local y", "y: number?"),
+        ("item) end", "item: string"),
+        ("key, count", "key: string"),
+        ("count) end", "count: integer"),
+        ("Test.Array<string>", "(class) Test.Array<T> : { [number]: T }"),
+    ] {
+        let delta = if needle.starts_with("local ") { 6 } else { 1 };
+        let (l, c) = pos(text, needle, delta);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    // `table<string, any>` takes string keys only, while a plain `table` takes any.
+    let line = pos(text, "[1] = 2", 0).0 as u64;
+    let message = "Field `[1]` is not declared in strict class `Test.Named`".to_string();
+    assert_eq!(findings(&mut client, CLIENT, &["undeclared-field"]), [("undeclared-field".to_string(), line, message)]);
+}
+
+#[test]
 fn self_in_doc_types_is_the_class_of_the_table_a_function_is_defined_on() {
     let mut client = Client::start(fixture_root());
     let text = "\

@@ -18,7 +18,7 @@ use qbx_lua_syntax::{NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::index::{AliasDef, ClassDef, FileId, ResourceId};
-use crate::infer::{class_bindings, expanded_bindings, substitute, Infer};
+use crate::infer::{bound_parents, class_bindings, expanded_bindings, substitute, Infer};
 use crate::luacats::applies_on;
 use crate::types::{DescribedValue, Type};
 
@@ -217,10 +217,11 @@ impl<'a, 'b> Classes<'a, 'b> {
         }
     }
 
-    /// The `@field`s of `class`, given the type arguments `args`, and of its parents, leaving out
-    /// those scoped to the other side. The first declaration of a name wins, so a class can narrow
-    /// a field of its parent. A class that several parents share is read once, and so is one that
-    /// names itself as a parent with other type arguments.
+    /// The `@field`s of `class`, given the type arguments `args`, and of its parents, with the fields
+    /// of a table type it names as a parent, leaving out those scoped to the other side. The first
+    /// declaration of a name wins, so a class can narrow a field of its parent. A class that several
+    /// parents share is read once, and so is one that names itself as a parent with other type
+    /// arguments.
     pub fn fields(&self, class: &str, args: &[Type], from: FileId) -> Vec<ClassField> {
         let mut out = Vec::new();
         self.collect_fields(class, args, from, &mut out, &mut FxHashSet::default(), 0);
@@ -251,11 +252,18 @@ impl<'a, 'b> Classes<'a, 'b> {
                 }
             }
         }
-        for (file, def) in &defs {
-            for parent in &def.parent_types {
-                if let Type::Named(parent, args) = substitute(parent, &bindings) {
-                    self.collect_fields(&parent, &args, *file, out, visited, depth + 1);
+        for (file, parent) in bound_parents(&defs, args) {
+            match parent {
+                Type::Named(parent, args) => self.collect_fields(&parent, &args, file, out, visited, depth + 1),
+                Type::Shape(shape) => {
+                    for field in &shape.fields {
+                        if !out.iter().any(|seen| seen.name == field.name) {
+                            let ty = if field.optional { field.ty.clone().optional() } else { field.ty.clone() };
+                            out.push(ClassField { name: field.name.clone(), ty, doc: None, values: Vec::new(), file });
+                        }
+                    }
                 }
+                _ => {}
             }
         }
     }
@@ -339,9 +347,11 @@ impl<'a, 'b> Classes<'a, 'b> {
     /// Whether `class` or a parent takes `key`. A name is taken by an `@field` for this side, by a
     /// field set on the table a `---@class` declares, like `function Test:greet()`, or by an index
     /// such as `[string]`; a literal like `1` by its `---@field [1] number`; another key by an index
-    /// of its type, or by a literal-keyed field it may be, as `integer` may be `1`. A parent that is
-    /// no class, like the `table` of `Name : table<string, any>`, takes anything, and so does a key
-    /// whose type is not known well enough to rule out a field name.
+    /// of its type, or by a literal-keyed field it may be, as `integer` may be `1`. A table type
+    /// named as a parent, like `{ [string]: any }` or `table<string, any>`, takes what its fields
+    /// and indices take. A parent that is neither a class nor such a table type, like a plain
+    /// `table`, takes anything, and so does a key whose type is not known well enough to rule out a
+    /// field name.
     pub fn declares(&self, class: &str, from: FileId, key: &Key) -> bool {
         let named = match key {
             Key::Name(name) => {
@@ -374,12 +384,19 @@ impl<'a, 'b> Classes<'a, 'b> {
             || self.class_defs(class, from).iter().any(parents_declare)
     }
 
-    /// Whether `class` or one of its ancestors names a parent that is no class.
+    /// Whether `class` or one of its ancestors names a parent that is neither a class nor a table
+    /// type with fields or indices, such as a plain `table`.
     fn has_open_parent(&self, class: &str, from: FileId, depth: u32) -> bool {
         let defs = self.class_defs(class, from);
+        let is_open = |parent: &Type, file: FileId| match parent {
+            Type::Named(parent, _) => self.has_open_parent(parent, file, depth + 1),
+            Type::Shape(shape) => shape.fields.is_empty() && shape.array.is_none() && shape.indices.is_empty(),
+            Type::Map(..) | Type::Array(_) => false,
+            _ => true,
+        };
         defs.is_empty()
             || depth > MAX_DEPTH
-            || defs.iter().any(|(file, def)| def.parents.iter().any(|p| self.has_open_parent(p, *file, depth + 1)))
+            || defs.iter().any(|(file, def)| def.parent_types.iter().any(|parent| is_open(parent, *file)))
     }
 
     /// The type that `key` of a `class` table holds, given the type arguments `args` of the class,
@@ -401,7 +418,8 @@ impl<'a, 'b> Classes<'a, 'b> {
     }
 
     /// The value type of the first index of `class`, given the type arguments `args`, or of a parent
-    /// that takes keys of type `key`, inferred in this file, with the file that declares it.
+    /// that takes keys of type `key`, inferred in this file, with the file that declares it. A table
+    /// type named as a parent, like `{ [number]: T }` or `table<string, integer>`, counts as one.
     fn index_for(&self, class: &str, args: &[Type], from: FileId, key: &Type, depth: u32) -> Option<(Type, FileId)> {
         if depth > MAX_DEPTH {
             return None;
@@ -415,12 +433,27 @@ impl<'a, 'b> Classes<'a, 'b> {
             Some((substitute(value, &bindings), *file))
         });
         own.or_else(|| {
-            let mut parents = defs.iter().flat_map(|(file, def)| def.parent_types.iter().map(move |p| (p, *file)));
-            parents.find_map(|(parent, file)| match substitute(parent, &bindings) {
+            bound_parents(&defs, args).into_iter().find_map(|(file, parent)| match parent {
                 Type::Named(parent, args) => self.index_for(&parent, &args, file, key, depth + 1),
-                _ => None,
+                table => self.table_index_for(&table, file, key),
             })
         })
+    }
+
+    /// The value type of the first entry of the table type `ty`, as `from` sees it, that takes keys
+    /// of type `key`: its array part, a `[key]` entry, or the values of `table<K, V>` or `V[]`.
+    fn table_index_for(&self, ty: &Type, from: FileId, key: &Type) -> Option<(Type, FileId)> {
+        let entries: Vec<(&Type, &Type)> = match ty {
+            Type::Shape(shape) => {
+                let array = shape.array.iter().map(|value| (&Type::Integer, value));
+                array.chain(shape.indices.iter().map(|(index, value)| (index, value))).collect()
+            }
+            Type::Map(index, value) => vec![(&**index, &**value)],
+            Type::Array(value) => vec![(&Type::Integer, &**value)],
+            _ => Vec::new(),
+        };
+        let (_, value) = entries.into_iter().find(|(index, _)| self.takes(index, from, key))?;
+        Some((value.clone(), from))
     }
 
     /// Whether an index keyed by `index_key`, as `from` sees it, takes keys of type `key`.

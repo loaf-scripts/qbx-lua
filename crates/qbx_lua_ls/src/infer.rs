@@ -1229,13 +1229,11 @@ impl<'a> Infer<'a> {
             }
             Type::Named(ref name, ref args) => {
                 let class = self.index.class(name, self.side).map(|(_, c)| c);
-                let bindings = self.class_bindings_of(name, args);
-                let index = class
-                    .into_iter()
-                    .flat_map(|c| c.indices(self.side))
-                    .filter(|(key, _)| !array_only || is_integer_key(key))
-                    .map(|(key, value)| (substitute(key, &bindings), substitute(value, &bindings)));
+                let mut indices = Vec::new();
+                self.class_indices(name, args, &mut indices, &mut FxHashSet::default(), 0);
+                let index = indices.into_iter().filter(|(key, _)| !array_only || is_integer_key(key));
                 // `---@field [1] number` fields, with their keys shown as `integer` rather than `1|2|3`.
+                let bindings = self.class_bindings_of(name, args);
                 let literal_fields = class
                     .into_iter()
                     .flat_map(|c| c.literal_fields(self.side))
@@ -1262,6 +1260,41 @@ impl<'a> Infer<'a> {
             _ => return (Type::Unknown, Type::Unknown),
         };
         (Type::union(keys), Type::union(values))
+    }
+
+    /// The `[key]` entries of the class `name`, given the type arguments `args`, and of its parents,
+    /// with those of a table type it names as a parent: the `[number]: T` of `{ [number]: T }`, or
+    /// the keys and values of `table<string, integer>`. A class that several parents share is
+    /// read once.
+    fn class_indices(
+        &self,
+        name: &str,
+        args: &[Type],
+        out: &mut Vec<(Type, Type)>,
+        visited: &mut FxHashSet<SmolStr>,
+        depth: u32,
+    ) {
+        if depth > 8 || !visited.insert(SmolStr::new(name)) {
+            return;
+        }
+        let mut defs = self.index.class_defs(name);
+        defs.retain(|(_, def)| applies_on(def.side, self.side));
+        let bindings = class_bindings(&defs, args);
+        for (key, value) in defs.iter().flat_map(|(_, def)| def.indices(self.side)) {
+            out.push((substitute(key, &bindings), substitute(value, &bindings)));
+        }
+        for (_, parent) in bound_parents(&defs, args) {
+            match parent {
+                Type::Named(parent, args) => self.class_indices(&parent, &args, out, visited, depth + 1),
+                Type::Shape(shape) => {
+                    out.extend(shape.array.iter().map(|value| (Type::Integer, value.clone())));
+                    out.extend(shape.indices.iter().cloned());
+                }
+                Type::Map(key, value) => out.push((*key, *value)),
+                Type::Array(value) => out.push((Type::Integer, *value)),
+                _ => {}
+            }
+        }
     }
 
     /// Keys and values of a table the index holds: its named fields are members, its array part and
@@ -1376,11 +1409,7 @@ impl<'a> Infer<'a> {
                 _ => Type::union(items),
             },
             // The array part and the `[key]` entries that take a key of its type.
-            Type::Shape(shape) => {
-                let array = shape.array.iter().filter(|_| self.index_takes(&Type::Integer, key_ty, 0));
-                let indices = shape.indices.iter().filter(|(key, _)| self.index_takes(key, key_ty, 0));
-                Type::union(array.chain(indices.map(|(_, value)| value)).cloned())
-            }
+            shape @ Type::Shape(_) => self.table_index_value(&shape, key_ty),
             Type::Named(name, args) => {
                 let Some((_, class)) = self.index.class(&name, self.side) else { return Type::Unknown };
                 let key_ty = self.resolve_alias(key_ty);
@@ -1428,8 +1457,9 @@ impl<'a> Infer<'a> {
     }
 
     /// What a key of type `key` reads from an instance of `class`, given the type arguments `args`,
-    /// through the nearest indices of the class or its parents that take it. A class that several
-    /// parents share is read once.
+    /// through the nearest indices of the class or its parents that take it, including those of a
+    /// table type it names as a parent, like `{ [number]: T }`. A class that several parents share
+    /// is read once.
     fn class_index_value(
         &self,
         class: &str,
@@ -1450,11 +1480,28 @@ impl<'a> Infer<'a> {
         if !own.is_unknown() {
             return own;
         }
-        let parents = defs.iter().flat_map(|(_, def)| &def.parent_types).map(|parent| substitute(parent, &bindings));
+        let parents = bound_parents(&defs, args).into_iter().map(|(_, parent)| parent);
         Type::union(parents.map(|parent| match parent {
             Type::Named(parent, args) => self.class_index_value(&parent, &args, key, visited, depth + 1),
-            _ => Type::Unknown,
+            table => self.table_index_value(&table, key),
         }))
+    }
+
+    /// What a key of type `key` reads from a value of the table type `ty`: the array part and the
+    /// `[key]` entries of `{ [string]: integer, 'a' }` that take it, or the values of
+    /// `table<string, integer>` or `integer[]`.
+    fn table_index_value(&self, ty: &Type, key: &Type) -> Type {
+        let takes = |index: &Type| self.index_takes(index, key, 0);
+        match ty {
+            Type::Shape(shape) => {
+                let array = shape.array.iter().filter(|_| takes(&Type::Integer));
+                let indices = shape.indices.iter().filter(|(index, _)| takes(index));
+                Type::union(array.chain(indices.map(|(_, value)| value)).cloned())
+            }
+            Type::Map(index, value) if takes(index) => (**value).clone(),
+            Type::Array(value) if takes(&Type::Integer) => (**value).clone(),
+            _ => Type::Unknown,
+        }
     }
 
     /// The field names a key can be: `'male'`, or every name of a `"male"|"female"` loop variable or
@@ -2576,9 +2623,10 @@ impl<'a> Infer<'a> {
     }
 
     /// The members of the class or alias `name` given the type arguments `args`, with those of its
-    /// parents: the fields of a class and those set on the table its `---@class` declares. A class
-    /// that several parents share is read once, and so is one that names itself as a parent with
-    /// other type arguments, as `---@class Tree<T> : Tree<T[]>` does.
+    /// parents: the fields of a class, those set on the table its `---@class` declares, and the
+    /// fields of a table type it names as a parent, like `{ name: string }`. A class that several
+    /// parents share is read once, and so is one that names itself as a parent with other type
+    /// arguments, as `---@class Tree<T> : Tree<T[]>` does.
     fn class_members(
         &self,
         name: &str,
@@ -2616,9 +2664,11 @@ impl<'a> Infer<'a> {
                 member.ty = substitute(&member.ty, &bindings);
             }
         }
-        for parent in defs.iter().flat_map(|(_, class)| &class.parent_types) {
-            if let Type::Named(parent, args) = substitute(parent, &bindings) {
-                self.class_members(&parent, &args, filter, out, visited, depth + 1);
+        for (_, parent) in bound_parents(&defs, args) {
+            match parent {
+                Type::Named(parent, args) => self.class_members(&parent, &args, filter, out, visited, depth + 1),
+                shape @ Type::Shape(_) => out.extend(self.guarded(|| self.members_matching(&shape, filter))),
+                _ => {}
             }
         }
     }
@@ -2691,10 +2741,30 @@ pub(crate) fn expanded_bindings(params: &[SmolStr], args: &[Type]) -> Vec<(SmolS
 /// The type parameters of a class bound to `args`, as the declaration of it among `defs` that
 /// lists them declares them.
 pub(crate) fn class_bindings(defs: &[(FileId, &ClassDef)], args: &[Type]) -> Vec<(SmolStr, Type)> {
-    match defs.iter().find(|(_, def)| !def.generics.is_empty()) {
-        Some((_, def)) => generic_bindings(&def.generics, args),
-        None => Vec::new(),
-    }
+    generic_bindings(class_params(defs), args)
+}
+
+/// The type parameters of a class, as the declaration of it among `defs` that lists them declares
+/// them.
+fn class_params<'d>(defs: &[(FileId, &'d ClassDef)]) -> &'d [SmolStr] {
+    defs.iter().find(|(_, def)| !def.generics.is_empty()).map_or(&[], |(_, def)| &def.generics)
+}
+
+/// The parents that the declarations of a class among `defs` name, with the file of each, given
+/// the type arguments `args` of the class: `Parent<string>` for the `Parent<T>` of a
+/// `Child<string>`. A table type named as a parent, like the `{ [number]: T }` of
+/// `---@class Array<T> : { [number]: T }`, is read in place as an alias is, so a parameter without
+/// an argument is unknown in it, as lua-language-server reads `array[1]` of a `---@type Array`.
+pub(crate) fn bound_parents(defs: &[(FileId, &ClassDef)], args: &[Type]) -> Vec<(FileId, Type)> {
+    let params = class_params(defs);
+    let (named, table) = (generic_bindings(params, args), expanded_bindings(params, args));
+    let parents = defs.iter().flat_map(|(file, def)| def.parent_types.iter().map(move |parent| (*file, parent)));
+    parents
+        .map(|(file, parent)| match parent {
+            Type::Named(..) => (file, substitute(parent, &named)),
+            other => (file, substitute(other, &table)),
+        })
+        .collect()
 }
 
 pub(crate) fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {

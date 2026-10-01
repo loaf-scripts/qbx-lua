@@ -334,8 +334,10 @@ such as a `---@type` local, a parameter or `self`, and for fields that code read
 `abc.nope` or `abc:nope()`. A field counts as declared when an `@field` of the class or one of its
 parents names it, or when it is set on the table the `---@class` annotation declares, like `greet`
 above; fields set through values of the class do not count. A `[string]` index, such as
-`---@field [string] any`, takes any name, and so does a parent that is no class, like the `table`
-of `Name : table<string, any>`.
+`---@field [string] any`, takes any name. A table type named as a parent, like `{ id: integer }` or
+`table<string, any>`, declares its fields and indices for the class, so `Name : table<string, any>`
+takes any name too, while a parent that is neither a class nor such a table type, like a plain
+`table`, takes any key.
 
 A table that `setmetatable` gives a metatable whose `__index` is the class table, as
 `setmetatable(obj, Test)` does after `Test.__index = Test`, is a value of the class from the call
@@ -379,7 +381,8 @@ as in `---@type List`, just as the table the `---@class` annotation declares and
 methods keep them, being `List<T>`. A field of such a type takes any value but must still be
 given, and a method's own `---@generic T` binds from the call. An alias named without its type
 arguments, as in `---@type Box`, reads its parameters as unknown instead, as lua-language-server
-does.
+does, and so does a table type that a class names as a parent, like the `{ [number]: T }` of
+`---@class Array<T> : { [number]: T }` for a `---@type Array`.
 
 With `strict_classes = true`, every class is strict unless it is marked `(loose)`. That default
 only covers classes declared in workspace files outside `exclude` and `ignore_diagnostics`, so the
