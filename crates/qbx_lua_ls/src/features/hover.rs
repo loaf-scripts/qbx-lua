@@ -9,12 +9,12 @@ use qbx_lua_syntax::{CommentKind, SmolStr, Span};
 use super::{lua_block, markdown, with_infer};
 use crate::callback_wrappers::{source_skip, target_of, Wrapper};
 use crate::document::Document;
-use crate::index::{ClassDef, EventDef, EventFamily, EventKind, FileId, FileOrigin, SymbolKind};
-use crate::indexer::render_doc;
+use crate::index::{AliasDef, ClassDef, EventDef, EventFamily, EventKind, FileId, FileOrigin, SymbolKind};
+use crate::indexer::{described_values, render_doc};
 use crate::infer::{Decl, Infer, MemberInfo};
 use crate::locate::locate;
 use crate::luacats::{applies_on, type_name_at};
-use crate::types::{CallbackRole, Type};
+use crate::types::{CallbackRole, DescribedValue, Type};
 use crate::workspace::Workspace;
 
 pub enum Target {
@@ -92,8 +92,9 @@ fn describe_value(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: O
         return format!("{marker}{prefix}{}", fun.signature(name));
     }
     let mut out = value_overview(infer, prefix, name, ty, literal);
-    for (alias, target) in alias_expansions(infer, ty) {
-        out.push_str(&format!("\ntype {alias} = {target}"));
+    for (name, alias) in alias_expansions(infer, ty) {
+        out.push('\n');
+        out.push_str(&alias_definition(&name, alias));
     }
     out
 }
@@ -160,12 +161,12 @@ fn table_part(infer: &Infer, ty: &Type, depth: u32) -> Type {
 
 /// The aliases in `ty` that stand for something other than a table, such as `"male"|"female"`,
 /// expanded one layer the way a class is expanded into its fields.
-fn alias_expansions(infer: &Infer, ty: &Type) -> Vec<(SmolStr, Type)> {
+fn alias_expansions<'a>(infer: &Infer<'a>, ty: &Type) -> Vec<(SmolStr, &'a AliasDef)> {
     let parts = match ty {
         Type::Union(types) => types.as_slice(),
         other => std::slice::from_ref(other),
     };
-    let mut out: Vec<(SmolStr, Type)> = Vec::new();
+    let mut out: Vec<(SmolStr, &AliasDef)> = Vec::new();
     for part in parts {
         let part = match part {
             Type::Array(inner) => &**inner,
@@ -177,10 +178,31 @@ fn alias_expansions(infer: &Infer, ty: &Type) -> Vec<(SmolStr, Type)> {
         }
         let Some((_, alias)) = infer.index.alias(name, infer.side()) else { continue };
         if table_part(infer, &alias.ty, 0).is_unknown() {
-            out.push((name.clone(), alias.ty.clone()));
+            out.push((name.clone(), alias));
         }
     }
     out
+}
+
+/// An alias as written out in a hover: `type Mode = "fast"|"slow"`, or with each value on a line of
+/// its own when the `---|` lines that list them describe any.
+fn alias_definition(name: &str, alias: &AliasDef) -> String {
+    if alias.values.iter().all(|listed| listed.description.is_empty()) {
+        return format!("type {name} = {}", alias.ty);
+    }
+    let parts = match &alias.ty {
+        Type::Union(types) => types.as_slice(),
+        other => std::slice::from_ref(other),
+    };
+    let values: Vec<DescribedValue> = parts
+        .iter()
+        .map(|value| {
+            let listed = alias.values.iter().find(|listed| listed.value == *value);
+            let description = listed.map(|listed| listed.description.clone()).unwrap_or_default();
+            DescribedValue { value: value.clone(), description }
+        })
+        .collect();
+    format!("type {name} ={}", described_values(&values))
 }
 
 /// `offset` is where the name is written, which decides what the guards around it rule out.
@@ -333,7 +355,7 @@ fn type_hover(infer: &Infer, name: &str) -> Option<String> {
     }
     let aliases = infer.index.alias_defs(name).into_iter();
     let (_, alias) = aliases.max_by_key(|(file, alias)| preference(*file, alias.side))?;
-    let mut out = lua_block(&format!("type {name} = {}", alias.ty));
+    let mut out = lua_block(&alias_definition(name, alias));
     if let Some(doc) = &alias.doc {
         out.push_str("\n\n");
         out.push_str(doc);

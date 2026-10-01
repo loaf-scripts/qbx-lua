@@ -20,7 +20,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::index::{AliasDef, ClassDef, FileId, ResourceId};
 use crate::infer::Infer;
 use crate::luacats::applies_on;
-use crate::types::Type;
+use crate::types::{DescribedValue, Type};
 
 const MAX_DEPTH: u32 = 8;
 
@@ -37,6 +37,8 @@ pub struct ClassField {
     pub name: SmolStr,
     pub ty: Type,
     pub doc: Option<Arc<str>>,
+    /// The values that `---|` lines list under the field, with their descriptions.
+    pub values: Vec<DescribedValue>,
     /// The file that declares the field, whose view of the type names its type is read with.
     pub file: FileId,
 }
@@ -220,10 +222,11 @@ impl<'a, 'b> Classes<'a, 'b> {
         let defs = self.class_defs(class, from);
         for (file, def) in &defs {
             let sides = def.field_sides.iter().copied().chain(std::iter::repeat(None));
-            for (field, side) in def.fields.iter().zip(sides) {
+            for (i, (field, side)) in def.fields.iter().zip(sides).enumerate() {
                 if applies_on(side, self.infer.side()) && !out.iter().any(|seen| seen.name == field.name) {
                     let (name, ty, doc) = (field.name.clone(), field.ty.clone(), field.doc.clone());
-                    out.push(ClassField { name, ty, doc, file: *file });
+                    let values = def.field_values.get(i).cloned().unwrap_or_default();
+                    out.push(ClassField { name, ty, doc, values, file: *file });
                 }
             }
         }

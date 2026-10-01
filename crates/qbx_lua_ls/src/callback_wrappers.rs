@@ -121,7 +121,7 @@ pub fn response_function(handler: &FunType) -> Type {
         .map(|(i, ty)| Param {
             name: if i == 0 { "response".into() } else { format!("response{}", i + 1).into() },
             ty: ty.clone(),
-            optional: false,
+            ..Param::default()
         })
         .collect();
     Type::Fun(Arc::new(FunType { params, ..FunType::default() }))

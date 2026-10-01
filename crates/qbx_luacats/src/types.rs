@@ -44,12 +44,25 @@ pub struct Param {
     pub name: SmolStr,
     pub ty: Type,
     pub optional: bool,
+    /// The values that the `---|` lines under its `@param` list, with their descriptions.
+    pub values: Vec<DescribedValue>,
+}
+
+/// A value that a `---| value # description` line lists, with its description, which is empty when
+/// the line has none.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DescribedValue {
+    pub value: Type,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct FunType {
     pub params: Vec<Param>,
     pub returns: Vec<Type>,
+    /// The values that `---|` lines list under each `@return`, with their descriptions, or none
+    /// when no returned value lists any.
+    pub return_values: Vec<Vec<DescribedValue>>,
     /// The sets of values the function returns when it lists more than one, as `(false)` and
     /// `(string, string)` for `@return false | (string, string)`. `returns` then holds what each
     /// position has across the sets.
@@ -732,11 +745,11 @@ impl<'a> TypeParser<'a> {
             if self.rest().starts_with("...") {
                 self.pos += 3;
                 let ty = if self.eat(b':') { self.parse() } else { Type::Any };
-                params.push(Param { name: "...".into(), ty, optional: false });
+                params.push(Param { name: "...".into(), ty, ..Param::default() });
             } else if let Some(name) = self.ident() {
                 let optional = self.eat(b'?');
                 let ty = if self.eat(b':') { self.parse() } else { Type::Unknown };
-                params.push(Param { name: SmolStr::new(name), ty, optional });
+                params.push(Param { name: SmolStr::new(name), ty, optional, ..Param::default() });
             } else {
                 self.pos += 1;
             }

@@ -5415,6 +5415,85 @@ function RunJob(mode, level) end
 }
 
 #[test]
+fn value_lines_describe_their_values_in_completion_and_hover() {
+    let mut client = Client::start(fixture_root());
+    let defs = "\
+---@alias Speed
+---| 'fast' # goes quickly
+---| 'slow' # takes its time
+
+---@param speed Speed
+---@param mode string
+---| 'once' # runs one time
+---| 'loop'
+---@return boolean
+---| nil # when it did not start
+function StartTask(speed, mode) end
+
+---@param target any
+---| 'self' # the caller
+---| 'all'
+function Notify(target) end
+
+---@return
+---| 'on' # switched on
+---| 'off' # switched off
+function GetSwitch() end
+
+---@class Test.Lamp
+---@field color
+---| 'red' # warm light
+---| 'blue'
+Lamp = {}
+";
+    client.open_with("myresource/shared/config.lua", defs);
+    // The values offered where `$` is, with their documentation.
+    let mut documented = |typed: &str| -> Vec<(String, String)> {
+        let (line, column) = pos(typed, "$", 0);
+        client.open_with(CLIENT, &typed.replace('$', ""));
+        let result = client.request("textDocument/completion", client.position_params(CLIENT, line, column));
+        let mut items = result["items"].as_array().cloned().unwrap_or_default();
+        items.retain(|item| item["kind"] == 20);
+        items.sort_by_key(|item| item["sortText"].as_str().unwrap_or_default().to_string());
+        let doc = |item: &Value| item["documentation"]["value"].as_str().unwrap_or_default().to_string();
+        items.iter().map(|item| (item["label"].as_str().unwrap().to_string(), doc(item))).collect()
+    };
+    let pairs = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs.iter().map(|(label, doc)| (label.to_string(), doc.to_string())).collect()
+    };
+    let speeds = pairs(&[("'fast'", "goes quickly"), ("'slow'", "takes its time")]);
+    assert_eq!(documented("StartTask($)"), speeds);
+    assert_eq!(documented("StartTask('fast', $)"), pairs(&[("'once'", "runs one time"), ("'loop'", "")]));
+    assert_eq!(documented("---@type Speed\nlocal speed = $"), speeds);
+    // `any` keeps none of the values listed under it, which are offered all the same.
+    assert_eq!(documented("Notify($)"), pairs(&[("'self'", "the caller"), ("'all'", "")]));
+    assert_eq!(documented("Notify('$')"), pairs(&[("self", "the caller"), ("all", "")]));
+    // The values listed under `@return`, `@type` and `@field`, where a value of them is written.
+    let switches = pairs(&[("'on'", "switched on"), ("'off'", "switched off")]);
+    assert_eq!(documented("print(GetSwitch() == $)"), switches);
+    assert_eq!(documented("local switch = GetSwitch()\nprint(switch == $)"), switches);
+    let directions = pairs(&[("'up'", "going up"), ("'down'", "")]);
+    assert_eq!(documented("---@type\n---| 'up' # going up\n---| 'down'\nlocal direction = $"), directions);
+    let answer = "---@return\n---| 'yes' # agreed\n---| 'no'\nlocal function answer()\n    return $\nend";
+    assert_eq!(documented(answer), pairs(&[("'yes'", "agreed"), ("'no'", "")]));
+    let colors = pairs(&[("'red'", "warm light"), ("'blue'", "")]);
+    assert_eq!(documented("---@type Test.Lamp\nlocal lamp = { color = $ }"), colors);
+    assert_eq!(documented("---@type Test.Lamp\nlocal lamp = Lamp\nprint(lamp.color == $)"), colors);
+
+    let text = "StartTask('fast', 'once')\n---@type Speed\nlocal speed = 'fast'\n";
+    client.open_with(CLIENT, text);
+    let hover = client.hover_text(CLIENT, 0, 1);
+    let listed = "```lua\nmode:\n    | \"once\" -- runs one time\n    | \"loop\"\n\nreturn #1:\n    | nil -- when it did not start\n```";
+    assert!(hover.contains(listed), "{hover}");
+    let (l, c) = pos(text, "speed =", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(
+        hover.contains("type Speed =\n    | \"fast\" -- goes quickly\n    | \"slow\" -- takes its time"),
+        "{hover}"
+    );
+}
+
+#[test]
 fn values_offer_what_their_declared_type_lists() {
     let mut client = Client::start(fixture_root());
     let defs = "\

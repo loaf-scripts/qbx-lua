@@ -3,7 +3,7 @@ use std::sync::Arc;
 use qbx_fivem_data::Side;
 use smol_str::SmolStr;
 
-use crate::types::{merged_returns, CallbackTag, FunType, Param, Type, TypeParser};
+use crate::types::{merged_returns, CallbackTag, DescribedValue, FunType, Param, Type, TypeParser};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DocParam {
@@ -11,6 +11,8 @@ pub struct DocParam {
     pub ty: Type,
     pub optional: bool,
     pub description: String,
+    /// The values that the `---|` lines under it list, with their descriptions.
+    pub values: Vec<DescribedValue>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -18,6 +20,8 @@ pub struct DocReturn {
     pub ty: Type,
     pub name: Option<SmolStr>,
     pub description: String,
+    /// The values that the `---|` lines under it list, with their descriptions.
+    pub values: Vec<DescribedValue>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -30,6 +34,8 @@ pub struct DocField {
     pub line: usize,
     /// The side of `@field (server) name type`.
     pub side: Option<Side>,
+    /// The values that the `---|` lines under it list, with their descriptions.
+    pub values: Vec<DescribedValue>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -67,6 +73,8 @@ pub struct DocAlias {
     pub line: usize,
     /// The side of `@alias (server) Name`, or of `@enum (server) Name` for the alias an enum becomes.
     pub side: Option<Side>,
+    /// The values that the `---|` lines under it list, with their descriptions.
+    pub values: Vec<DescribedValue>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -83,6 +91,9 @@ pub struct DocGroup {
     /// The types a `@type` line lists after its first, as `---@type string, number` does for the
     /// second name of the statement below.
     pub ty_rest: Vec<Type>,
+    /// The values that the `---|` lines under `@type` list for its last type, with their
+    /// descriptions.
+    pub type_values: Vec<DescribedValue>,
     pub enum_name: Option<SmolStr>,
     pub enum_keys: bool,
     pub enum_side: Option<Side>,
@@ -109,18 +120,29 @@ impl DocGroup {
         }
     }
 
+    /// The values that `---|` lines list, with their descriptions, for the `@type` of the name at
+    /// `index`, as `type_at` binds it. They belong to the last type of the line.
+    pub fn type_values_at(&self, index: usize) -> &[DescribedValue] {
+        match index == self.ty_rest.len() {
+            true => &self.type_values,
+            false => &[],
+        }
+    }
+
     /// Builds the function type from `@param`/`@return`, keeping the order of the real parameters.
     pub fn fun_type(&self, param_names: &[SmolStr], has_vararg: bool, is_method: bool) -> FunType {
         let mut params: Vec<Param> = param_names
             .iter()
             .map(|name| match self.params.iter().find(|p| p.name == *name) {
-                Some(doc) => Param { name: name.clone(), ty: doc.ty.clone(), optional: doc.optional },
-                None => Param { name: name.clone(), ty: Type::Unknown, optional: false },
+                Some(doc) => {
+                    Param { name: name.clone(), ty: doc.ty.clone(), optional: doc.optional, values: doc.values.clone() }
+                }
+                None => Param { name: name.clone(), ty: Type::Unknown, ..Param::default() },
             })
             .collect();
         if has_vararg {
             let ty = self.params.iter().find(|p| p.name == "...").map_or(Type::Any, |p| p.ty.clone());
-            params.push(Param { name: "...".into(), ty, optional: false });
+            params.push(Param { name: "...".into(), ty, ..Param::default() });
         }
         // An overload shares the `@generic` names of its doc comment and is called the same way,
         // unless it lists `self` itself like a `fun(self, ...)` field.
@@ -134,9 +156,14 @@ impl DocGroup {
                 Arc::new(FunType { is_method, lists_receiver, generics: self.generics.clone(), ..(**overload).clone() })
             })
             .collect();
+        let return_values = match self.returns.iter().any(|r| !r.values.is_empty()) {
+            true => self.returns.iter().map(|r| r.values.clone()).collect(),
+            false => Vec::new(),
+        };
         FunType {
             params,
             returns: self.returns.iter().map(|r| r.ty.clone()).collect(),
+            return_values,
             return_sets: self.return_sets.clone(),
             returns_inferred: false,
             is_method,
@@ -192,18 +219,22 @@ enum Listing {
 }
 
 impl Listing {
-    /// Adds `value` to the type of the latest such declaration of `group`.
-    fn add(self, group: &mut DocGroup, value: Type) {
-        let ty = match self {
-            Listing::Alias => group.aliases.last_mut().map(|alias| &mut alias.ty),
-            Listing::Param => group.params.last_mut().map(|param| &mut param.ty),
-            Listing::Return => group.returns.last_mut().map(|ret| &mut ret.ty),
-            Listing::Type => group.ty_rest.last_mut().or(group.ty.as_mut()),
-            Listing::Field => group.classes.last_mut().and_then(|class| class.fields.last_mut()).map(|f| &mut f.ty),
+    /// Adds `value` to the type of the latest such declaration of `group`, which also keeps it with
+    /// its `description`.
+    fn add(self, group: &mut DocGroup, value: Type, description: String) {
+        let target = match self {
+            Listing::Alias => group.aliases.last_mut().map(|alias| (&mut alias.ty, &mut alias.values)),
+            Listing::Param => group.params.last_mut().map(|param| (&mut param.ty, &mut param.values)),
+            Listing::Return => group.returns.last_mut().map(|ret| (&mut ret.ty, &mut ret.values)),
+            Listing::Type => group.ty_rest.last_mut().or(group.ty.as_mut()).map(|ty| (ty, &mut group.type_values)),
+            Listing::Field => {
+                let field = group.classes.last_mut().and_then(|class| class.fields.last_mut());
+                field.map(|field| (&mut field.ty, &mut field.values))
+            }
         };
-        if let Some(ty) = ty {
-            *ty = Type::union([std::mem::take(ty), value]);
-        }
+        let Some((ty, values)) = target else { return };
+        *ty = Type::union([std::mem::take(ty), value.clone()]);
+        values.push(DescribedValue { value, description });
         // `---| nil` makes a parameter optional, as `@param name string|nil` does.
         if let (Listing::Param, Some(param)) = (self, group.params.last_mut()) {
             param.optional |= allows_nil(&param.ty);
@@ -282,7 +313,9 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
     for (index, raw) in lines.iter().enumerate() {
         let line = raw.strip_prefix(' ').unwrap_or(raw);
         if let (Some(value), Some(listing)) = (listed_value(line), listing) {
-            listing.add(&mut group, TypeParser::new(value).parse());
+            let mut parser = TypeParser::new(value);
+            let value = parser.parse();
+            listing.add(&mut group, value, clean_description(parser.rest()));
             continue;
         }
         let Some((tag, rest)) = split_tag(line) else {
@@ -337,6 +370,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                     description: description.join("\n").trim().to_string(),
                     line: index,
                     side: side_attribute(attributes),
+                    values: Vec::new(),
                 });
                 listing = Some(Listing::Alias);
             }
@@ -365,6 +399,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                     optional: optional || allows_nil(&ty),
                     ty,
                     description: clean_description(parser.rest()),
+                    values: Vec::new(),
                 });
                 listing = Some(Listing::Param);
             }
@@ -380,7 +415,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                     }
                     for (index, ty) in merged.into_iter().enumerate() {
                         let description = if index == 0 { description.clone() } else { String::new() };
-                        group.returns.push(DocReturn { ty, name: None, description });
+                        group.returns.push(DocReturn { ty, name: None, description, values: Vec::new() });
                     }
                     continue;
                 }
@@ -396,14 +431,15 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                     let (name, after) = if named { (Some(SmolStr::new(word)), after) } else { (None, remainder) };
                     match after.trim_start().strip_prefix(',') {
                         Some(next) => {
-                            group.returns.push(DocReturn { ty, name, description: String::new() });
+                            group.returns.push(DocReturn { ty, name, ..DocReturn::default() });
                             if next.trim().is_empty() {
                                 break;
                             }
                             parser = TypeParser::new(next);
                         }
                         None => {
-                            group.returns.push(DocReturn { ty, name, description: clean_description(after) });
+                            let description = clean_description(after);
+                            group.returns.push(DocReturn { ty, name, description, values: Vec::new() });
                             break;
                         }
                     }
@@ -480,8 +516,15 @@ fn parse_field(rest: &str, line: usize, group: &mut DocGroup) -> bool {
     let optional = parser.rest().starts_with('?');
     let mut parser = TypeParser::new(parser.rest().trim_start_matches('?'));
     let ty = in_class(class, parser.parse());
-    let field =
-        DocField { name: SmolStr::new(name), ty, optional, description: clean_description(parser.rest()), line, side };
+    let field = DocField {
+        name: SmolStr::new(name),
+        ty,
+        optional,
+        description: clean_description(parser.rest()),
+        line,
+        side,
+        values: Vec::new(),
+    };
     let Some(field) = add_signature(&mut class.fields, field) else { return false };
     class.fields.push(field);
     true
@@ -846,6 +889,34 @@ mod tests {
         // Sets of returned values list theirs in parentheses.
         let doc = parse("---@return false | (string, string)\n---| 'x'");
         assert_eq!(doc.returns.iter().map(|r| r.ty.to_string()).collect::<Vec<_>>(), ["false|string", "string?"]);
+    }
+
+    #[test]
+    fn listed_values_keep_their_descriptions() {
+        let described = |values: &[DescribedValue]| -> Vec<(String, String)> {
+            values.iter().map(|v| (v.value.to_string(), v.description.clone())).collect()
+        };
+        let entry = |value: &str, description: &str| (value.to_string(), description.to_string());
+        let doc = parse(
+            "---@alias Side 'any'\n---| 'client' # runs on the client\n---| 'server' -- runs on the server\n---@param mode\n---| 'fast' # goes quickly\n---| 'slow'\n---@return boolean ok\n---| nil # when it failed\n---@type string\n---| 'a' # first",
+        );
+        assert_eq!(
+            described(&doc.aliases[0].values),
+            [entry("\"client\"", "runs on the client"), entry("\"server\"", "runs on the server")],
+            "the type before the lines lists no described values"
+        );
+        assert_eq!(described(&doc.params[0].values), [entry("\"fast\"", "goes quickly"), entry("\"slow\"", "")]);
+        assert_eq!(described(&doc.returns[0].values), [entry("nil", "when it failed")]);
+        assert_eq!(described(doc.type_values_at(0)), [entry("\"a\"", "first")]);
+        let fun = doc.fun_type(&["mode".into()], false, false);
+        assert_eq!(fun.params[0].values, doc.params[0].values, "the parameters of the function keep them");
+        assert_eq!(fun.return_values, [doc.returns[0].values.clone()], "and so do its returned values");
+
+        let doc = parse("---@type integer, string\n---| 'b' # second");
+        assert!(doc.type_values_at(0).is_empty(), "the values belong to the last type of the line");
+        assert_eq!(described(doc.type_values_at(1)), [entry("\"b\"", "second")]);
+        let doc = parse("---@class Opts\n---@field mode string\n---| 'a' # first");
+        assert_eq!(described(&doc.classes[0].fields[0].values), [entry("\"a\"", "first")]);
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::document::Document;
 use crate::index::{EventFamily, EventKind, FileOrigin, SymbolKind};
 use crate::infer::{native_fun_type, Infer, MemberInfo};
 use crate::locate::{locate, string_content_span};
-use crate::types::{CallbackRole, FunType, Param, Type};
+use crate::types::{CallbackRole, DescribedValue, FunType, Param, Type};
 use crate::workspace::Workspace;
 
 const MAX_NATIVES: usize = 120;
@@ -636,7 +636,7 @@ fn value_items(
     let space = if typed.len() == head.len() { " " } else { "" };
     with_infer(ws, doc, |infer| {
         let Some(expected) = expected_type(infer, &doc.chunk, Place::After(at)) else { return Vec::new() };
-        let values = listed_values(infer, &expected.ty);
+        let values = listed_values(infer, &expected.ty, &expected.values);
         let mut items: Vec<CompletionItem> =
             values.iter().enumerate().map(|(i, value)| value.written_item(i, quote, space)).collect();
         if snippets && !expected.compared {
@@ -811,7 +811,7 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
             let Some(expected) = expected_type(infer, &doc.chunk, Place::String(string.span)) else {
                 return Vec::new();
             };
-            let values = listed_values(infer, &expected.ty);
+            let values = listed_values(infer, &expected.ty, &expected.values);
             values.iter().enumerate().filter_map(|(i, value)| value.content_item(i, range, quote)).collect()
         });
     };
@@ -924,6 +924,8 @@ struct ListedValue {
     ty: Type,
     /// The signatures that take it alone, which a call passing it picks.
     taken_alone_by: Vec<String>,
+    /// What the `---|` line that lists it says about it, or empty.
+    description: String,
 }
 
 impl ListedValue {
@@ -947,9 +949,16 @@ impl ListedValue {
         if !self.ty.is_literal() {
             out.detail = Some(self.ty.to_string());
         }
+        let mut documentation = self.description.clone();
         if !self.taken_alone_by.is_empty() {
-            let signatures = self.taken_alone_by.join("\n");
-            out.documentation = Some(Documentation::MarkupContent(markdown(lua_block(&signatures))));
+            let signatures = lua_block(&self.taken_alone_by.join("\n"));
+            documentation = match documentation.is_empty() {
+                true => signatures,
+                false => format!("{documentation}\n\n{signatures}"),
+            };
+        }
+        if !documentation.is_empty() {
+            out.documentation = Some(Documentation::MarkupContent(markdown(documentation)));
         }
         out
     }
@@ -982,10 +991,38 @@ impl ListedValue {
     }
 }
 
-/// The values that `ty` lists, in the order they are declared.
-fn listed_values(infer: &Infer, ty: &Type) -> Vec<ListedValue> {
+/// The values that `ty` lists, in the order they are declared, described by `described_by`, the
+/// `---|` lines under the annotation that declares `ty`, or else by those of its aliases.
+fn listed_values(infer: &Infer, ty: &Type, described_by: &[DescribedValue]) -> Vec<ListedValue> {
     let values = infer.listed_literals(ty).into_iter();
-    values.map(|value| ListedValue { value, ty: ty.clone(), taken_alone_by: Vec::new() }).collect()
+    values
+        .map(|value| {
+            let description = described(described_by, &value).or_else(|| alias_value_description(infer, ty, &value, 0));
+            let description = description.unwrap_or_default();
+            ListedValue { value, ty: ty.clone(), taken_alone_by: Vec::new(), description }
+        })
+        .collect()
+}
+
+/// What the `---|` line of an alias in `ty` that lists `value` says about it.
+fn alias_value_description(infer: &Infer, ty: &Type, value: &Type, depth: u32) -> Option<String> {
+    if depth > 8 {
+        return None;
+    }
+    match ty {
+        Type::Named(name, _) if infer.index.class(name, infer.side()).is_none() => {
+            let (_, alias) = infer.index.alias(name, infer.side())?;
+            described(&alias.values, value).or_else(|| alias_value_description(infer, &alias.ty, value, depth + 1))
+        }
+        Type::Union(types) => types.iter().find_map(|part| alias_value_description(infer, part, value, depth + 1)),
+        _ => None,
+    }
+}
+
+/// The description of `value` among the values of `---|` lines.
+fn described(values: &[DescribedValue], value: &Type) -> Option<String> {
+    let listed = values.iter().find(|listed| listed.value == *value && !listed.description.is_empty());
+    listed.map(|listed| listed.description.clone())
 }
 
 /// The values that the parameter of the argument at `arg_index` lists in `signatures`, in the
@@ -1004,15 +1041,27 @@ fn argument_literals(
     for (signature, _) in signatures {
         let Some(param) = param_for_argument(signature, arg_index, via_method) else { continue };
         let pinned = infer.pinned_literal(&param.ty);
-        for value in infer.listed_literals(&param.ty) {
+        let mut values = infer.listed_literals(&param.ty);
+        // The type of `x any` keeps none of the values that the `---|` lines under it list.
+        if values.is_empty() && !param.values.is_empty() {
+            let listed = param.values.iter().map(|listed| listed.value.clone()).collect();
+            values = infer.listed_literals(&Type::Union(listed));
+        }
+        for value in values {
             let index = match literals.iter().position(|known| known.value == value) {
                 Some(index) => index,
                 None => {
                     let ty = param.ty.clone();
-                    literals.push(ListedValue { value: value.clone(), ty, taken_alone_by: Vec::new() });
+                    let taken_alone_by = Vec::new();
+                    literals.push(ListedValue { value: value.clone(), ty, taken_alone_by, description: String::new() });
                     literals.len() - 1
                 }
             };
+            if literals[index].description.is_empty() {
+                let description =
+                    described(&param.values, &value).or_else(|| alias_value_description(infer, &param.ty, &value, 0));
+                literals[index].description = description.unwrap_or_default();
+            }
             if pinned.as_ref() == Some(&value) {
                 literals[index].taken_alone_by.push(signature.signature(name));
             }

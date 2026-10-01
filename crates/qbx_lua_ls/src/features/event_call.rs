@@ -112,7 +112,7 @@ pub fn event_call(
         } else {
             (format!("arg{}", params.len() + 1).into(), Type::Unknown)
         };
-        params.push(Param { name, ty, optional: false });
+        params.push(Param { name, ty, ..Param::default() });
     }
     params.extend(handler.params.iter().skip(handler_skip).cloned());
 

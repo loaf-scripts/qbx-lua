@@ -16,7 +16,7 @@ use crate::index::{
 };
 use crate::infer::{table_elements, table_fields, FileContext, Infer};
 use crate::luacats::{parse_doc_lines, DocGroup};
-use crate::types::{CallbackRole, FunType, Type};
+use crate::types::{CallbackRole, DescribedValue, FunType, Type};
 
 const MAX_TABLE_DEPTH: u32 = 4;
 const MAX_TABLE_FIELDS: usize = 400;
@@ -44,8 +44,35 @@ pub fn render_doc(doc: &DocGroup) -> Option<Arc<str>> {
         let name = ret.name.as_deref().unwrap_or("returns");
         let _ = write!(out, "\n\n*{name}*: {}", ret.description);
     }
+    // The values that `---|` lines list under a parameter or returned value, as lua-language-server
+    // shows them, when any of them is described.
+    let params = doc.params.iter().map(|param| (param.name.to_string(), &param.values));
+    let returns = doc.returns.iter().enumerate().map(|(i, ret)| {
+        let name = ret.name.as_ref().map_or_else(|| format!("return #{}", i + 1), SmolStr::to_string);
+        (name, &ret.values)
+    });
+    let listed: Vec<String> = params
+        .chain(returns)
+        .filter(|(_, values)| values.iter().any(|v| !v.description.is_empty()))
+        .map(|(name, values)| format!("{name}:{}", described_values(values)))
+        .collect();
+    if !listed.is_empty() {
+        let _ = write!(out, "\n\n```lua\n{}\n```", listed.join("\n\n"));
+    }
     let out = out.trim();
     (!out.is_empty()).then(|| Arc::from(out))
+}
+
+/// Values listed by `---|` lines, one indented line each, with their descriptions as comments.
+pub fn described_values(values: &[DescribedValue]) -> String {
+    let mut out = String::new();
+    for listed in values {
+        let _ = write!(out, "\n    | {}", listed.value);
+        if !listed.description.is_empty() {
+            let _ = write!(out, " -- {}", listed.description);
+        }
+    }
+    out
 }
 
 pub fn index_file(
@@ -182,9 +209,10 @@ impl<'a> Indexer<'a> {
         let lines: Vec<&str> =
             group.iter().map(|c| c.span.text(self.source).strip_prefix("---").unwrap_or_default()).collect();
         let doc = parse_doc_lines(&lines);
-        for class in doc.classes {
+        for mut class in doc.classes {
             let range = self.range(group[class.line.min(group.len() - 1)].span);
             let field_sides = class.fields.iter().map(|field| field.side).collect();
+            let field_values = class.fields.iter_mut().map(|field| std::mem::take(&mut field.values)).collect();
             let fields = class
                 .fields
                 .into_iter()
@@ -203,6 +231,7 @@ impl<'a> Indexer<'a> {
                 parents: class.parents,
                 fields,
                 field_sides,
+                field_values,
                 indices: class.indices,
                 literal_fields: class.literal_fields,
                 call: class.call,
@@ -220,6 +249,7 @@ impl<'a> Indexer<'a> {
                 doc: (!alias.description.is_empty()).then(|| Arc::from(alias.description.as_str())),
                 range,
                 side: alias.side,
+                values: alias.values,
             });
         }
     }
@@ -341,7 +371,7 @@ impl<'a> Indexer<'a> {
             })
             .collect();
         let range = self.range(span);
-        self.out.aliases.push(AliasDef { name, ty: Type::union(values), doc: None, range, side });
+        self.out.aliases.push(AliasDef { name, ty: Type::union(values), doc: None, range, side, values: Vec::new() });
     }
 
     fn push_element(&mut self, owner: SmolStr, key: Option<Type>, value: Type) {

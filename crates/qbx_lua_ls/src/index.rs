@@ -10,7 +10,7 @@ use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 
 use crate::luacats::{applies_on, DocIndexField};
-use crate::types::{FunType, Type};
+use crate::types::{DescribedValue, FunType, Type};
 
 pub type FileId = u32;
 pub type ResourceId = u32;
@@ -72,6 +72,8 @@ pub struct ClassDef {
     pub fields: Vec<Symbol>,
     /// The side each of `fields` is scoped to by `@field (server) name type`.
     pub field_sides: Vec<Option<Side>>,
+    /// The values that `---|` lines list under each of `fields`, with their descriptions.
+    pub field_values: Vec<Vec<DescribedValue>>,
     pub indices: Vec<DocIndexField>,
     /// `---@field [1] number` and `---@field [true] string`: fields keyed by an integer or boolean
     /// literal, with their values, in declaration order.
@@ -108,6 +110,8 @@ pub struct AliasDef {
     pub range: Range,
     /// The side of `@alias (server) Name` or `@enum (server) Name`.
     pub side: Option<Side>,
+    /// The values that the `---|` lines under `@alias` list, with their descriptions.
+    pub values: Vec<DescribedValue>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
