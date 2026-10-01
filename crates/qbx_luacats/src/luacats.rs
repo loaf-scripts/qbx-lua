@@ -43,6 +43,8 @@ pub struct DocIndexField {
     pub key: Type,
     pub ty: Type,
     pub side: Option<Side>,
+    /// Index of the doc line the field was declared on, used to locate it in the source.
+    pub line: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -505,9 +507,9 @@ fn parse_field(rest: &str, line: usize, group: &mut DocGroup) -> bool {
                 return true;
             }
             key @ (Type::IntLit(_) | Type::BooleanLit(_)) => {
-                class.literal_fields.push(DocIndexField { key, ty: value, side });
+                class.literal_fields.push(DocIndexField { key, ty: value, side, line });
             }
-            key => class.indices.push(DocIndexField { key, ty: value, side }),
+            key => class.indices.push(DocIndexField { key, ty: value, side, line }),
         }
         return false;
     }

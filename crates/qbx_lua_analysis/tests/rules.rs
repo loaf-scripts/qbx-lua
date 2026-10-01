@@ -945,3 +945,40 @@ return Color";
         assert_eq!(reported_lines(quiet, "duplicate-doc-alias"), Vec::<u32>::new(), "{quiet}");
     }
 }
+
+#[test]
+fn fields_declared_twice_for_one_class() {
+    let source = "---@class Twice
+---@field a string
+---@field a integer
+---@field g fun()|nil
+---@field g fun()|nil
+---@field [string] number
+---@field [string] boolean
+---@field ['b'] string
+---@field b number
+
+---@class Twice
+---@field a boolean";
+    assert_eq!(reported_lines(source, "duplicate-doc-field"), [3, 5, 7, 9, 12]);
+    assert_eq!(
+        findings(source, "duplicate-doc-field")[0].1,
+        "field 'a' of class 'Twice' is already declared on line 2"
+    );
+
+    for quiet in [
+        // Repeated function fields are overloads, scoped or not.
+        "---@class Phone\n---@field Has fun(): boolean\n---@field Has fun(source: number): boolean",
+        "---@class Phone\n---@field (client) Has fun(): boolean\n---@field (server) Has fun(source: number): boolean",
+        "---@class Mixed\n---@field h string\n---@field h fun()",
+        // One declaration for each side, by field or by class.
+        "---@class Phone\n---@field (client) hud table\n---@field (server) hud string",
+        "---@class (server) Account\n---@field money number\n\n---@class (client) Account\n---@field money string",
+        // Other classes, including a child that narrows a parent's field.
+        "---@class A\n---@field x string\n---@class B\n---@field x string",
+        "---@class Base\n---@field x string\n---@class Child : Base\n---@field x 'a'|'b'",
+        "---@class Lit\n---@field [1] string\n---@field [2] string",
+    ] {
+        assert_eq!(reported_lines(quiet, "duplicate-doc-field"), Vec::<u32>::new(), "{quiet}");
+    }
+}

@@ -12,6 +12,10 @@ end
 ---@alias NotifyType 'inform'|'error'
 ---@alias NotifyType 'success'
 
+---@class NotifyOptions
+---@field duration integer
+---@field duration number
+
 ---@param msg string
 function Config.Notify(message)
     print(message)

@@ -1,10 +1,10 @@
 //! Doc comment checks that need no other file: `@param` names that no parameter of the documented
-//! function has, and aliases and enums that one file declares twice for one side.
+//! function has, and aliases, enums and class fields that one file declares twice for one side.
 
 use qbx_fivem_data::Side;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
-use qbx_lua_syntax::{Comment, LineIndex, Span};
+use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
 use qbx_luacats::luacats::{applies_on, declared_name, has_attribute, parse_doc_lines, DocGroup};
 use qbx_luacats::types::{FunType, Type};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -20,7 +20,8 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     // Definition files document stubs, which need not spell out the parameters they describe.
     let params = wanted(rules::UNDEFINED_DOC_PARAM, &["@param"]) && !is_meta_file(source, input.chunk);
     let aliases = wanted(rules::DUPLICATE_DOC_ALIAS, &["@alias", "@enum"]);
-    if !(params || aliases) {
+    let fields = wanted(rules::DUPLICATE_DOC_FIELD, &["@field"]);
+    if !(params || aliases || fields) {
         return;
     }
     let blocks: Vec<DocBlock> = doc_blocks(source, &input.chunk.comments)
@@ -34,6 +35,9 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     }
     if aliases {
         duplicate_aliases(&blocks, &lines, sink);
+    }
+    if fields {
+        duplicate_fields(&blocks, &lines, sink);
     }
 }
 
@@ -349,5 +353,38 @@ fn duplicate_aliases(blocks: &[DocBlock], lines: &LineIndex, sink: &mut Sink) {
             line_number(lines, other.span)
         );
         sink.report(rules::DUPLICATE_DOC_ALIAS, declared.span, message);
+    }
+}
+
+/// The declarations of one field of a class, with the side each is for.
+type FieldDeclarations = Vec<(Option<Side>, Span)>;
+
+/// `duplicate-doc-field`: a class field the file already declares for a side the two share. A
+/// function field repeated under its name is another signature of it, as in LuaLS.
+fn duplicate_fields(blocks: &[DocBlock], lines: &LineIndex, sink: &mut Sink) {
+    let mut seen: FxHashMap<(SmolStr, String), FieldDeclarations> = FxHashMap::default();
+    for block in blocks {
+        for class in &block.doc.classes {
+            let named = class.fields.iter().map(|f| (f.name.to_string(), &f.ty, f.side, f.line));
+            let keyed = class.indices.iter().chain(&class.literal_fields);
+            let keyed = keyed.map(|f| (format!("[{}]", f.key), &f.ty, f.side, f.line));
+            for (key, ty, side, index) in named.chain(keyed) {
+                if matches!(ty, Type::Fun(_)) {
+                    continue;
+                }
+                let Some((span, shown)) = block.declared(index) else { continue };
+                let side = side.or(class.side);
+                let declared = seen.entry((class.name.clone(), key)).or_default();
+                if let Some((_, first)) = declared.iter().find(|(other, _)| applies_on(*other, side)) {
+                    let message = format!(
+                        "field '{shown}' of class '{}' is already declared on line {}",
+                        class.name,
+                        line_number(lines, *first)
+                    );
+                    sink.report(rules::DUPLICATE_DOC_FIELD, span, message);
+                }
+                declared.push((side, span));
+            }
+        }
     }
 }
