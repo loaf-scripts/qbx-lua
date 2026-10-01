@@ -746,6 +746,13 @@ pub fn declared_name(line: &str) -> Option<(usize, &str)> {
     Some((line.len() - parser.rest().len() - name.len(), name))
 }
 
+/// Whether the attributes of a `@class`, `@alias` or `@enum` line name `attribute`, as in
+/// `@class (partial) Player`.
+pub fn has_attribute(line: &str, attribute: &str) -> bool {
+    let Some(("class" | "alias" | "enum", rest)) = split_tag(line) else { return false };
+    split_attributes(rest).0.split(',').any(|named| named.trim() == attribute)
+}
+
 /// The tag of a doc line and the class and alias names on it.
 fn type_names(line: &str) -> Option<(&str, Vec<FoundName<'_>>)> {
     let (tag, rest) = match listed_value(line) {
@@ -1267,6 +1274,9 @@ mod tests {
         assert_eq!(name("@enum (key) Jobs"), Some("Jobs"));
         assert_eq!(name("@return string name"), None);
         assert_eq!(name("@param"), None);
+        assert!(has_attribute("@class (partial, server) Player", "partial"));
+        assert!(!has_attribute("@alias Partial string", "partial"));
+        assert!(!has_attribute("@field (partial) x number", "partial"));
     }
 
     #[test]

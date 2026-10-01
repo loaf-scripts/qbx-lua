@@ -33,6 +33,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "missing-parameter",
     "undefined-doc-name",
     "undefined-doc-param",
+    "duplicate-doc-alias",
     "missing-fields",
     "assign-type-mismatch",
     "return-type-mismatch",

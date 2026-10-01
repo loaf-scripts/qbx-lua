@@ -72,6 +72,7 @@ pub const MISSING_PARAMETER: &str = "missing-parameter";
 /// Reported by qbx-lua-ls, which indexes the LuaCATS types; the linter itself has no type information.
 pub const UNDEFINED_DOC_NAME: &str = "undefined-doc-name";
 pub const UNDEFINED_DOC_PARAM: &str = "undefined-doc-param";
+pub const DUPLICATE_DOC_ALIAS: &str = "duplicate-doc-alias";
 /// Reported by qbx-lua-ls, which reads the LuaCATS classes; the linter itself has no type information.
 pub const MISSING_FIELDS: &str = "missing-fields";
 /// Reported by qbx-lua-ls, which reads the LuaCATS classes; the linter itself has no type information.
@@ -145,6 +146,7 @@ pub static RULES: &[Rule] = &[
     rule(MISSING_PARAMETER, Correctness, WARN, false, "A function is called without an argument for a parameter its LuaCATS annotations require."),
     rule(UNDEFINED_DOC_NAME, Correctness, WARN, false, "A LuaCATS annotation names a type that no @class, @alias or @enum declares for the file's side (language server only)."),
     rule(UNDEFINED_DOC_PARAM, Correctness, WARN, false, "A LuaCATS @param names no parameter of the function its doc comment documents, or no function follows the comment."),
+    rule(DUPLICATE_DOC_ALIAS, Suspicious, WARN, false, "An @alias or @enum reuses the name of an alias, enum or class that the same file declares for the same side."),
     rule(MISSING_FIELDS, Correctness, WARN, false, "A table constructor typed as a LuaCATS class leaves out required fields (language server only)."),
     rule(ASSIGN_TYPE_MISMATCH, Correctness, WARN, false, "A table constructor or assignment stores a value of the wrong type in a field of a LuaCATS class, or in a variable typed with @type or @param (language server only)."),
     rule(UNDECLARED_FIELD, Correctness, WARN, false, "A field or key that a strict LuaCATS class does not declare is set or read (language server only)."),

@@ -9,6 +9,9 @@ function Notify(message, duration)
     print(message, duration)
 end
 
+---@alias NotifyType 'inform'|'error'
+---@alias NotifyType 'success'
+
 ---@param msg string
 function Config.Notify(message)
     print(message)

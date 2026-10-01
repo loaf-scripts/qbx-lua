@@ -913,3 +913,35 @@ return handler";
         ]
     );
 }
+
+#[test]
+fn aliases_declared_twice_in_one_file() {
+    let source = "---@alias Dup string
+---@alias Dup integer
+---@class Shape
+---@alias Shape string
+---@enum Color
+local Color = { Red = 1 }
+---@alias Color string
+---@alias Later string
+---@class Later
+return Color";
+    assert_eq!(reported_lines(source, "duplicate-doc-alias"), [2, 4, 7, 8]);
+    let messages: Vec<String> = findings(source, "duplicate-doc-alias").into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages[0], "'Dup' is already declared as an alias on line 1");
+    assert_eq!(messages[1], "'Shape' is already declared as a class on line 3");
+    assert_eq!(messages[2], "'Color' is already declared as an enum on line 5");
+
+    for quiet in [
+        // One declaration for each side.
+        "---@alias (server) Sided string\n---@alias (client) Sided integer",
+        "---@enum (server) Jobs\nlocal Jobs = { A = 1 }\n---@alias (client) Jobs string\nreturn Jobs",
+        // `(partial)` on any of them.
+        "---@class (partial) Part\n---@alias Part string",
+        "---@alias (partial) Part string\n---@alias Part integer",
+        // Classes merge their declarations.
+        "---@class Merged\n---@field a string\n---@class Merged\n---@field b string",
+    ] {
+        assert_eq!(reported_lines(quiet, "duplicate-doc-alias"), Vec::<u32>::new(), "{quiet}");
+    }
+}

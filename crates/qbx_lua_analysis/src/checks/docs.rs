@@ -1,10 +1,11 @@
 //! Doc comment checks that need no other file: `@param` names that no parameter of the documented
-//! function has.
+//! function has, and aliases and enums that one file declares twice for one side.
 
+use qbx_fivem_data::Side;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::{Comment, LineIndex, Span};
-use qbx_luacats::luacats::{declared_name, parse_doc_lines};
+use qbx_luacats::luacats::{applies_on, declared_name, has_attribute, parse_doc_lines, DocGroup};
 use qbx_luacats::types::{FunType, Type};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -18,7 +19,8 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let wanted = |code, tags: &[&str]| sink.enabled(code).is_some() && tags.iter().any(|tag| source.contains(tag));
     // Definition files document stubs, which need not spell out the parameters they describe.
     let params = wanted(rules::UNDEFINED_DOC_PARAM, &["@param"]) && !is_meta_file(source, input.chunk);
-    if !params {
+    let aliases = wanted(rules::DUPLICATE_DOC_ALIAS, &["@alias", "@enum"]);
+    if !(params || aliases) {
         return;
     }
     let blocks: Vec<DocBlock> = doc_blocks(source, &input.chunk.comments)
@@ -27,19 +29,26 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
         .map(|comments| DocBlock::new(source, comments))
         .collect();
     let lines = LineIndex::new(source);
-    undefined_params(input, &blocks, &lines, sink);
+    if params {
+        undefined_params(input, &blocks, &lines, sink);
+    }
+    if aliases {
+        duplicate_aliases(&blocks, &lines, sink);
+    }
 }
 
-/// One doc comment, and its `---` lines without the prefix.
+/// One doc comment: its `---` lines without the prefix, and what they declare.
 struct DocBlock<'a> {
     comments: Vec<&'a Comment>,
     lines: Vec<&'a str>,
+    doc: DocGroup,
 }
 
 impl<'a> DocBlock<'a> {
     fn new(source: &'a str, comments: Vec<&'a Comment>) -> Self {
         let lines: Vec<&str> = comments.iter().map(|comment| &comment.span.text(source)[3..]).collect();
-        Self { comments, lines }
+        let doc = parse_doc_lines(&lines);
+        Self { comments, lines, doc }
     }
 
     fn tag(&self, index: usize) -> Option<&'a str> {
@@ -52,6 +61,10 @@ impl<'a> DocBlock<'a> {
         let start = self.comments[index].span.start + 3 + offset as u32;
         Some((Span::new(start, start + name.len() as u32), name))
     }
+}
+
+fn line_number(lines: &LineIndex, span: Span) -> u32 {
+    lines.line_of(span.start) + 1
 }
 
 /// `undefined-doc-param`. A doc comment documents the functions of the statement below it, as
@@ -287,5 +300,54 @@ impl<'a> Documented<'a> {
             "..." => self.vararg,
             _ => self.names.contains(name),
         }
+    }
+}
+
+/// A type name a doc comment declares.
+struct TypeName<'a> {
+    name: &'a str,
+    /// What declares it, as the message names it.
+    kind: &'static str,
+    side: Option<Side>,
+    partial: bool,
+    span: Span,
+}
+
+const CLASS: &str = "a class";
+
+/// `duplicate-doc-alias`: an `@alias` or `@enum` whose name the file already gives an alias or enum,
+/// or any class, for a side the two share. `(partial)` on any of them allows the repeat, as in LuaLS.
+fn duplicate_aliases(blocks: &[DocBlock], lines: &LineIndex, sink: &mut Sink) {
+    let mut names: Vec<TypeName> = Vec::new();
+    for block in blocks {
+        for index in 0..block.lines.len() {
+            let (kind, side) = match block.tag(index) {
+                Some("alias") => ("an alias", block.doc.aliases.iter().find(|a| a.line == index).and_then(|a| a.side)),
+                Some("enum") => ("an enum", block.doc.enum_side),
+                Some("class") => (CLASS, block.doc.classes.iter().find(|c| c.line == index).and_then(|c| c.side)),
+                _ => continue,
+            };
+            let Some((span, name)) = block.declared(index) else { continue };
+            let partial = has_attribute(block.lines[index], "partial");
+            names.push(TypeName { name, kind, side, partial, span });
+        }
+    }
+    let partial: FxHashSet<&str> = names.iter().filter(|n| n.partial).map(|n| n.name).collect();
+    for (index, declared) in names.iter().enumerate() {
+        if declared.kind == CLASS || partial.contains(declared.name) {
+            continue;
+        }
+        let clashes = |other: &&TypeName| other.name == declared.name && applies_on(other.side, declared.side);
+        let earlier = names[..index].iter().rev().filter(|other| other.kind != CLASS).find(clashes);
+        let Some(other) = earlier.or_else(|| names.iter().filter(|other| other.kind == CLASS).find(clashes)) else {
+            continue;
+        };
+        let message = format!(
+            "'{}' is already declared as {} on line {}",
+            declared.name,
+            other.kind,
+            line_number(lines, other.span)
+        );
+        sink.report(rules::DUPLICATE_DOC_ALIAS, declared.span, message);
     }
 }
