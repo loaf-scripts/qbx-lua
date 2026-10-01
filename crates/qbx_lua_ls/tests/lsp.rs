@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId};
 use lsp_types::Url;
@@ -2077,6 +2077,243 @@ check()
         )],
         "comparisons see the narrowed types"
     );
+}
+
+#[test]
+fn casts_change_the_type_of_a_local_from_their_line_on() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return string|integer|nil
+local function get() end
+
+local value = get()
+print(value) -- before
+---@cast value string
+print(value) -- cast
+local other = get()
+---@cast other -?
+print(other) -- without nil
+---@cast other +boolean, -integer
+print(other) -- added and removed
+local scoped = get()
+if scoped then
+    ---@cast scoped integer
+    print(scoped) -- in block
+end
+print(scoped) -- after block
+local changed = get()
+---@cast changed string
+changed = changed:upper()
+print(changed) -- reassigned
+local guarded = get()
+if type(guarded) == 'string' then
+    ---@cast guarded integer
+    print(guarded) -- cast over guard
+end
+---@cast guarded string?
+if guarded then
+    print(guarded) -- guard over cast
+end
+local converted = get()
+if type(converted) == 'number' then
+    converted = tostring(converted)
+    ---@cast converted string
+end
+print(converted) -- after branch
+local nested = get()
+if nested then
+    if type(nested) == 'number' then
+        print(nested)
+        ---@cast nested integer
+    end
+end
+print(nested) -- after nested branch
+local branched = get()
+if branched == 1 then
+    print(branched)
+    ---@cast branched boolean
+elseif branched == 'a' then
+    print(branched) -- next branch
+end
+local looped = get()
+for _ = 1, 2 do
+    print(looped)
+    ---@cast looped integer
+end
+print(looped) -- after loop
+local called = get()
+local function body()
+    print(called)
+    ---@cast called integer
+end
+body()
+print(called) -- after function
+local typing = get()
+if not typing then return end
+---@cast typing
+print(typing) -- no type yet
+---@cast typing, other string
+print(typing) -- no name
+local plain = get()
+plain = get()
+if plain then
+    print(plain) -- reassigned guard
+end
+local data = get()
+data = get()
+---@cast data string?
+if data then
+    print(data) -- guard after cast
+    data = get()
+    print(data) -- assigned after guard
+end
+local function later()
+    print(value) -- closure
+end
+later()
+local function untyped(x) return x end
+local loose = untyped(1)
+---@cast loose +string
+print(loose) -- added to unknown
+if loose then
+    print(loose) -- guarded unknown
+end
+---@cast loose -string
+print(loose) -- removed from unknown
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("value) -- before", "value: string|integer|nil\n"),
+        ("value) -- cast", "value: string\n"),
+        ("other) -- without nil", "other: string|integer\n"),
+        ("other) -- added and removed", "other: string|boolean\n"),
+        ("scoped) -- in block", "scoped: integer\n"),
+        // A cast ends with its block...
+        ("scoped) -- after block", "scoped: string|integer|nil\n"),
+        // ...and once the local is assigned again.
+        ("changed:upper()", "changed: string\n"),
+        ("changed) -- reassigned", "changed: string|integer|nil\n"),
+        ("guarded) -- cast over guard", "guarded: integer\n"),
+        ("guarded) -- guard over cast", "guarded: string\n"),
+        // On the last line of an `if` branch, a cast types what the branch leaves for the code
+        // after the `if`, but not for its other branches...
+        ("converted) -- after branch", "converted: string\n"),
+        ("nested) -- after nested branch", "nested: integer\n"),
+        ("branched) -- next branch", "branched: \"a\"\n"),
+        // ...and on that of another block, it holds nowhere.
+        ("looped) -- after loop", "looped: string|integer|nil\n"),
+        ("called) -- after function", "called: string|integer|nil\n"),
+        // A line with no type keeps the guards before it.
+        ("typing) -- no type yet", "typing: string|integer\n"),
+        ("typing) -- no name", "typing: string|integer\n"),
+        // A guard on a local that is assigned again narrows the type a cast before it gives, up to
+        // the next assignment.
+        ("plain) -- reassigned guard", "plain: string|integer|nil\n"),
+        ("data) -- guard after cast", "data: string\n"),
+        ("data) -- assigned after guard", "data: string|integer|nil\n"),
+        ("value) -- closure", "value: string\n"),
+        // Adding to a type nothing tells leaves a value that may still be anything else.
+        ("loose) -- added to unknown", "loose: string|unknown\n"),
+        ("loose) -- guarded unknown", "loose: string|unknown\n"),
+        ("loose) -- removed from unknown", "loose: unknown\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn casts_that_add_or_remove_types_keep_the_guards_before_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return string[]|boolean|nil
+local function get() end
+
+local items = get()
+if items then
+    ---@cast items +number[]
+    print(items) -- added
+end
+if type(items) ~= 'boolean' then
+    ---@cast items -nil
+    print(items) -- removed
+end
+---@cast items +integer
+print(items) -- outside guards
+
+local skipped = get()
+if not skipped then goto skip end
+---@cast skipped +number
+print(skipped) -- before the label
+::skip::
+print(skipped) -- after the label
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("items) -- added", "items: string[]|true|number[]\n"),
+        ("items) -- removed", "items: string[]\n"),
+        ("items) -- outside guards", "items: string[]|boolean|integer|nil\n"),
+        ("skipped) -- before the label", "skipped: string[]|true|number\n"),
+        // The `goto` reaches the label without the guard.
+        ("skipped) -- after the label", "skipped: string[]|boolean|number|nil\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn comparisons_read_the_types_casts_give() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local function untyped(value) return value end
+
+local added = untyped(1)
+---@cast added +string
+if added == 5 then end
+local reassigned = 1
+reassigned = untyped(reassigned)
+---@cast reassigned +string
+if reassigned == 5 then end
+local typed = 1
+typed = untyped(typed)
+---@cast typed string
+if typed == 5 then end
+local branched = untyped(1)
+if branched == 1 then
+    branched = 5
+    ---@cast branched integer
+elseif branched == 'a' then
+    print(branched)
+end
+";
+    client.open_with(CLIENT, text);
+    let (line, _) = pos(text, "if typed == 5", 0);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["impossible-comparison"]),
+        [("impossible-comparison".to_string(), line as u64, "Comparing `string` with `5` is always false".to_string())],
+        "a `+T` cast leaves a type that is not known as it is, and a cast on the last line of a branch \
+         does not reach the next one"
+    );
+}
+
+#[test]
+fn many_casts_and_writes_of_one_local_stay_fast() {
+    let mut client = Client::start(fixture_root());
+    // Each cast holds until the next write, which is no reason to compare every cast with every
+    // write in every statement.
+    let mut text = "---@return string|integer|nil\nlocal function get() end\nlocal x = get()\n".to_string();
+    text.push_str(&"---@cast x string\nprint(x)\nx = get()\n".repeat(2000));
+    text.push_str("---@cast x integer\nprint(x) -- last\n");
+    client.open_with(CLIENT, &text);
+    let (line, character) = pos(&text, "x) -- last", 0);
+    let started = Instant::now();
+    let hover = client.hover_text(CLIENT, line, character);
+    let elapsed = started.elapsed();
+    assert!(hover.contains("x: integer\n"), "{hover}");
+    assert!(elapsed < Duration::from_secs(5), "hover took {elapsed:?}");
 }
 
 #[test]

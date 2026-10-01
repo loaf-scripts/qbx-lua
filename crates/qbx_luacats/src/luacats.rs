@@ -656,6 +656,70 @@ pub fn declared_generics(line: &str) -> Vec<&str> {
     list.split(',').filter_map(|entry| entry.trim().split([':', ' ']).next()).filter(|name| !name.is_empty()).collect()
 }
 
+/// What one entry of a `@cast` line does to the type of the variable it names.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CastEntry {
+    /// `T`: the variable holds a `T`.
+    Replace(Type),
+    /// `+T`, or `+?` for `nil`: it may also hold a `T`.
+    Add(Type),
+    /// `-T`, or `-?` for `nil`: it holds no `T`.
+    Remove(Type),
+}
+
+/// A `@cast name T, +T, -?` line: the name it casts, and each entry with the bytes of the line its
+/// type is written on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocCast<'a> {
+    pub name: &'a str,
+    pub entries: Vec<(CastEntry, std::ops::Range<usize>)>,
+}
+
+/// Reads a `@cast` doc line whose `---` prefix is removed.
+pub fn parse_cast(line: &str) -> Option<DocCast<'_>> {
+    let ("cast", rest) = split_tag(line)? else { return None };
+    let mut parser = TypeParser::new(rest);
+    let name = parser.ident()?;
+    let mut entries = Vec::new();
+    let mut rest = parser.rest();
+    loop {
+        let entry = rest.trim_start();
+        let (sign, body) = match entry.strip_prefix('+') {
+            Some(body) => (Some(true), body),
+            None => match entry.strip_prefix('-') {
+                Some(body) => (Some(false), body),
+                None => (None, entry),
+            },
+        };
+        let (ty, after) = match body.strip_prefix('?').filter(|_| sign.is_some()) {
+            Some(after) => (Type::Nil, after),
+            None => {
+                let mut parser = TypeParser::new(body);
+                let ty = parser.parse();
+                (ty, parser.rest())
+            }
+        };
+        let written = body[..body.len() - after.len()].trim();
+        if written.is_empty() {
+            break;
+        }
+        let start = line.len() - body.trim_start().len();
+        entries.push((
+            match sign {
+                None => CastEntry::Replace(ty),
+                Some(true) => CastEntry::Add(ty),
+                Some(false) => CastEntry::Remove(ty),
+            },
+            start..start + written.len(),
+        ));
+        match after.trim_start().strip_prefix(',') {
+            Some(next) => rest = next,
+            None => break,
+        }
+    }
+    Some(DocCast { name, entries })
+}
+
 /// The tag of a doc line and the class and alias names on it.
 fn type_names(line: &str) -> Option<(&str, Vec<FoundName<'_>>)> {
     let (tag, rest) = match listed_value(line) {
@@ -1131,6 +1195,30 @@ mod tests {
         assert_eq!(declared_generics("@class (exact) Pair<L, R> : Base"), ["L", "R"]);
         assert!(declared_generics("@class Plain : Base").is_empty());
         assert!(declared_generics("@param value T").is_empty());
+    }
+
+    #[test]
+    fn reads_cast_lines() {
+        let line = "@cast value string?, +integer, -?, +?, - boolean # why";
+        let cast = parse_cast(line).unwrap();
+        assert_eq!(cast.name, "value");
+        let entries: Vec<(CastEntry, &str)> =
+            cast.entries.into_iter().map(|(entry, range)| (entry, &line[range])).collect();
+        assert_eq!(
+            entries,
+            [
+                (CastEntry::Replace(Type::String.optional()), "string?"),
+                (CastEntry::Add(Type::Integer), "integer"),
+                (CastEntry::Remove(Type::Nil), "?"),
+                (CastEntry::Add(Type::Nil), "?"),
+                (CastEntry::Remove(Type::Boolean), "boolean"),
+            ]
+        );
+        let cast = parse_cast("@cast Items +fun(name: string): Item").unwrap();
+        assert!(matches!(&cast.entries[..], [(CastEntry::Add(Type::Fun(_)), _)]));
+        assert_eq!(parse_cast("@cast value").map(|cast| cast.entries.len()), Some(0));
+        assert_eq!(parse_cast("@type value string"), None);
+        assert_eq!(parse_cast("@cast"), None);
     }
 
     #[test]

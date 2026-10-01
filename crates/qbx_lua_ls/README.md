@@ -47,7 +47,8 @@ Available features depend on the editor's LSP client.
   [guarded code](#type-guards), a local is no longer `nil` or `false`, and `type(data) == "table"`
   or `state == "busy"` narrow it to that kind or value. A guard on one value of
   `local ok, err = f()` also narrows the others, for functions that return
-  [sets of values](#sets-of-returned-values) such as `false | (string, string)`.
+  [sets of values](#sets-of-returned-values) such as `false | (string, string)`, and a
+  [`---@cast`](#casts) changes the type of a local from its line on.
 - Diagnostics and quick fixes with resource and client/server context, plus LuaCATS type checks:
   `missing-fields` and `assign-type-mismatch` for tables and assignments that leave out required
   fields of their class or store a value of the wrong type, in a field or in a variable typed with
@@ -125,8 +126,8 @@ and `math.type(name)` compared with a name they give, and those joined by `and`,
 They apply to the branches of an `if` or `elseif`, to the code after an `if` whose other branches
 all end in `return`, `error(...)`, `break` or `goto`, to the body of a `while`, to the right side of
 `and` and `or`, and to the code after `assert(name)`. A local that is assigned again after its
-declaration is not narrowed, since a guard says nothing about the new value, and neither are
-globals and fields.
+declaration is only narrowed by the guards after a [`---@cast`](#casts) of it, since a guard says
+nothing about the new value, and globals and fields are not narrowed.
 
 A comparison with a literal narrows the local to that literal: inside `if state == "busy" then`, a
 `"active"|"busy"|nil` and a `string` are both `"busy"`, and in the `else` branch the first is
@@ -151,6 +152,38 @@ from a `float`, and `kind == "table"` after `local kind = type(name)` narrows li
 after `local type = type`, and not `table.type` of ox_lib. Where one of
 several checks held, as inside `if type(value) == "string" or type(value) == "number" then`, the
 local is of the kinds they let through.
+
+### Casts
+
+A `---@cast` line changes the type of a local from its line on, as in lua-language-server:
+
+```lua
+local data = json.decode(payload)
+---@cast data PlayerData
+```
+
+`---@cast name T` makes it a `T`, `+T` adds `T` to it, `-T` takes `T` out, `+?` and `-?` add and
+take out `nil`, and one line can list several, as in `---@cast value +?, -string`. Adding to a local
+whose type is unknown leaves a value that may still be anything else, as `string|unknown` for
+`+string`, as in lua-language-server. A cast holds to
+the end of the block of the code after it, including the functions defined there, and until the
+statement that assigns the local again. Unlike lua-language-server, a cast inside an `if` ends with
+its branch, except on the last line of the branch: there it holds after the `if`, as it does in
+lua-language-server, which is how code types what the branch leaves:
+
+```lua
+if type(translation) == "table" then
+    translation = translation[1]
+    ---@cast translation string
+end
+print(translation) -- string
+```
+
+On the last line of another block, such as the body of a function or a loop, a cast holds nowhere.
+Casts also apply to locals that are assigned again, and only to locals. A guard that
+took effect before a cast tells nothing about the type it gives, while one after it narrows that
+type. `+T` and `-T` change the type the guards around their line leave instead, so
+`---@cast items +number[]` inside `if items then` keeps out the `nil` of a `string[]?`.
 
 ### Sets of returned values
 

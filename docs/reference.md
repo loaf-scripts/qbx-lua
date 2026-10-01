@@ -478,7 +478,8 @@ Only clear cases count, and the rest is left alone:
 - Comparisons with `nil`. Annotations often leave out the `?` of a value that may be missing, and
   the check for it is deliberate.
 - A local that is assigned again after its declaration, since its declared type may not be what
-  it holds.
+  it holds, unless a `---@cast name T` types it. `---@cast name +T` does not: it adds `T` to a
+  type that is still not known, as it does for a local with no declared type.
 - Natives documented as `boolean` compared with a number. Scripts can get `1` instead of `true`
   from them, so `IsPedInAnyVehicle(ped) == 1` is valid.
 

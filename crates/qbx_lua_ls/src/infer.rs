@@ -8,14 +8,14 @@ use qbx_lua_analysis::env::leading_doc_lines;
 use qbx_lua_analysis::scope::{LocalId, LocalKind, Resolution, Resolved};
 use qbx_lua_analysis::side_guard::SideRegions;
 use qbx_lua_syntax::ast::*;
-use qbx_lua_syntax::{CommentKind, NumberValue, SmolStr};
+use qbx_lua_syntax::{CommentKind, NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::callback_wrappers::{self, Wrapper};
 use crate::index::{FileId, Index, SymbolKind};
 use crate::locate::statement_at;
-use crate::luacats::{applies_on, parse_doc_lines, DocGroup};
-use crate::narrow::Guards;
+use crate::luacats::{applies_on, parse_doc_lines, CastEntry, DocGroup};
+use crate::narrow::{Casts, Guards};
 use crate::types::{CallbackRole, FunType, Param, Shape, ShapeField, Type, TypeParser};
 
 const MAX_DEPTH: u32 = 24;
@@ -133,6 +133,7 @@ pub struct FileContext<'a> {
     tables: FxHashMap<u32, Expected<'a>>,
     docs: RefCell<FxHashMap<u32, Rc<DocGroup>>>,
     guards: OnceCell<Guards>,
+    casts: OnceCell<Casts>,
 }
 
 impl<'a> FileContext<'a> {
@@ -154,12 +155,18 @@ impl<'a> FileContext<'a> {
             tables: collector.tables,
             docs: RefCell::new(FxHashMap::default()),
             guards: OnceCell::new(),
+            casts: OnceCell::new(),
         }
     }
 
     /// What the conditions of the file tell about the locals they test.
     pub fn guards(&self) -> &Guards {
         self.guards.get_or_init(|| Guards::of(self.chunk, self.resolution))
+    }
+
+    /// The `---@cast` lines of the file.
+    pub fn casts(&self) -> &Casts {
+        self.casts.get_or_init(|| Casts::of(self.source, self.chunk, self.resolution))
     }
 
     pub fn decl(&self, decl_start: u32) -> Option<&Decl<'a>> {
@@ -597,16 +604,41 @@ impl<'a> Infer<'a> {
         }
     }
 
-    /// The type of a local where it is read at `offset`: its own type without what the guards
-    /// around the read rule out, such as the `nil` of a `string?` after `if not name then return end`.
+    /// The type of a local where it is read at `offset`: its own type as the `---@cast` lines before
+    /// the read change it, without what the guards around the read rule out, such as the `nil` of a
+    /// `string?` after `if not name then return end`.
     pub fn local_type_at(&self, id: LocalId, offset: u32) -> Type {
         self.narrowed(id, offset, self.local_type(id))
     }
 
-    /// `ty`, the type of the local `id`, without what the guards around a read at `offset` rule out.
+    /// `ty`, the type of the local `id`, as the casts before a read at `offset` change it and
+    /// without what the guards around the read rule out. A guard that takes effect before a cast
+    /// tells nothing about the type the cast gives, but `+T` and `-T` change the type that the
+    /// guards around their line leave, as `---@cast items +number[]` inside `if items then` does,
+    /// for as long as those guards hold.
     pub fn narrowed(&self, id: LocalId, offset: u32, ty: Type) -> Type {
-        let ty = self.linked_type(id, offset).unwrap_or(ty);
-        let mut facts = self.ctx.guards().at(id, offset).peekable();
+        let mut since = None;
+        let mut ty = ty;
+        for cast in self.ctx.casts().at(id, offset) {
+            // A guard that ends before the read, as one does at a label that a `goto` past the cast
+            // reaches, tells nothing about the read.
+            if !cast.entries.iter().any(|(entry, _)| matches!(entry, CastEntry::Replace(_))) {
+                ty = self.guards_applied(id, since, Span::new(cast.span.start, offset), ty);
+            }
+            ty = cast.entries.iter().fold(ty, |ty, (entry, _)| self.cast(ty, entry));
+            since = Some(cast.span.start);
+        }
+        self.guards_applied(id, since, Span::empty(offset), ty)
+    }
+
+    /// `ty` without what the guards that hold from the start to the end of `code` rule out, of
+    /// those that take effect at `since` or later.
+    fn guards_applied(&self, id: LocalId, since: Option<u32>, code: Span, ty: Type) -> Type {
+        let ty = match since {
+            Some(_) => ty,
+            None => self.linked_type(id, code).unwrap_or(ty),
+        };
+        let mut facts = self.ctx.guards().since(id, since, code).peekable();
         if facts.peek().is_none() {
             return ty;
         }
@@ -621,23 +653,50 @@ impl<'a> Infer<'a> {
         }
     }
 
-    /// `ty` with the aliases it names, also in a union, replaced by what they stand for.
-    fn expand_aliases(&self, ty: &Type, depth: u32) -> Type {
-        match self.resolve_alias(ty) {
-            Type::Union(parts) if depth < 8 => {
-                Type::union(parts.iter().map(|part| self.expand_aliases(part, depth + 1)))
+    /// `ty` as one entry of a `---@cast` line changes it.
+    fn cast(&self, ty: Type, entry: &CastEntry) -> Type {
+        match entry {
+            CastEntry::Replace(cast) => cast.clone(),
+            // Adding to a type nothing tells leaves a value that may still be anything else, as
+            // lua-language-server shows `string|unknown`.
+            CastEntry::Add(added) if ty.is_unknown() => added.clone().or_unknown(),
+            CastEntry::Add(added) => Type::union([ty, added.clone()]),
+            CastEntry::Remove(removed) => {
+                let removed = self.expand_aliases(removed, 0);
+                let removes = |part: &Type| match &removed {
+                    Type::Union(parts) => parts.iter().any(|removed| covers(removed, part)),
+                    removed => covers(removed, part),
+                };
+                match self.expand_aliases(&ty, 0) {
+                    Type::Union(parts) if parts.iter().any(removes) => {
+                        Type::union(parts.into_iter().filter(|part| !removes(part)))
+                    }
+                    Type::Union(_) => ty,
+                    one if removes(&one) => Type::Unknown,
+                    _ => ty,
+                }
             }
-            other => other,
         }
     }
 
-    /// The type at `offset` of a local declared with others by one call, as `err` in
-    /// `local ok, err = f()`, when the guards on those locals rule out some of the sets of values
-    /// the call returns: what its position holds in the sets that are left.
-    fn linked_type(&self, id: LocalId, offset: u32) -> Option<Type> {
+    /// `ty` with the aliases it names, also in a union, replaced by what they stand for.
+    fn expand_aliases(&self, ty: &Type, depth: u32) -> Type {
+        let resolved = self.resolve_alias(ty);
+        match &resolved {
+            Type::Union(parts) if depth < 8 => {
+                resolved.rebuilt(parts.iter().map(|part| self.expand_aliases(part, depth + 1)))
+            }
+            _ => resolved,
+        }
+    }
+
+    /// The type in `code` of a local declared with others by one call, as `err` in
+    /// `local ok, err = f()`, when the guards on those locals that hold there rule out some of the
+    /// sets of values the call returns: what its position holds in the sets that are left.
+    fn linked_type(&self, id: LocalId, code: Span) -> Option<Type> {
         let guards = self.ctx.guards();
         let members = guards.linked(id)?;
-        if !members.iter().any(|(member, _)| guards.at(*member, offset).next().is_some()) {
+        if !members.iter().any(|(member, _)| guards.since(*member, None, code).next().is_some()) {
             return None;
         }
         let Some(Decl::Local { stmt, .. }) = self.ctx.decl(self.ctx.resolution.local(id).decl.start) else {
@@ -656,7 +715,7 @@ impl<'a> Infer<'a> {
         let is_possible = |set: &&Vec<Type>| {
             members.iter().all(|(member, position)| {
                 let value = value(set, *position);
-                guards.at(*member, offset).all(|fact| fact.apply(&value).is_some())
+                guards.since(*member, None, code).all(|fact| fact.apply(&value).is_some())
             })
         };
         let possible: Vec<&Vec<Type>> = sets.iter().filter(is_possible).collect();
@@ -2267,7 +2326,7 @@ fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
             if parts.iter().filter(|t| !matches!(t, Type::Nil)).all(Type::is_unknown) {
                 Type::Unknown
             } else {
-                Type::union(parts)
+                ty.rebuilt(parts)
             }
         }
         Type::Map(k, v) => Type::Map(Box::new(substitute(k, generics)), Box::new(substitute(v, generics))),
@@ -2352,6 +2411,14 @@ fn may_be_literal_key(key: &Type, literal: &Type) -> bool {
         key if key.is_literal() => key == literal,
         key => *key == literal.widen(),
     }
+}
+
+/// Whether the `-T` entry of a `---@cast` line for `removed` takes `part` out of a union: the same
+/// type, or a literal or integer of the kind `removed` names.
+fn covers(removed: &Type, part: &Type) -> bool {
+    removed == part
+        || (!removed.is_literal() && part.widen() == *removed)
+        || (*removed == Type::Number && matches!(part, Type::Integer | Type::IntLit(_) | Type::Handle(_)))
 }
 
 /// What one position holds across several lists of returned values.

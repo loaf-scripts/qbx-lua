@@ -18,6 +18,7 @@ use qbx_lua_syntax::Span;
 use super::class_tables::{Classes, Key};
 use super::unknown_types::has_param_line;
 use crate::infer::{Decl, Infer};
+use crate::luacats::CastEntry;
 use crate::types::Type;
 
 const MAX_DEPTH: u32 = 16;
@@ -104,23 +105,32 @@ impl<'a, 'b> Declared<'a, 'b> {
     }
 
     /// The type of a local where it is read at `offset`. One that is assigned again after its
-    /// declaration is `unknown`, since its declared type may not be what it holds.
+    /// declaration is `unknown`, since its declared type may not be what it holds, unless a
+    /// `---@cast` line types it. A `+T` entry adds to a type, so one that is not known stays so.
     fn local(&self, id: LocalId, offset: u32, depth: u32) -> Type {
+        let ty = self.local_declaration(id, depth);
+        let typed = || {
+            let mut casts = self.infer.ctx.casts().at(id, offset);
+            casts.any(|cast| cast.entries.iter().any(|(entry, _)| matches!(entry, CastEntry::Replace(_))))
+        };
+        if ty.is_unknown() && !typed() {
+            return ty;
+        }
+        self.infer.narrowed(id, offset, ty)
+    }
+
+    fn local_declaration(&self, id: LocalId, depth: u32) -> Type {
         let local = self.infer.ctx.resolution.local(id);
         if local.refs.iter().any(|r| r.write) && !(self.keeps_annotations && self.is_annotated(local)) {
             return Type::Unknown;
         }
-        let ty = match self.infer.ctx.decl(local.decl.start) {
+        match self.infer.ctx.decl(local.decl.start) {
             Some(Decl::Local { stmt, index }) => self.local_value(id, stmt, *index, depth),
             Some(Decl::Param { .. }) if has_param_line(self.infer, local) => self.infer.local_type(id),
             Some(Decl::LocalFunction { .. } | Decl::SelfParam { .. }) => self.infer.local_type(id),
             Some(Decl::NumericFor) => Type::Number,
             _ => Type::Unknown,
-        };
-        if ty.is_unknown() {
-            return ty;
         }
-        self.infer.narrowed(id, offset, ty)
     }
 
     /// Whether a `---@type` above its declaration or a `@param` line types the local.

@@ -1,14 +1,16 @@
 //! Type guards: what a condition tells about the locals it tests, in the code that only runs when
 //! it held or failed. `if not name then return end` leaves `name` holding a value for the rest of
-//! its block, and `if name then ... end` for the branch.
+//! its block, and `if name then ... end` for the branch. `---@cast` lines change the type of a local
+//! from their line on.
 
 use qbx_lua_analysis::scope::{LocalId, Resolution, Resolved};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
-use qbx_lua_syntax::{NumberValue, Span};
-use rustc_hash::FxHashMap;
+use qbx_lua_syntax::{CommentKind, NumberValue, Span, Token, TokenKind};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::infer::always_exits;
+use crate::luacats::{parse_cast, CastEntry};
 use crate::types::Type;
 
 /// The names `type` gives: those of Lua, and those of the vectors, quaternions and matrices CfxLua
@@ -47,7 +49,10 @@ impl Fact {
         match ty {
             Type::Union(parts) => {
                 let kept: Vec<Type> = parts.iter().filter_map(|part| self.apply(part)).collect();
-                (!kept.is_empty()).then(|| Type::union(kept))
+                // The `unknown` of `string|unknown` may be any value the fact holds for.
+                let keeps_unknown = kept.contains(&Type::Unknown);
+                let ty = (!kept.is_empty()).then(|| Type::union(kept))?;
+                Some(if keeps_unknown { ty.or_unknown() } else { ty })
             }
             _ => self.apply_part(ty),
         }
@@ -166,6 +171,8 @@ type Facts = Vec<(LocalId, Fact)>;
 #[derive(Debug, Default)]
 pub struct Guards {
     facts: FxHashMap<LocalId, Vec<(Span, Fact)>>,
+    /// The locals with guards that are assigned again after their declaration.
+    reassigned: FxHashSet<LocalId>,
     /// The locals that one call declares together, as in `local ok, err = f()`, each with the
     /// position of its value among those the call returns.
     links: Vec<Vec<(LocalId, usize)>>,
@@ -181,13 +188,30 @@ impl Guards {
             type_functions: FxHashMap::default(),
         };
         finder.visit_block(&chunk.block);
-        finder.guards
+        let mut guards = finder.guards;
+        let reassigned = guards.facts.keys().filter(|local| resolution.local(**local).refs.iter().any(|r| r.write));
+        guards.reassigned = reassigned.copied().collect();
+        guards
     }
 
     /// What the guards around `offset` tell about `local`.
     pub fn at(&self, local: LocalId, offset: u32) -> impl Iterator<Item = &Fact> {
-        let facts = self.facts.get(&local).map(Vec::as_slice).unwrap_or_default();
-        facts.iter().filter(move |(span, _)| span.start <= offset && offset < span.end).map(|(_, fact)| fact)
+        self.since(local, None, Span::empty(offset))
+    }
+
+    /// What the guards that hold from the start to the end of `code` tell about `local`, with the
+    /// start of a `cast` that holds there only those that take effect at its start or later. A
+    /// guard on a local that is assigned again only tells about the type a cast gives it: the value
+    /// it tested may have been replaced since, unless a cast that holds until the local is next
+    /// assigned started before the guard.
+    pub fn since(&self, local: LocalId, cast: Option<u32>, code: Span) -> impl Iterator<Item = &Fact> {
+        let facts = match cast {
+            None if self.reassigned.contains(&local) => &[],
+            _ => self.facts.get(&local).map(Vec::as_slice).unwrap_or_default(),
+        };
+        let start = cast.unwrap_or(0);
+        let holds = move |span: &Span| start <= span.start && span.contains(code.start) && span.contains(code.end);
+        facts.iter().filter(move |(span, _)| holds(span)).map(|(_, fact)| fact)
     }
 
     /// The locals declared by the same call as `local`, itself included, each with the position of
@@ -209,12 +233,16 @@ struct Finder<'r> {
 }
 
 impl Finder<'_> {
-    /// The local `expr` names, unless something assigns to it after its declaration: a guard says
-    /// nothing about a value that may have been replaced since.
+    /// The local `expr` names. A guard on one that is assigned again after its declaration only
+    /// counts after a `---@cast`, see `Guards::since`.
     fn local(&self, expr: &Expr) -> Option<LocalId> {
         let ExprKind::Name(name) = &expr.unparen().kind else { return None };
         let Some(Resolved::Local(id)) = self.resolution.resolve_at(name.span.start) else { return None };
-        (!self.resolution.local(id).refs.iter().any(|r| r.write)).then_some(id)
+        Some(id)
+    }
+
+    fn is_reassigned(&self, local: LocalId) -> bool {
+        self.resolution.local(local).refs.iter().any(|r| r.write)
     }
 
     fn is_global(&self, name: &Name) -> bool {
@@ -422,10 +450,11 @@ impl<'ast> Visitor<'ast> for Finder<'_> {
                 self.link(names, exprs);
                 for (name, expr) in names.iter().zip(exprs) {
                     let Some(Resolved::Local(id)) = self.resolution.resolve_at(name.name.span.start) else { continue };
-                    if self.resolution.local(id).refs.iter().any(|r| r.write) {
+                    if self.is_reassigned(id) {
                         continue;
                     }
-                    if let Some(checked) = self.type_call(expr) {
+                    // `local kind = type(value)` tells nothing about what is assigned to `value` later.
+                    if let Some(checked) = self.type_call(expr).filter(|(checked, _)| !self.is_reassigned(*checked)) {
                         self.kinds.insert(id, checked);
                     } else if let Some(numbers) = self.type_function(expr) {
                         self.type_functions.insert(id, numbers);
@@ -478,5 +507,160 @@ fn leaves(block: &Block) -> bool {
             branches.iter().all(|branch| leaves(&branch.block)) && leaves(else_block)
         }
         _ => always_exits(block),
+    }
+}
+
+/// A `---@cast` line.
+#[derive(Debug)]
+pub struct Cast {
+    /// The local it names, when one by that name is in scope.
+    pub local: Option<LocalId>,
+    /// What each entry does, with where its type is written.
+    pub entries: Vec<(CastEntry, Span)>,
+    /// The code it holds in: from its line to the end of the block the statement after it is in,
+    /// or to the end of the statement that next assigns the local. One on the last line of an `if`
+    /// branch holds from the end of the `if`, and one on the last line of another block nowhere.
+    pub span: Span,
+}
+
+/// The `---@cast` lines of a file.
+#[derive(Debug, Default)]
+pub struct Casts {
+    casts: Vec<Cast>,
+}
+
+impl Casts {
+    pub fn of(source: &str, chunk: &Chunk, resolution: &Resolution) -> Self {
+        let mut casts = Vec::new();
+        for comment in chunk.comments.iter().filter(|comment| comment.kind == CommentKind::Line) {
+            let text = comment.content.text(source);
+            let Some(line) = text.strip_prefix('-').map(str::trim_start) else { continue };
+            let Some(cast) = parse_cast(line) else { continue };
+            // A line without a type, as while one is being typed, changes nothing.
+            if cast.entries.is_empty() {
+                continue;
+            }
+            let base = comment.content.end - line.len() as u32;
+            let entries = cast.entries.into_iter();
+            casts.push(Cast {
+                local: resolution.lookup_local_at(cast.name, comment.span.start),
+                entries: entries
+                    .map(|(entry, at)| (entry, Span::new(base + at.start as u32, base + at.end as u32)))
+                    .collect(),
+                span: Span::empty(comment.span.end),
+            });
+        }
+        if casts.is_empty() {
+            return Self::default();
+        }
+        let mut locals: Vec<LocalId> = casts.iter().filter_map(|cast| cast.local).collect();
+        locals.sort_unstable();
+        locals.dedup();
+        let writes = |local: LocalId| resolution.local(local).refs.iter().filter(|r| r.write).map(|r| r.span.start);
+        let mut reach = Reach {
+            tokens: &chunk.tokens,
+            statements: Vec::new(),
+            branch_ends: FxHashMap::default(),
+            writes: locals.iter().flat_map(|local| writes(*local)).map(|at| (at, u32::MAX)).collect(),
+        };
+        reach.writes.sort_unstable();
+        reach.visit_block(&chunk.block);
+        reach.statements.sort_unstable();
+        // For each local, where each write to it starts, with the earliest end of a statement that
+        // assigns it from that write on.
+        let mut assigned = FxHashMap::default();
+        for local in locals {
+            let mut ends: Vec<(u32, u32)> = writes(local).map(|at| (at, reach.end_of_write(at))).collect();
+            ends.sort_unstable();
+            let mut earliest = u32::MAX;
+            for (_, end) in ends.iter_mut().rev() {
+                earliest = earliest.min(*end);
+                *end = earliest;
+            }
+            assigned.insert(local, ends);
+        }
+        for cast in &mut casts {
+            let line_end = cast.span.start;
+            let Some((start, end)) = reach.from(line_end) else { continue };
+            let reassigned = cast.local.and_then(|local| {
+                let ends: &Vec<(u32, u32)> = &assigned[&local];
+                ends.get(ends.partition_point(|(at, _)| *at <= line_end)).map(|(_, end)| *end)
+            });
+            cast.span = Span::new(start, end.min(reassigned.unwrap_or(u32::MAX)).max(start));
+        }
+        Self { casts }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Cast> {
+        self.casts.iter()
+    }
+
+    /// The casts of `local` that hold at `offset`, in the order of their lines.
+    pub fn at(&self, local: LocalId, offset: u32) -> impl Iterator<Item = &Cast> {
+        self.casts.iter().filter(move |cast| cast.local == Some(local) && cast.span.contains(offset))
+    }
+}
+
+/// Finds where the casts of a file stop holding.
+struct Reach<'a> {
+    tokens: &'a [Token],
+    /// Where each statement starts, with the end of the block it is in.
+    statements: Vec<(u32, u32)>,
+    /// Where each `elseif`, `else` and `end` of an `if` starts, with the end of that `if`.
+    branch_ends: FxHashMap<u32, u32>,
+    /// Where each write to the local of a cast starts, in order, with the end of the innermost
+    /// statement it is in.
+    writes: Vec<(u32, u32)>,
+}
+
+impl Reach<'_> {
+    /// Where a cast whose line ends at `at` starts holding, and the end of the block it holds to:
+    /// that of the statement after it. After the last statement of an `if` branch, a cast holds
+    /// from the end of the `if`, as code types what the branch leaves that way, and after that of
+    /// another block, such as a function or loop body, nowhere.
+    fn from(&self, at: u32) -> Option<(u32, u32)> {
+        let next = self.tokens.get(self.tokens.partition_point(|token| token.span.start < at))?;
+        if let Some(end) = self.branch_ends.get(&next.span.start) {
+            return self.from(*end);
+        }
+        if matches!(next.kind, TokenKind::End | TokenKind::Until | TokenKind::Eof) {
+            return None;
+        }
+        let next = self.statements.partition_point(|(start, _)| *start < at);
+        self.statements.get(next).map(|(_, end)| (at, *end))
+    }
+
+    /// The end of the innermost statement that the write starting at `at` is in.
+    fn end_of_write(&self, at: u32) -> u32 {
+        let index = self.writes.partition_point(|(start, _)| *start < at);
+        self.writes.get(index).map_or(u32::MAX, |(_, end)| *end)
+    }
+}
+
+impl<'ast> Visitor<'ast> for Reach<'_> {
+    fn visit_block(&mut self, block: &'ast Block) {
+        self.statements.extend(block.stmts.iter().map(|stmt| (stmt.span.start, block.span.end)));
+        visit::walk_block(self, block);
+    }
+
+    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        // Statements are visited before those inside them, so the innermost one is seen last.
+        let first = self.writes.partition_point(|(at, _)| *at < stmt.span.start);
+        let after = self.writes.partition_point(|(at, _)| *at < stmt.span.end);
+        for (_, end) in &mut self.writes[first..after] {
+            *end = stmt.span.end;
+        }
+        if let StmtKind::If { branches, else_block } = &stmt.kind {
+            let tokens = self.tokens;
+            let before = |offset: u32| tokens[..tokens.partition_point(|token| token.span.start < offset)].last();
+            let elseifs = branches.iter().skip(1).map(|branch| branch.keyword_span.start);
+            let keyword = else_block.as_ref().and_then(|block| before(block.span.start));
+            let keyword = keyword.filter(|token| token.kind == TokenKind::Else).map(|token| token.span.start);
+            let end = before(stmt.span.end).filter(|token| token.kind == TokenKind::End);
+            for start in elseifs.chain(keyword).chain(end.map(|token| token.span.start)) {
+                self.branch_ends.insert(start, stmt.span.end);
+            }
+        }
+        visit::walk_stmt(self, stmt);
     }
 }

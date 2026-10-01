@@ -179,11 +179,20 @@ impl Type {
         matches!(self, Type::StringLit(_) | Type::IntLit(_) | Type::BooleanLit(_))
     }
 
+    /// The union of `types`. A value of unknown type adds nothing to the others, as when one branch
+    /// of `a or b` cannot be inferred, except for the `unknown` that a union among `types` holds:
+    /// such a union says the value may be anything else, as a written `string|unknown` or a
+    /// `---@cast name +string` on a local of unknown type does. It goes last, as lua-language-server
+    /// shows it.
     pub fn union(types: impl IntoIterator<Item = Type>) -> Type {
         let mut flat: Vec<Type> = Vec::new();
+        let mut keeps_unknown = false;
         for ty in types {
             match ty {
-                Type::Union(inner) => inner.into_iter().for_each(|t| push_unique(&mut flat, t)),
+                Type::Union(inner) => {
+                    keeps_unknown |= inner.contains(&Type::Unknown);
+                    inner.into_iter().for_each(|t| push_unique(&mut flat, t));
+                }
                 other => push_unique(&mut flat, other),
             }
         }
@@ -192,11 +201,29 @@ impl Type {
         }
         if flat.len() > 1 {
             flat.retain(|t| !t.is_unknown());
+            if keeps_unknown {
+                flat.push(Type::Unknown);
+            }
         }
         match flat.len() {
             0 => Type::Unknown,
             1 => flat.pop().unwrap_or_default(),
             _ => Type::Union(flat),
+        }
+    }
+
+    /// `self`, or a value that may be anything else: `string|unknown` for a `string`.
+    pub fn or_unknown(self) -> Type {
+        Type::union([self, Type::Union(vec![Type::Unknown])])
+    }
+
+    /// The union of `parts`, which are what became of the parts of the union `self`: it keeps the
+    /// `unknown` that `self` holds.
+    pub fn rebuilt(&self, parts: impl IntoIterator<Item = Type>) -> Type {
+        let ty = Type::union(parts);
+        match self {
+            Type::Union(types) if types.contains(&Type::Unknown) => ty.or_unknown(),
+            _ => ty,
         }
     }
 
@@ -206,7 +233,7 @@ impl Type {
 
     pub fn without_nil(&self) -> Type {
         match self {
-            Type::Union(types) => Type::union(types.iter().filter(|t| !matches!(t, Type::Nil)).cloned()),
+            Type::Union(types) => self.rebuilt(types.iter().filter(|t| !matches!(t, Type::Nil)).cloned()),
             other => other.clone(),
         }
     }
@@ -217,7 +244,7 @@ impl Type {
             Type::BooleanLit(_) => Type::Boolean,
             Type::StringLit(_) => Type::String,
             Type::IntLit(_) => Type::Integer,
-            Type::Union(types) => Type::union(types.iter().map(Type::widen)),
+            Type::Union(types) => self.rebuilt(types.iter().map(Type::widen)),
             other => other.clone(),
         }
     }
@@ -232,7 +259,7 @@ impl Type {
         if !mixed || types.contains(&Type::Boolean) || (has(true) && has(false)) {
             return self.widen();
         }
-        Type::union(types.iter().map(|t| if matches!(t, Type::BooleanLit(_)) { t.clone() } else { t.widen() }))
+        self.rebuilt(types.iter().map(|t| if matches!(t, Type::BooleanLit(_)) { t.clone() } else { t.widen() }))
     }
 
     pub fn as_fun(&self) -> Option<&Arc<FunType>> {
@@ -280,7 +307,7 @@ impl Type {
                 if parts.iter().filter(|t| !matches!(t, Type::Nil)).all(Type::is_unknown) {
                     Type::Unknown
                 } else {
-                    Type::union(parts)
+                    self.rebuilt(parts)
                 }
             }
             Type::Fun(fun) => Type::Fun(Arc::new(fun.with_self(owner))),
@@ -894,6 +921,19 @@ mod tests {
         ] {
             let _ = parse_type(text);
         }
+    }
+
+    #[test]
+    fn unions_keep_the_unknown_they_hold() {
+        let loose = Type::union([Type::String, Type::Unknown]);
+        assert_eq!(loose.to_string(), "string", "an unknown value adds nothing");
+        let held = Type::StringLit("a".into()).or_unknown();
+        assert_eq!(held.to_string(), "\"a\"|unknown");
+        assert_eq!(Type::union([held.clone(), Type::Integer]).to_string(), "\"a\"|integer|unknown");
+        assert_eq!(held.widen().to_string(), "string|unknown");
+        assert_eq!(held.clone().optional().without_nil().to_string(), "\"a\"|unknown");
+        assert_eq!(Type::Unknown.or_unknown(), Type::Unknown);
+        assert_eq!(Type::Any.or_unknown(), Type::Any);
     }
 
     #[test]
