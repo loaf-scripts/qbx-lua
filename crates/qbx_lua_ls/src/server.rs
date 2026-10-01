@@ -23,6 +23,9 @@ pub type Documents = FxHashMap<Url, Document>;
 
 /// Opening the file shows everything; the workspace overview only needs to say "look here".
 const MAX_PROBLEMS_PER_CLOSED_FILE: usize = 100;
+/// How often a flush may index the same open document, so that globals typed from each other
+/// cannot keep it going.
+const MAX_INDEX_PASSES: usize = 4;
 
 type AnyResult<T> = Result<T, Box<dyn Error + Sync + Send>>;
 
@@ -332,9 +335,13 @@ impl Server {
     fn flush_index(&mut self) {
         self.diagnostics_pending |= !self.dirty.is_empty();
         let mut relink = false;
-        // Calls to a `---@callback` wrapper are only recognized once the wrapper is indexed.
+        // The same order whatever the paths hash to. Calls to a `---@callback` wrapper are only
+        // recognized once the wrapper is indexed.
         let mut dirty: Vec<Url> = std::mem::take(&mut self.dirty).into_iter().collect();
+        dirty.sort();
         dirty.sort_by_key(|uri| !self.docs.get(uri).is_some_and(|doc| doc.text.contains("@callback")));
+        // The documents in the order they were indexed, with whether that changed their globals.
+        let mut indexed = Vec::new();
         for uri in dirty {
             if let Some(doc) = self.docs.get_mut(&uri) {
                 // A full scan reallocates file IDs, including the reserved slots for manifests.
@@ -342,13 +349,39 @@ impl Server {
                 let is_source = !qbx_lua_analysis::project::is_not_source(doc.text.as_bytes());
                 if !doc.is_manifest() && is_source && !self.ws.lint_config.is_excluded(&doc.path) {
                     relink |= self.ws.index.file(doc.file).is_none();
-                    doc.file = self.ws.index_document(&doc.path, &doc.text, &doc.chunk, &doc.resolution);
+                    let changed = self.index_document(&uri);
+                    indexed.push((uri, changed));
                 }
             }
         }
         if relink {
             self.ws.link_imports();
         }
+        // Each document was indexed against the others as the index held them, so those before the
+        // last one whose globals changed may have missed a global it declares, like the `Players`
+        // that types `self` in `function Players:rename()`. Indexed again, they move to the end, and
+        // the globals they change in turn may be what the others missed.
+        for _ in 1..MAX_INDEX_PASSES {
+            let stale = indexed.iter().rposition(|(_, changed)| *changed).unwrap_or(0);
+            if stale == 0 {
+                break;
+            }
+            indexed.rotate_left(stale);
+            let count = indexed.len();
+            for (uri, changed) in &mut indexed[count - stale..] {
+                *changed = self.index_document(uri);
+            }
+        }
+    }
+
+    /// Indexes an open document, telling whether that changed the globals it declares.
+    fn index_document(&mut self, uri: &Url) -> bool {
+        let Some(doc) = self.docs.get_mut(uri) else { return false };
+        let before = self.ws.index.file(doc.file).map(|file| file.index.globals.clone()).unwrap_or_default();
+        doc.file = self.ws.index_document(&doc.path, &doc.text, &doc.chunk, &doc.resolution);
+        let after = self.ws.index.file(doc.file).map_or(&[][..], |file| &file.index.globals[..]);
+        before.len() != after.len()
+            || before.iter().zip(after).any(|(old, new)| old.name != new.name || old.ty != new.ty)
     }
 
     fn publish_dirty(&mut self) {

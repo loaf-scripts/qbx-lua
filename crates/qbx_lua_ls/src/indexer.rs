@@ -274,6 +274,47 @@ impl<'a> Indexer<'a> {
         own.map_or_else(|| self.infer.is_class_table(name), Symbol::is_class_table)
     }
 
+    /// The type of `self` in `function Players:rename()` or `function Players.admin:promote()` when
+    /// this file declares `Players`, which `Infer` only reads from the index and so misses until the
+    /// file is part of it.
+    fn own_self_type(&self, expr: &Expr) -> Option<Type> {
+        let ExprKind::Name(name) = &expr.kind else { return None };
+        let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(name.span.start) else { return None };
+        let Some(crate::infer::Decl::SelfParam { name: method }) =
+            self.ctx.decl(self.ctx.resolution.local(id).decl.start)
+        else {
+            return None;
+        };
+        if !self.is_global(&method.base) {
+            return None;
+        }
+        let global = self.out.globals.iter().rev().find(|s| s.name == method.base.text)?;
+        Some(method.path.iter().fold(global.ty.clone(), |ty, segment| self.own_member_type(&ty, &segment.text)))
+    }
+
+    /// The type of the field `name` of `ty`, preferring what this file sets. A plain table whose
+    /// fields this file sets stands for them, as `Infer` reads it once the file is indexed.
+    fn own_member_type(&self, ty: &Type, name: &str) -> Type {
+        let owner = self.owner_of(ty);
+        let own = owner.as_ref().and_then(|owner| {
+            self.out.members.iter().rev().find(|member| member.owner == *owner && member.symbol.name == name)
+        });
+        let member = match own {
+            Some(member) => member.symbol.ty.clone(),
+            None => self.infer.member(ty, name).map(|member| member.ty).unwrap_or_default(),
+        };
+        let nested = owner.map(|owner| SmolStr::new(format!("{owner}.{name}")));
+        match nested {
+            Some(nested)
+                if matches!(member, Type::Table | Type::Unknown)
+                    && self.out.members.iter().any(|member| member.owner == nested) =>
+            {
+                Type::GlobalTable(nested)
+            }
+            _ => member,
+        }
+    }
+
     /// Records a member set by the statement or table field whose doc comment starts at `doc_anchor`,
     /// which may declare it `---@private`.
     fn push_member(&mut self, owner: SmolStr, symbol: Symbol, injected: bool, doc_anchor: Option<u32>) {
@@ -682,7 +723,7 @@ impl<'a> Indexer<'a> {
                 }
             }
             _ => {
-                let ty = self.infer.expr(base);
+                let ty = self.own_self_type(base).unwrap_or_else(|| self.infer.expr(base));
                 match self.owner_of(&ty) {
                     Some(owner) => (owner, matches!(ty.without_nil(), Type::Named(..))),
                     None => return,

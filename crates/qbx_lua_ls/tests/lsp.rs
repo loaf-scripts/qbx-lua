@@ -7157,6 +7157,39 @@ print(either, list, map, mode, color, box, count, vehicle, config, player.job, G
 }
 
 #[test]
+fn members_set_through_self_belong_to_the_class_of_a_global_from_the_same_file() {
+    let mut client = Client::start(fixture_root());
+    // A new file, so the index knows nothing of `Players` when the file is first indexed.
+    const PLAYERS: &str = "myresource/shared/players.lua";
+    let text = "\
+---@class Test.Player
+Players = {}
+Players.admin = {}
+
+---@param name string
+function Players:rename(name)
+    self.nickname = name
+end
+
+function Players.admin:promote()
+    self.level = 1
+end
+
+function Players.guest:greet()
+    self.greeted = true
+end
+
+print(Players.nickname, Players.admin.level, Players.guest.greeted)
+";
+    client.open_with(PLAYERS, text);
+    for (needle, line) in [("nickname,", 6), ("level,", 10), ("greeted)", 14)] {
+        let (l, c) = pos(text, needle, 0);
+        let result = client.request("textDocument/definition", client.position_params(PLAYERS, l, c));
+        assert_eq!(result[0]["range"]["start"]["line"], line, "{needle}: {result}");
+    }
+}
+
+#[test]
 fn implementations_leave_out_the_annotations_that_declare_a_member() {
     let mut client = Client::start(fixture_root());
     const TYPES: &str = "myresource/shared/config.lua";
@@ -7169,8 +7202,6 @@ Players = {}
 function Players:greet() return 'hi' end
 ";
     client.open_with(TYPES, types);
-    // The other file reads `Players` from this one to know what `self` is.
-    client.diagnostics_for(TYPES);
     let text = "\
 ---@type Test.Player
 local player = Players
@@ -7220,6 +7251,63 @@ fn implementations_of_members_no_code_sets_are_their_definition() {
     assert!(definition.as_array().is_some_and(|locations| !locations.is_empty()), "{definition}");
     let implementation = client.request("textDocument/implementation", client.position_params(SERVER, line, column));
     assert_eq!(implementation, definition, "an export the resource registers");
+}
+
+#[test]
+fn members_set_through_self_belong_to_the_class_of_a_global_from_a_document_that_changed_with_them() {
+    let mut client = Client::start(fixture_root());
+    // Each file declares the global whose method the other one writes through `self`, so the file
+    // indexed first cannot type `self` from the index in either order.
+    const ALPHA: &str = "myresource/shared/alpha.lua";
+    const BETA: &str = "myresource/shared/beta.lua";
+    let alpha = "\
+---@class Test.Alpha
+Alphas = {}
+
+function Betas:touch()
+    self.fromAlpha = true
+end
+";
+    let beta = "\
+---@class Test.Beta
+Betas = {}
+
+function Alphas:touch()
+    self.fromBeta = true
+end
+";
+    client.open_with(ALPHA, alpha);
+    client.open_with(BETA, beta);
+    let text = "print(Alphas.fromBeta, Betas.fromAlpha)\n";
+    client.open_with(CLIENT, text);
+    for (needle, file) in [("fromBeta", BETA), ("fromAlpha", ALPHA)] {
+        let (l, c) = pos(text, needle, 0);
+        let result = client.request("textDocument/definition", client.position_params(CLIENT, l, c));
+        assert_eq!(result[0]["uri"], client.uri(file).as_str(), "{needle}: {result}");
+        assert_eq!(result[0]["range"]["start"]["line"], 4, "{needle}: {result}");
+    }
+}
+
+#[test]
+fn members_set_through_self_belong_to_the_class_of_a_global_typed_from_another_document() {
+    let mut client = Client::start(fixture_root());
+    // Documents are indexed in the order of their paths: `Mid` before the `Base` it is typed from,
+    // and the method on `Mid` before `Mid` is indexed again, so it takes a third pass.
+    let files = [
+        ("myresource/shared/chain_a.lua", "Mid = Base\n"),
+        ("myresource/shared/chain_b.lua", "---@class Test.Base\nBase = {}\n"),
+        (
+            "myresource/shared/chain_c.lua",
+            "function Mid:touch()\n    self.touched = true\nend\n\nprint(Base.touched)\n",
+        ),
+    ];
+    for (file, text) in files {
+        client.open_with(file, text);
+    }
+    let (file, text) = files[2];
+    let (l, c) = pos(text, "touched)", 0);
+    let result = client.request("textDocument/definition", client.position_params(file, l, c));
+    assert_eq!(result[0]["range"]["start"]["line"], 1, "{result}");
 }
 
 #[test]
