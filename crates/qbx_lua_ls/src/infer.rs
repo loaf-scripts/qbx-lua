@@ -1225,7 +1225,7 @@ impl<'a> Infer<'a> {
             return declared == key;
         }
         let any = FunType::default();
-        match (self.value_kinds(&any, &declared, 0), self.value_kinds(&any, &key, 0)) {
+        match (self.value_kinds(&any, &declared, false, 0), self.value_kinds(&any, &key, false, 0)) {
             (Some(taken), Some(given)) => taken & given != 0,
             _ => true,
         }
@@ -1483,11 +1483,14 @@ impl<'a> Infer<'a> {
             .collect();
         let is_callback = |i: &usize| matches!(args.exprs[*i].unparen().kind, ExprKind::Function(_));
         for (param, i) in bindable.iter().filter(|(_, i)| !is_callback(i)) {
-            self.unify(fun, &param.ty, &args.ty(self, *i).widen(), &mut bound, 0);
+            match self.named_elements(&param.ty, &args.exprs[*i]) {
+                Some(names) => self.unify(fun, &param.ty, &names, false, &mut bound, 0),
+                None => self.unify(fun, &param.ty, args.ty(self, *i), false, &mut bound, 0),
+            }
         }
         if with_callbacks {
             for (param, i) in bindable.iter().filter(|(_, i)| is_callback(i)) {
-                self.unify(fun, &param.ty, args.ty(self, *i), &mut bound, 0);
+                self.unify(fun, &param.ty, args.ty(self, *i), false, &mut bound, 0);
             }
         }
         // A declared generic that no argument decides is unknown, not a type named `RV`.
@@ -1499,32 +1502,60 @@ impl<'a> Infer<'a> {
         bound
     }
 
-    /// Matches a parameter type against the type of its argument, binding the generics in it.
-    fn unify(&self, fun: &FunType, param: &Type, arg: &Type, bound: &mut Vec<(SmolStr, Type)>, depth: u32) {
+    /// Matches a parameter type against the type of its argument, binding the generics in it. A
+    /// generic takes the argument widened, as a variable initialised with it would be, unless it is
+    /// `returned` by a function passed for a `fun(...)` parameter. `` `T` `` takes the class or
+    /// alias that a string literal names.
+    fn unify(
+        &self,
+        fun: &FunType,
+        param: &Type,
+        arg: &Type,
+        returned: bool,
+        bound: &mut Vec<(SmolStr, Type)>,
+        depth: u32,
+    ) {
         if depth > 8 || arg.is_unknown() {
             return;
         }
+        let mut bind = |name: &SmolStr, ty: Type| {
+            if !bound.iter().any(|(n, _)| n == name) {
+                bound.push((name.clone(), ty));
+            }
+        };
         match param {
             Type::Named(name, args) if args.is_empty() && self.is_generic(fun, name) => {
-                if !bound.iter().any(|(n, _)| n == name) {
-                    bound.push((name.clone(), arg.clone()));
-                }
+                bind(name, if returned { arg.clone() } else { arg.widen() });
             }
-            Type::Array(inner) => self.unify(fun, inner, &self.key_value_types(arg, true).1, bound, depth + 1),
+            Type::NameOf(name) if self.is_generic(fun, name) => match arg {
+                Type::StringLit(named) => bind(name, Type::named(named)),
+                // `{ "Player", "Car" }` for `` `T`[] `` names either class.
+                Type::Union(parts) if parts.iter().all(|part| matches!(part, Type::StringLit(_))) => {
+                    let named = parts.iter().filter_map(|part| match part {
+                        Type::StringLit(named) => Some(Type::named(named)),
+                        _ => None,
+                    });
+                    bind(name, Type::union(named));
+                }
+                _ => {}
+            },
+            Type::Array(inner) => {
+                self.unify(fun, inner, &self.key_value_types(arg, true).1, returned, bound, depth + 1);
+            }
             Type::Map(key, value) => {
                 let (arg_key, arg_value) = self.key_value_types(arg, false);
-                self.unify(fun, key, &arg_key, bound, depth + 1);
-                self.unify(fun, value, &arg_value, bound, depth + 1);
+                self.unify(fun, key, &arg_key, returned, bound, depth + 1);
+                self.unify(fun, value, &arg_value, returned, bound, depth + 1);
             }
             Type::Union(types) => {
                 for part in types.iter().filter(|t| !matches!(t, Type::Nil)) {
-                    self.unify(fun, part, &arg.without_nil(), bound, depth + 1);
+                    self.unify(fun, part, &arg.without_nil(), returned, bound, depth + 1);
                 }
             }
             Type::Fun(expected) => {
                 if let Some(given) = arg.as_fun() {
                     for (want, got) in expected.returns.iter().zip(&given.returns) {
-                        self.unify(fun, want, got, bound, depth + 1);
+                        self.unify(fun, want, got, true, bound, depth + 1);
                     }
                 }
             }
@@ -1532,10 +1563,46 @@ impl<'a> Infer<'a> {
         }
     }
 
+    /// The type of a table constructor passed for `` `T`[] ``, whose strings name the classes `T`
+    /// stands for: an array of those strings as written, which a table built elsewhere widens to
+    /// `string`.
+    fn named_elements(&self, param: &Type, arg: &Expr) -> Option<Type> {
+        let Type::Array(inner) = param.without_nil() else { return None };
+        let fields = self.constructor_of(arg)?;
+        if !matches!(*inner, Type::NameOf(_)) || fields.is_empty() {
+            return None;
+        }
+        let elements = table_elements(fields);
+        Some(Type::Array(Box::new(Type::union(elements.array.iter().map(|value| self.expr(value))))))
+    }
+
+    /// The table constructor `expr` is, or that the local it names is declared with when it is
+    /// never assigned again, as `names` of `local names = { 'Player' }`.
+    fn constructor_of<'s>(&'s self, expr: &'s Expr) -> Option<&'s [TableField]> {
+        match &expr.unparen().kind {
+            ExprKind::Table(fields) => Some(fields),
+            ExprKind::Name(name) => {
+                let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(name.span.start) else { return None };
+                let local = self.ctx.resolution.local(id);
+                if local.refs.iter().any(|r| r.write) {
+                    return None;
+                }
+                let Some(Decl::Local { stmt, index }) = self.ctx.decl(local.decl.start) else { return None };
+                let StmtKind::Local { exprs, in_unpack: false, .. } = &stmt.kind else { return None };
+                match &exprs.get(*index)?.unparen().kind {
+                    ExprKind::Table(fields) => Some(fields),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Whether an argument passed for `param` can bind a generic of `fun`, as far as `unify` looks.
     fn can_bind(&self, fun: &FunType, param: &Type) -> bool {
         match param {
             Type::Named(name, args) => args.is_empty() && self.is_generic(fun, name),
+            Type::NameOf(name) => self.is_generic(fun, name),
             Type::Array(inner) => self.can_bind(fun, inner),
             Type::Map(key, value) => self.can_bind(fun, key) || self.can_bind(fun, value),
             Type::Union(types) => types.iter().any(|t| self.can_bind(fun, t)),
@@ -1705,7 +1772,7 @@ impl<'a> Infer<'a> {
                 ExprKind::Table(_) => (None, Some(kind::TABLE)),
                 _ => {
                     let given = call.ty(self, skip_args + i);
-                    (Some(given), self.value_kinds(fun, given, 0))
+                    (Some(given), self.value_kinds(fun, given, false, 0))
                 }
             };
             if let (Some(wanted), Some(given_kinds)) = (self.param_kinds(fun, param), given_kinds) {
@@ -1760,8 +1827,8 @@ impl<'a> Infer<'a> {
             }
             // The `nil` of `"all"|nil` takes a string no more than `"all"` does.
             _ => {
-                let wanted = self.value_kinds(fun, param, depth + 1)?;
-                let given = self.value_kinds(fun, arg, 0)?;
+                let wanted = self.value_kinds(fun, param, true, depth + 1)?;
+                let given = self.value_kinds(fun, arg, false, 0)?;
                 (wanted & given == 0).then_some(false)
             }
         }
@@ -1792,11 +1859,12 @@ impl<'a> Infer<'a> {
 
     /// The kinds of value a parameter takes: `id? integer` is stored as `integer`, and also takes `nil`.
     fn param_kinds(&self, fun: &FunType, param: &Param) -> Option<u8> {
-        self.value_kinds(fun, &param.ty, 0).map(|kinds| if param.optional { kinds | kind::NIL } else { kinds })
+        self.value_kinds(fun, &param.ty, true, 0).map(|kinds| if param.optional { kinds | kind::NIL } else { kinds })
     }
 
     /// The kinds of Lua value `ty` allows, as a set of `kind` bits, or `None` when it allows any.
-    fn value_kinds(&self, fun: &FunType, ty: &Type, depth: u32) -> Option<u8> {
+    /// `param` tells that `ty` is the type of a parameter.
+    fn value_kinds(&self, fun: &FunType, ty: &Type, param: bool, depth: u32) -> Option<u8> {
         if depth > 8 {
             return None;
         }
@@ -1806,6 +1874,10 @@ impl<'a> Infer<'a> {
             Type::Boolean | Type::BooleanLit(_) => kind::BOOLEAN,
             Type::Number | Type::Integer | Type::IntLit(_) | Type::Handle(_) => kind::NUMBER,
             Type::String | Type::StringLit(_) => kind::STRING,
+            // A parameter `` `T` `` takes the name of a class. Anywhere else it is that class,
+            // which may be anything.
+            Type::NameOf(_) if param => kind::STRING,
+            Type::NameOf(_) => return None,
             Type::Table
             | Type::Array(_)
             | Type::Map(..)
@@ -1816,7 +1888,7 @@ impl<'a> Infer<'a> {
             | Type::Require(_) => kind::TABLE,
             Type::Function | Type::Fun(_) => kind::FUNCTION,
             Type::Thread | Type::Userdata => kind::OTHER,
-            Type::Variadic(inner) => return self.value_kinds(fun, inner, depth + 1),
+            Type::Variadic(inner) => return self.value_kinds(fun, inner, param, depth + 1),
             Type::Named(name, _) if self.is_generic(fun, name) || NATIVE_HANDLE_TYPES.contains(&name.as_str()) => {
                 return None
             }
@@ -1824,12 +1896,12 @@ impl<'a> Infer<'a> {
             Type::Named(name, _) if self.index.class(name, self.side).is_some() => kind::TABLE | kind::OTHER,
             Type::Named(..) => match self.resolve_alias(ty) {
                 Type::Named(..) => return None,
-                resolved => return self.value_kinds(fun, &resolved, depth + 1),
+                resolved => return self.value_kinds(fun, &resolved, param, depth + 1),
             },
             Type::Union(types) => {
                 let mut kinds = 0;
                 for part in types {
-                    kinds |= self.value_kinds(fun, part, depth + 1)?;
+                    kinds |= self.value_kinds(fun, part, param, depth + 1)?;
                 }
                 kinds
             }
@@ -2165,10 +2237,13 @@ fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
     if generics.is_empty() {
         return ty.clone();
     }
+    let bound = |name: &SmolStr| {
+        generics.iter().find(|(n, _)| n == name).map_or_else(|| ty.clone(), |(_, bound)| bound.clone())
+    };
     match ty {
-        Type::Named(name, args) if args.is_empty() => {
-            generics.iter().find(|(n, _)| n == name).map_or_else(|| ty.clone(), |(_, bound)| bound.clone())
-        }
+        Type::Named(name, args) if args.is_empty() => bound(name),
+        // A returned `` `T` `` is the class that the string passed for it names.
+        Type::NameOf(name) => bound(name),
         Type::Named(name, args) => Type::Named(name.clone(), args.iter().map(|t| substitute(t, generics)).collect()),
         Type::Array(inner) => Type::Array(Box::new(substitute(inner, generics))),
         Type::Tuple(items) => Type::Tuple(items.iter().map(|t| substitute(t, generics)).collect()),

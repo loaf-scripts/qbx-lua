@@ -37,6 +37,9 @@ pub enum Type {
     Exports(Option<SmolStr>),
     /// The value returned by the module a `require` call names; resolved through the index on use.
     Require(SmolStr),
+    /// `` `T` ``: the generic `T`, bound to the class or alias that the string passed for it names,
+    /// as `new("Player")` binds `Player`.
+    NameOf(SmolStr),
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -461,6 +464,7 @@ impl fmt::Display for Type {
             Type::Exports(None) => f.write_str("exports"),
             Type::Exports(Some(resource)) => write!(f, "exports.{resource}"),
             Type::Require(path) => write!(f, "module \"{path}\""),
+            Type::NameOf(name) => write!(f, "`{name}`"),
         }
     }
 }
@@ -661,7 +665,7 @@ impl<'a> TypeParser<'a> {
                 self.pos += 1;
                 let name = self.ident().unwrap_or("T");
                 self.eat(b'`');
-                Type::Named(SmolStr::new(name), Vec::new())
+                Type::NameOf(SmolStr::new(name))
             }
             b'-' | b'0'..=b'9' => {
                 let start = self.pos;
@@ -859,7 +863,7 @@ mod tests {
         );
         assert_eq!(roundtrip("'left'|'right'"), "\"left\"|\"right\"");
         assert_eq!(roundtrip("[number, number]"), "[number, number]");
-        assert_eq!(roundtrip("`T`"), "T");
+        assert_eq!(roundtrip("`T`"), "`T`");
         assert_eq!(roundtrip("vector3|vector4"), "vector3|vector4");
         assert_eq!(roundtrip("OxPlayer?"), "OxPlayer?");
         assert_eq!(roundtrip("1|2|3"), "1|2|3");

@@ -86,7 +86,7 @@ pub fn missing_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
             }
         }
         if required > 0 && !always_exits(&func.body) {
-            let types: Vec<String> = returns[..required].iter().map(|ty| format!("`{ty}`")).collect();
+            let types: Vec<String> = returns[..required].iter().map(code).collect();
             let message = format!(
                 "The function can reach its end without returning, but `@return` requires {}",
                 types.join(", ")
@@ -95,6 +95,14 @@ pub fn missing_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
         }
     }
     out
+}
+
+/// `ty` written as code: in backticks, unless it is already written in them, as `` `T` `` is.
+fn code(ty: &Type) -> String {
+    match ty {
+        Type::NameOf(_) => ty.to_string(),
+        _ => format!("`{ty}`"),
+    }
 }
 
 fn values(count: usize) -> String {

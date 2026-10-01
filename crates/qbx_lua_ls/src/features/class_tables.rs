@@ -416,7 +416,9 @@ impl<'a, 'b> Classes<'a, 'b> {
             return None;
         }
         Some(match ty {
-            Type::Unknown | Type::Any => return None,
+            // Outside a parameter, `` `T` `` is the class that a string argument names, which may be
+            // anything.
+            Type::Unknown | Type::Any | Type::NameOf(_) => return None,
             Type::Nil => kind::NIL,
             Type::Boolean | Type::BooleanLit(_) => kind::BOOLEAN,
             Type::Number | Type::Integer | Type::IntLit(_) | Type::Handle(_) => kind::NUMBER,

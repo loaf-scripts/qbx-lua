@@ -3777,6 +3777,103 @@ return {
 }
 
 #[test]
+fn backtick_generics_bind_the_type_a_string_names() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Player
+---@field name string
+
+---@generic T
+---@param name `T`
+---@return T
+local function new(name) end
+
+---@generic T
+---@param name `T`
+---@param fallback? T
+---@return T
+local function find(name, fallback) end
+
+---@generic T
+---@param name `T`
+---@return `T`
+local function class(name)
+    ---@type Test.Player
+    local instance = { name = name }
+    return instance
+end
+
+---@class Test.Car
+
+---@generic T
+---@param names `T`[]
+---@return T
+local function first(names) end
+
+---@generic T
+---@param names `T`[]
+---@return T[]
+local function all(names) end
+
+---@generic T
+---@param name `T`
+---@return `T`
+local function declare(name) end
+
+local player = new('Test.Player')
+local count = new('integer')
+local missing = new('Test.Missing')
+local kind = 'Test.Player'
+local widened = new(kind)
+local found = find('Test.Player', 1)
+local made = class('Test.Player')
+local listed = first({ 'Test.Player' })
+local either = first({ 'Test.Player', 'Test.Car' })
+local players = all({ 'Test.Player' })
+local mixed = first({ 'Test.Player', 1 })
+local names = { 'Test.Car' }
+local held = first(names)
+local changing = { 'Test.Car' }
+changing = { 'Test.Player' }
+local reassigned = first(changing)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("player", "player: Test.Player"),
+        ("count", "count: integer"),
+        ("missing", "missing: Test.Missing"),
+        // A string that is not written in the call may name anything.
+        ("widened", "widened: unknown"),
+        ("found", "found: Test.Player"),
+        // A returned `` `T` `` is the class too, as ox_lib's `lib.class` returns it.
+        ("made", "made: Test.Player"),
+        // The strings of a table written in the call name it for `` `T`[] ``.
+        ("listed", "listed: Test.Player"),
+        ("either", "either: Test.Player|Test.Car"),
+        ("players", "players: Test.Player[]"),
+        ("mixed", "mixed: unknown"),
+        // ...and so do those of the table a local that is never assigned again is declared with.
+        ("held", "held: Test.Car"),
+        ("reassigned", "reassigned: unknown"),
+    ] {
+        let (l, c) = pos(text, &format!("local {needle}"), 6);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (l, c) = pos(text, "new(name) end", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("new(name: `T`): T"), "{hover}");
+    let mismatches: Vec<_> =
+        client.diagnostics_for(CLIENT).into_iter().filter(|(code, _)| code == "return-type-mismatch").collect();
+    assert!(mismatches.is_empty(), "{mismatches:?}");
+    // The message writes `` `T` `` once, without wrapping it in more backticks.
+    let (line, _) = pos(text, "local function declare", 0);
+    let missing = findings(&mut client, CLIENT, &["missing-return"]);
+    let declare = missing.iter().find(|(_, l, _)| *l == line as u64).map(|(_, _, message)| message.as_str());
+    assert_eq!(declare, Some("The function can reach its end without returning, but `@return` requires `T`"));
+}
+
+#[test]
 fn self_in_doc_types_is_the_class_of_the_table_a_function_is_defined_on() {
     let mut client = Client::start(fixture_root());
     let text = "\
