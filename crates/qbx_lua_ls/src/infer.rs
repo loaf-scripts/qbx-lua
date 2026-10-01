@@ -763,9 +763,10 @@ impl<'a> Infer<'a> {
         }
     }
 
-    /// The type of the name at `index` of a `local` statement. A name that takes what a call returns
-    /// has the type the call returns, unless it is `reassigned` after its declaration: it may then
-    /// hold other values of that kind, so `"active"|"busy"` becomes `string`.
+    /// The type of the name at `index` of a `local` statement. A name that takes what a call returns,
+    /// or the value of another variable or a field, has its type, unless it is `reassigned` after
+    /// its declaration: it may then hold other values of that kind, so `"active"|"busy"` becomes
+    /// `string`. A literal written out is widened, as `local mode = 'dev'` is a setting to change.
     fn local_stmt_type(&self, stmt: &Stmt, index: usize, top_level: bool, reassigned: bool) -> Type {
         let StmtKind::Local { names, exprs, in_unpack } = &stmt.kind else { return Type::Unknown };
         let doc = self.ctx.doc_at(stmt.span.start);
@@ -786,10 +787,16 @@ impl<'a> Infer<'a> {
             }
             let ty =
                 if is_last { self.expr_multi(expr).into_iter().next().unwrap_or_default() } else { self.expr(expr) };
-            // The `false|string` of a call keeps its `false`, while `local done = false` is a boolean.
+            let is_literal = matches!(
+                expr.unparen().kind,
+                ExprKind::True | ExprKind::False | ExprKind::Number(_) | ExprKind::String(_)
+            );
+            // The `false|string` of a call keeps its `false`, and `local copy = state` the literals
+            // `state` lists, while `local done = false` is a boolean.
             return match (expr.is_call(), reassigned) {
                 (true, false) => ty,
                 (true, true) => ty.widen_returned(),
+                (false, false) if !is_literal => ty,
                 (false, _) => ty.widen(),
             };
         }

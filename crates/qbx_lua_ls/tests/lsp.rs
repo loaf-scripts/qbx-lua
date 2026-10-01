@@ -1751,15 +1751,18 @@ local function GetLevel()
 end
 
 local state = GetState()
+local copy = state
 local level, label = GetLevel()
 local changed = GetState()
 changed = 'other'
 local mode = 'dev'
-print(state, level, label, changed, mode)
+print(state, copy, level, label, changed, mode)
 ";
     client.open_with(CLIENT, text);
     for (needle, expected) in [
         ("state = GetState", "local state: \"active\"|\"busy\"|\"ready\""),
+        // A local that takes the value of another keeps its literals.
+        ("copy = state", "local copy: \"active\"|\"busy\"|\"ready\""),
         ("level, label", "local level: 1|2"),
         ("label = GetLevel", "local label: \"low\"|\"high\""),
         // One that is assigned again may hold other values of that kind.
