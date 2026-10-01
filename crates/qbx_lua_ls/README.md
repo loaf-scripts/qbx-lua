@@ -331,7 +331,9 @@ and custom requests.
 ## Limits
 
 - Types support completion, hover and navigation. The server does not check assignment types
-  or provide full control-flow narrowing or generic inference.
+  or provide full control-flow narrowing. Generic functions and classes take the types their
+  arguments give them, but the constraints of their parameters, such as the `table` of
+  `---@generic T: table`, are not checked.
 - Field references depend on the inferred owner type. Computed keys and fields reached through
   unknown types may not be found; known declarations that cannot be edited safely prevent rename.
 - Formatting applies to whole documents. Range formatting is not implemented.

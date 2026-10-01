@@ -16,7 +16,7 @@ use crate::index::{
     Metatable, NuiCallbackDef, Symbol, SymbolKind,
 };
 use crate::infer::{metatable_args, table_elements, table_fields, FileContext, Infer};
-use crate::luacats::{parse_doc_lines, DocGroup};
+use crate::luacats::{own_type, parse_doc_lines, DocGroup};
 use crate::types::{CallbackRole, DescribedValue, FunType, Type};
 
 const MAX_TABLE_DEPTH: u32 = 4;
@@ -215,7 +215,9 @@ impl<'a> Indexer<'a> {
                 .collect();
             self.out.classes.push(ClassDef {
                 name: class.name,
+                generics: class.generics,
                 parents: class.parents,
+                parent_types: class.parent_types,
                 fields,
                 field_sides,
                 field_visibility,
@@ -299,7 +301,7 @@ impl<'a> Indexer<'a> {
                 self.table_members(class.name.clone(), fields, table_depth + 1);
             }
             kind = SymbolKind::Table;
-            Type::Named(class.name.clone(), Vec::new())
+            own_type(&class.name, &class.generics)
         } else if let Some(ty) = doc.type_at(position) {
             ty.clone()
         } else {

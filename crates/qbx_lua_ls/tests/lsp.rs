@@ -4785,6 +4785,277 @@ local reassigned = first(changing)
 }
 
 #[test]
+fn generic_classes_bind_their_type_parameters() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.List<T>
+---@field first T
+---@field items T[]
+---@field getter fun(): T
+---@field pick fun(self: Test.List<T>, i: integer): T?
+---@field [integer] T
+---@field next? self
+local List = {}
+
+---@return T
+function List:get() return self.first end
+
+---@return self
+function List:chain() return self end
+
+---@generic U
+---@param f fun(value: T): U
+---@return Test.List<U>
+function List:map(f) end
+
+---@generic T
+---@param value T
+---@return T
+function List:id(value) return value end
+
+---@generic T
+---@param kind `T`
+---@return Test.List<T>
+function List:of(kind) end
+
+function List:inside()
+    local own = self.first
+end
+
+---@class Test.Strings : Test.List<string>
+
+---@class Test.Pair<L, R>
+---@field left L
+---@field right R
+
+---@class Test.Swap<A, B> : Test.Pair<B, A>
+
+---@class Test.Mid<U> : Test.List<U[]>
+
+---@class Test.Leaf : Test.Mid<boolean>
+
+---@class Test.Factory<T>
+---@overload fun(): T
+
+---@class Test.Tree<T> : Test.Tree<T[]>
+---@field node T
+
+---@generic T
+---@param from Test.List<T>
+---@return T
+local function firstOf(from) end
+
+---@type Test.List<string>
+local list = {}
+---@type Test.Strings
+local strings = {}
+---@type Test.List<Test.List<integer>>
+local nested = {}
+---@type Test.List
+local bare = {}
+---@type Test.Pair<string>
+local half = {}
+---@type Test.Pair<string, integer, boolean>
+local extra = {}
+---@type Test.Swap<string, integer>
+local swap = {}
+---@type Test.Leaf
+local leaf = {}
+---@type Test.Factory<integer>
+local factory = nil
+---@type Test.Tree<integer>
+local tree = {}
+
+local first = list.first
+local items = list.items
+local got = list.getter()
+local picked = list:pick(1)
+local indexed = list[1]
+local returned = list:get()
+local following = list.next
+local chained = list:chain().first
+local mapped = list:map(function(value) return 1 end)
+local same = list:id(1)
+local fromTable = List:id(1)
+local ofKind = List:of('integer').first
+local inherited = strings:get()
+local inner = nested.first.first
+local unbound = bare.first
+local bareSame = bare:id(1)
+local missing = half.right
+local ignored = extra.right
+local swapped = swap.left
+local deep = leaf.first
+local made = factory()
+local bound = firstOf(list)
+local node = tree.node
+for _, each in ipairs(list.items) do print(each) end
+list.first = 2
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("local list", "list: Test.List<string> {"),
+        ("local first", "first: string"),
+        ("local items", "items: string[]"),
+        ("local got", "got: string"),
+        ("local picked", "picked: string?"),
+        ("local indexed", "indexed: string"),
+        ("local returned", "returned: string"),
+        // `self` keeps the type arguments of the value it is read from.
+        ("local following", "following: Test.List<string>? {"),
+        ("local chained", "chained: string"),
+        ("local mapped", "mapped: Test.List<integer> {"),
+        ("value) return 1", "value: string"),
+        // A method's own `@generic T` is the `T` of the class, as lua-language-server binds it.
+        ("local same", "same: string"),
+        // On the class table the method binds its own `T`, from the value or the class it names.
+        ("local fromTable", "fromTable: integer"),
+        ("local ofKind", "ofKind: integer"),
+        ("local inherited", "inherited: string"),
+        ("local inner", "inner: integer"),
+        // Without type arguments the parameters stay themselves, as lua-language-server shows them,
+        // and as the class table and `self` in its methods keep them: `list.first = 2` gives them
+        // no type, and a method's own `@generic T` binds from the call.
+        ("local unbound", "unbound: T"),
+        ("local bareSame", "bareSame: integer"),
+        ("local own", "own: T"),
+        ("local List", "List: Test.List<T> {"),
+        ("local missing", "missing: R"),
+        ("local ignored", "ignored: integer"),
+        ("local swapped", "swapped: integer"),
+        ("local deep", "deep: boolean[]"),
+        ("local made", "made: integer"),
+        ("local bound", "bound: string"),
+        // A class that names itself as a parent with other type arguments is read once.
+        ("local node", "node: integer\n"),
+        ("each in", "each: string"),
+    ] {
+        let delta = if needle.starts_with("local ") { 6 } else { 0 };
+        let (l, c) = pos(text, needle, delta);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (l, c) = pos(text, "Test.Swap<string", 1);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("(class) Test.Swap<A, B> : Test.Pair<B, A>"), "{hover}");
+    // A method is named by its class alone, as lua-language-server names it.
+    for (needle, expected) in
+        [("list:get", "function Test.List:get(): string"), ("List:get", "function Test.List:get(): T")]
+    {
+        let (l, c) = pos(text, needle, 5);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+
+    let completed = format!("{text}local _ = list.");
+    client.change(CLIENT, 2, &completed);
+    let line = completed.matches('\n').count() as u32;
+    let result = client.request("textDocument/completion", client.position_params(CLIENT, line, 15));
+    let items = result["items"].as_array().cloned().unwrap_or_default();
+    let detail = |label: &str| {
+        let item = items.iter().find(|item| item["label"] == label);
+        item.and_then(|item| item["detail"].as_str()).unwrap_or_default().to_string()
+    };
+    assert_eq!(detail("first"), "string", "{result}");
+    assert_eq!(detail("items"), "string[]", "{result}");
+}
+
+#[test]
+fn generic_classes_bind_the_type_parameters_their_side_declares() {
+    let mut client = Client::start(fixture_root());
+    client.open_with(
+        "myresource/shared/config.lua",
+        "\
+---@class (server) Test.SidedBox<T>
+---@field held T
+---@field [1] T
+---@overload fun(): T
+
+---@class (client) Test.SidedBox<U>
+---@field held U
+---@field [1] U
+---@overload fun(): U
+",
+    );
+    let text = "\
+---@type Test.SidedBox<string>
+local box = nil
+local held = box.held
+local first = box[1]
+local made = box()
+for _, each in pairs(box) do print(each) end
+";
+    for file in [CLIENT, SERVER] {
+        client.open_with(file, text);
+        for (needle, expected) in [
+            ("local held", "held: string"),
+            ("local first", "first: string"),
+            ("local made", "made: string"),
+            ("each)", "each: string"),
+        ] {
+            let delta = if needle.starts_with("local ") { 6 } else { 0 };
+            let (l, c) = pos(text, needle, delta);
+            let hover = client.hover_text(file, l, c);
+            assert!(hover.contains(expected), "{file} {needle}: expected {expected:?} in {hover}");
+        }
+    }
+}
+
+#[test]
+fn generic_classes_check_fields_with_their_type_arguments() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Holder<T>
+---@field value T
+---@field label string
+
+---@class Test.Pair<L, R>
+---@field left L
+---@field right R
+
+---@type Test.Holder<string>
+local holder = { value = 1, label = 'a' }
+holder.value = 2
+
+---@type Test.Pair<string>
+local half = { left = 'a' }
+
+---@type Test.Holder
+local bare = { label = 'a' }
+
+---@return integer
+local function count() return holder.value end
+
+if holder.value == 1 then end
+print(count, half, bare)
+";
+    client.open_with(CLIENT, text);
+    let codes = ["assign-type-mismatch", "missing-fields", "return-type-mismatch", "impossible-comparison"];
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |code: &str, needle: &str, message: &str| (code.to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &codes),
+        [
+            finding("assign-type-mismatch", "value = 1", "Cannot assign `integer` to field `value` of type `string`"),
+            finding(
+                "assign-type-mismatch",
+                "holder.value = 2",
+                "Cannot assign `integer` to field `value` of type `string`"
+            ),
+            finding("missing-fields", "half = {", "Missing required fields in type `Test.Pair`: `right`"),
+            finding("missing-fields", "bare = {", "Missing required fields in type `Test.Holder`: `value`"),
+            finding(
+                "return-type-mismatch",
+                "return holder",
+                "Cannot return `string` as return value #1 of type `integer`"
+            ),
+            finding("impossible-comparison", "if holder", "Comparing `string` with `1` is always false"),
+        ],
+        "`right` of `Test.Pair<string>` and `value` of a `Test.Holder` without arguments take any value, but are required"
+    );
+}
+
+#[test]
 fn self_in_doc_types_is_the_class_of_the_table_a_function_is_defined_on() {
     let mut client = Client::start(fixture_root());
     let text = "\

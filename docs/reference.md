@@ -369,6 +369,15 @@ Index types also decide what a field without its own `@field` holds, for every c
 strict ones: with `---@field [string] number`, `abc.other` is a `number`, and `{ other = true }` and
 `abc.other = true` are an `assign-type-mismatch`.
 
+A generic class gives its fields the type arguments a value is declared with. With
+`---@class List<T>` and `---@field first T`, `first` of a `---@type List<string>` local is a
+`string`, so `{ first = 1 }` is an `assign-type-mismatch`. A parent passes its type arguments on,
+as in `---@class Names : List<string>`. A parameter left without an argument, like the `R` of
+`Pair<string>` for `Pair<L, R>`, stays `R`, and so do all of them where the class is named without
+arguments, as in `---@type List`, just as the table the `---@class` annotation declares and `self`
+in its methods keep them, being `List<T>`. A field of such a type takes any value but must still
+be given, and a method's own `---@generic T` binds from the call.
+
 With `strict_classes = true`, every class is strict unless it is marked `(loose)`. That default
 only covers classes declared in workspace files outside `exclude` and `ignore_diagnostics`, so the
 classes of third-party resources stay as they are unless they say `(strict)` themselves. When one

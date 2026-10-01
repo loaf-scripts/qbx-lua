@@ -1395,7 +1395,7 @@ fn expected_field_items(infer: &Infer, doc: &Document, offset: u32) -> Vec<Compl
         let present: FxHashSet<&str> = existing.iter().filter_map(named_field).map(|(name, _)| name).collect();
         let class = Type::Named(found.class.clone(), Vec::new());
         return Classes::new(infer)
-            .fields(&found.class, found.from)
+            .fields(&found.class, &found.args, found.from)
             .into_iter()
             .filter(|field| !present.contains(field.name.as_str()) && is_identifier(&field.name))
             .filter(|field| scope.allows(&class, None, &field.name, offset))

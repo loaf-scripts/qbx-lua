@@ -98,9 +98,9 @@ impl Finder<'_, '_> {
         let tables = class_tables(self.infer, self.infer.ctx.chunk);
         let found = tables.into_iter().find(|found| found.table.span == table.span)?;
         let classes = Classes::new(self.infer);
-        let (ty, _) = classes.field_type(&found.class, found.from, key)?;
+        let (ty, _) = classes.field_type(&found.class, &found.args, found.from, key)?;
         let values = match key {
-            Key::Name(name) => field_values(&classes, &found.class, found.from, name),
+            Key::Name(name) => field_values(&classes, &found.class, &found.args, found.from, name),
             Key::Typed(_) => Vec::new(),
         };
         Some(ExpectedValue::stored(ty, values))
@@ -154,7 +154,7 @@ impl Finder<'_, '_> {
         let classes = Classes::new(self.infer);
         let from = classes.file();
         match classes.class_of(&self.infer.expr(base), from) {
-            Some(class) => field_values(&classes, &class, from, name),
+            Some((class, args)) => field_values(&classes, &class, &args, from, name),
             None => Vec::new(),
         }
     }
@@ -174,8 +174,8 @@ impl Finder<'_, '_> {
 }
 
 /// The described values of the `@field` called `name` of `class`, or of a parent, as `from` sees it.
-fn field_values(classes: &Classes, class: &str, from: FileId, name: &str) -> Vec<DescribedValue> {
-    let mut fields = classes.fields(class, from).into_iter();
+fn field_values(classes: &Classes, class: &str, args: &[Type], from: FileId, name: &str) -> Vec<DescribedValue> {
+    let mut fields = classes.fields(class, args, from).into_iter();
     fields.find(|field| field.name == name).map(|field| field.values).unwrap_or_default()
 }
 

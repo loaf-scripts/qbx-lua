@@ -12,9 +12,9 @@ use qbx_lua_syntax::{CommentKind, NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::callback_wrappers::{self, Wrapper};
-use crate::index::{instance_class, instance_owner, FileId, Index, SymbolKind};
+use crate::index::{instance_class, instance_owner, ClassDef, FileId, Index, SymbolKind};
 use crate::locate::statement_at;
-use crate::luacats::{applies_on, parse_doc_lines, CastEntry, DocGroup};
+use crate::luacats::{applies_on, own_type, parse_doc_lines, CastEntry, DocGroup};
 use crate::narrow::{Casts, Guards};
 use crate::types::{CallbackRole, FunType, Param, Shape, ShapeField, Type, TypeParser};
 
@@ -932,7 +932,7 @@ impl<'a> Infer<'a> {
         let StmtKind::Local { names, exprs, in_unpack } = &stmt.kind else { return Type::Unknown };
         let doc = self.ctx.doc_at(stmt.span.start);
         if let Some(class) = doc.classes.last() {
-            return Type::Named(class.name.clone(), Vec::new());
+            return own_type(&class.name, &class.generics);
         }
         if let Some(ty) = doc.type_at(index) {
             return ty.clone();
@@ -1227,19 +1227,20 @@ impl<'a> Infer<'a> {
                 let index = shape.indices.iter().filter(|(key, _)| !array_only || is_integer_key(key)).cloned();
                 fields.chain(array).chain(index).unzip()
             }
-            Type::Named(ref name, _) => {
+            Type::Named(ref name, ref args) => {
                 let class = self.index.class(name, self.side).map(|(_, c)| c);
+                let bindings = self.class_bindings_of(name, args);
                 let index = class
                     .into_iter()
                     .flat_map(|c| c.indices(self.side))
                     .filter(|(key, _)| !array_only || is_integer_key(key))
-                    .map(|(key, value)| (key.clone(), value.clone()));
+                    .map(|(key, value)| (substitute(key, &bindings), substitute(value, &bindings)));
                 // `---@field [1] number` fields, with their keys shown as `integer` rather than `1|2|3`.
                 let literal_fields = class
                     .into_iter()
                     .flat_map(|c| c.literal_fields(self.side))
                     .filter(|(key, _)| !array_only || is_integer_key(key))
-                    .map(|(key, value)| (key.widen(), value.clone()));
+                    .map(|(key, value)| (key.widen(), substitute(value, &bindings)));
                 // An instance holds its data; the methods its class provides are not visited.
                 let fields = self
                     .members(&resolved)
@@ -1335,6 +1336,14 @@ impl<'a> Infer<'a> {
         current
     }
 
+    /// The type parameters of the class `name` bound to the type arguments `args`, as a declaration
+    /// of it for this side lists them: `---@class (client) Box<U>` binds `U`.
+    fn class_bindings_of(&self, name: &str, args: &[Type]) -> Vec<(SmolStr, Type)> {
+        let mut defs = self.index.class_defs(name);
+        defs.retain(|(_, def)| applies_on(def.side, self.side));
+        class_bindings(&defs, args)
+    }
+
     fn module_type(&self, path: &str) -> Option<Type> {
         let file = self.index.resolve_require(path, self.ctx.file)?;
         self.index.file(file)?.index.module_return.clone()
@@ -1371,18 +1380,19 @@ impl<'a> Infer<'a> {
                 let indices = shape.indices.iter().filter(|(key, _)| self.index_takes(key, key_ty, 0));
                 Type::union(array.chain(indices.map(|(_, value)| value)).cloned())
             }
-            Type::Named(name, _) => {
+            Type::Named(name, args) => {
                 let Some((_, class)) = self.index.class(&name, self.side) else { return Type::Unknown };
                 let key_ty = self.resolve_alias(key_ty);
-                let index = self.class_index_value(&name, &key_ty, &mut FxHashSet::default(), 0);
+                let index = self.class_index_value(&name, &args, &key_ty, &mut FxHashSet::default(), 0);
+                let bindings = self.class_bindings_of(&name, &args);
                 // `employee[1]` reads the `---@field [1] number` of its key, and `employee[i]` any
                 // literal-keyed field that `i` may name.
                 if key_ty.is_literal() {
                     let field = class.literal_fields(self.side).find(|(key, _)| **key == key_ty);
-                    return field.map_or(index, |(_, value)| value.clone());
+                    return field.map_or(index, |(_, value)| substitute(value, &bindings));
                 }
                 let fields = class.literal_fields(self.side).filter(|(key, _)| may_be_literal_key(&key_ty, key));
-                Type::union(fields.map(|(_, value)| value.clone()).chain([index]))
+                Type::union(fields.map(|(_, value)| substitute(value, &bindings)).chain([index]))
             }
             // `list[i]` on a table whose array part the index or a top-level local's constructor holds.
             Type::GlobalTable(owner)
@@ -1416,22 +1426,34 @@ impl<'a> Infer<'a> {
         }
     }
 
-    /// What a key of type `key` reads from an instance of `class` through the nearest indices of
-    /// the class or its parents that take it. A class that several parents share is read once.
-    fn class_index_value(&self, class: &str, key: &Type, visited: &mut FxHashSet<SmolStr>, depth: u32) -> Type {
+    /// What a key of type `key` reads from an instance of `class`, given the type arguments `args`,
+    /// through the nearest indices of the class or its parents that take it. A class that several
+    /// parents share is read once.
+    fn class_index_value(
+        &self,
+        class: &str,
+        args: &[Type],
+        key: &Type,
+        visited: &mut FxHashSet<SmolStr>,
+        depth: u32,
+    ) -> Type {
         if depth > 8 || !visited.insert(SmolStr::new(class)) {
             return Type::Unknown;
         }
         let mut defs = self.index.class_defs(class);
         defs.retain(|(_, def)| applies_on(def.side, self.side));
+        let bindings = class_bindings(&defs, args);
         let indices = defs.iter().flat_map(|(_, def)| def.indices(self.side));
-        let taking = indices.filter(|(index, _)| self.index_takes(index, key, 0));
-        let own = Type::union(taking.map(|(_, value)| value.clone()));
+        let taking = indices.filter(|(index, _)| self.index_takes(&substitute(index, &bindings), key, 0));
+        let own = Type::union(taking.map(|(_, value)| substitute(value, &bindings)));
         if !own.is_unknown() {
             return own;
         }
-        let parents = defs.iter().flat_map(|(_, def)| &def.parents);
-        Type::union(parents.map(|parent| self.class_index_value(parent, key, visited, depth + 1)))
+        let parents = defs.iter().flat_map(|(_, def)| &def.parent_types).map(|parent| substitute(parent, &bindings));
+        Type::union(parents.map(|parent| match parent {
+            Type::Named(parent, args) => self.class_index_value(&parent, &args, key, visited, depth + 1),
+            _ => Type::Unknown,
+        }))
     }
 
     /// The field names a key can be: `'male'`, or every name of a `"male"|"female"` loop variable or
@@ -1643,9 +1665,14 @@ impl<'a> Infer<'a> {
                     return Some((fun.clone(), None));
                 }
                 match self.resolve_alias(&ty) {
-                    Type::Named(name, _) => {
+                    Type::Named(name, args) => {
                         let call = self.index.class(&name, self.side).and_then(|(_, c)| c.call.clone());
-                        call.filter(|f| applies_on(f.side, self.side)).map(|f| (f, None))
+                        let call = call.filter(|f| applies_on(f.side, self.side))?;
+                        let bindings = self.class_bindings_of(&name, &args);
+                        match bindings.is_empty() {
+                            true => Some((call, None)),
+                            false => Some((Arc::new(substitute_fun(&call, &bindings)), None)),
+                        }
                     }
                     _ => None,
                 }
@@ -1845,6 +1872,16 @@ impl<'a> Infer<'a> {
                 }
                 _ => {}
             },
+            // `List<T>` takes the `string` of a `List<string>`.
+            Type::Named(name, params) if !params.is_empty() => {
+                if let Type::Named(given, args) = self.resolve_alias(&arg.without_nil()) {
+                    if given == *name {
+                        for (param, arg) in params.iter().zip(&args) {
+                            self.unify(fun, param, arg, returned, bound, depth + 1);
+                        }
+                    }
+                }
+            }
             Type::Array(inner) => {
                 self.unify(fun, inner, &self.key_value_types(arg, true).1, returned, bound, depth + 1);
             }
@@ -1907,7 +1944,8 @@ impl<'a> Infer<'a> {
     /// Whether an argument passed for `param` can bind a generic of `fun`, as far as `unify` looks.
     fn can_bind(&self, fun: &FunType, param: &Type) -> bool {
         match param {
-            Type::Named(name, args) => args.is_empty() && self.is_generic(fun, name),
+            Type::Named(name, args) if args.is_empty() => self.is_generic(fun, name),
+            Type::Named(_, args) => args.iter().any(|arg| self.can_bind(fun, arg)),
             Type::NameOf(name) => self.is_generic(fun, name),
             Type::Array(inner) => self.can_bind(fun, inner),
             Type::Map(key, value) => self.can_bind(fun, key) || self.can_bind(fun, value),
@@ -2316,8 +2354,8 @@ impl<'a> Infer<'a> {
                 Type::union(values.map(|(_, value)| value.clone()))
             }
             Type::Map(index, value) if self.index_takes(index, key, 0) => (**value).clone(),
-            Type::Named(name, _) if self.index.class(name, self.side).is_some() => {
-                self.class_index_value(name, key, &mut FxHashSet::default(), depth + 1)
+            Type::Named(name, args) if self.index.class(name, self.side).is_some() => {
+                self.class_index_value(name, args, key, &mut FxHashSet::default(), depth + 1)
             }
             Type::Named(..) | Type::Require(_) => match self.resolve_alias(ty) {
                 resolved if resolved != *ty => self.index_value(&resolved, key, depth + 1),
@@ -2356,7 +2394,7 @@ impl<'a> Infer<'a> {
                     });
                 }
             }
-            Type::Named(name, _) => self.class_members(name, filter, &mut out, 0),
+            Type::Named(name, args) => self.class_members(name, args, filter, &mut out, &mut FxHashSet::default(), 0),
             Type::GlobalTable(owner) => self.owner_members(owner, filter, &mut out),
             Type::String | Type::StringLit(_) => {
                 let library = self.global_type("string");
@@ -2525,8 +2563,20 @@ impl<'a> Infer<'a> {
         }
     }
 
-    fn class_members(&self, name: &str, filter: Option<&str>, out: &mut Vec<MemberInfo>, depth: u32) {
-        if depth > 8 {
+    /// The members of the class or alias `name` given the type arguments `args`, with those of its
+    /// parents: the fields of a class and those set on the table its `---@class` declares. A class
+    /// that several parents share is read once, and so is one that names itself as a parent with
+    /// other type arguments, as `---@class Tree<T> : Tree<T[]>` does.
+    fn class_members(
+        &self,
+        name: &str,
+        args: &[Type],
+        filter: Option<&str>,
+        out: &mut Vec<MemberInfo>,
+        visited: &mut FxHashSet<SmolStr>,
+        depth: u32,
+    ) {
+        if depth > 8 || !visited.insert(SmolStr::new(name)) {
             return;
         }
         let mut defs = self.index.class_defs(name);
@@ -2537,6 +2587,7 @@ impl<'a> Infer<'a> {
             }
             return;
         }
+        let own = out.len();
         for (file, class) in &defs {
             let sides = class.field_sides.iter().copied().chain(std::iter::repeat(None));
             for (field, side) in class.fields.iter().zip(sides) {
@@ -2546,9 +2597,15 @@ impl<'a> Infer<'a> {
             }
         }
         self.owner_members(name, filter, out);
-        for (_, class) in defs {
-            for parent in &class.parents {
-                self.class_members(parent, filter, out, depth + 1);
+        let bindings = class_bindings(&defs, args);
+        if !bindings.is_empty() {
+            for member in &mut out[own..] {
+                member.ty = substitute(&member.ty, &bindings);
+            }
+        }
+        for parent in defs.iter().flat_map(|(_, class)| &class.parent_types) {
+            if let Type::Named(parent, args) = substitute(parent, &bindings) {
+                self.class_members(&parent, &args, filter, out, visited, depth + 1);
             }
         }
     }
@@ -2597,7 +2654,28 @@ fn member_from_symbol(file: FileId, symbol: &crate::index::Symbol) -> MemberInfo
     }
 }
 
-fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
+/// What the type parameters of a class stand for in a reference that gives them `args`: `string`
+/// for the `T` of `List<string>`. A parameter left without an argument stays itself, as the `T`
+/// of a `---@type List` does, which lua-language-server shows as `<T>`: a field of that type takes
+/// any value but is still required, and a method's own `@generic T` binds from the call. The table
+/// a `---@class` declares, and `self` in its methods, keep the parameters too, being `List<T>`.
+/// Binding `T` to itself would change nothing.
+pub(crate) fn generic_bindings(params: &[SmolStr], args: &[Type]) -> Vec<(SmolStr, Type)> {
+    let itself =
+        |param: &SmolStr, arg: &Type| matches!(arg, Type::Named(name, args) if name == param && args.is_empty());
+    params.iter().cloned().zip(args.iter().cloned()).filter(|(param, arg)| !itself(param, arg)).collect()
+}
+
+/// The type parameters of a class bound to `args`, as the declaration of it among `defs` that
+/// lists them declares them.
+pub(crate) fn class_bindings(defs: &[(FileId, &ClassDef)], args: &[Type]) -> Vec<(SmolStr, Type)> {
+    match defs.iter().find(|(_, def)| !def.generics.is_empty()) {
+        Some((_, def)) => generic_bindings(&def.generics, args),
+        None => Vec::new(),
+    }
+}
+
+pub(crate) fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
     if generics.is_empty() {
         return ty.clone();
     }
@@ -2622,24 +2700,35 @@ fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
             }
         }
         Type::Map(k, v) => Type::Map(Box::new(substitute(k, generics)), Box::new(substitute(v, generics))),
-        Type::Fun(fun) => Type::Fun(Arc::new(FunType {
-            params: fun.params.iter().map(|p| Param { ty: substitute(&p.ty, generics), ..p.clone() }).collect(),
-            returns: fun.returns.iter().map(|t| substitute(t, generics)).collect(),
-            return_sets: fun
-                .return_sets
-                .iter()
-                .map(|set| set.iter().map(|t| substitute(t, generics)).collect())
-                .collect(),
-            is_method: fun.is_method,
-            returns_inferred: fun.returns_inferred,
-            ..FunType::default()
-        })),
+        Type::Fun(fun) => Type::Fun(Arc::new(substitute_fun(fun, generics))),
         Type::Shape(shape) => Type::Shape(Arc::new(Shape {
             fields: shape.fields.iter().map(|f| ShapeField { ty: substitute(&f.ty, generics), ..f.clone() }).collect(),
             array: shape.array.as_ref().map(|t| substitute(t, generics)),
             indices: shape.indices.iter().map(|(k, v)| (substitute(k, generics), substitute(v, generics))).collect(),
         })),
         other => other.clone(),
+    }
+}
+
+/// `fun` with `generics` bound in its parameters, returned values and overloads, as a method of
+/// `List<T>` read from a `List<string>`. The names it binds are no longer generics of `fun`, even
+/// when `fun` declares one of them with `@generic` too, as lua-language-server binds them.
+fn substitute_fun(fun: &FunType, generics: &[(SmolStr, Type)]) -> FunType {
+    let types = |types: &[Type]| types.iter().map(|t| substitute(t, generics)).collect();
+    let unbound = |name: &&SmolStr| !generics.iter().any(|(bound, _)| bound == *name);
+    FunType {
+        params: fun.params.iter().map(|p| Param { ty: substitute(&p.ty, generics), ..p.clone() }).collect(),
+        returns: types(&fun.returns),
+        return_values: fun.return_values.clone(),
+        return_sets: fun.return_sets.iter().map(|set| types(set)).collect(),
+        returns_inferred: fun.returns_inferred,
+        is_method: fun.is_method,
+        lists_receiver: fun.lists_receiver,
+        generics: fun.generics.iter().filter(unbound).cloned().collect(),
+        overloads: fun.overloads.iter().map(|overload| Arc::new(substitute_fun(overload, generics))).collect(),
+        side: fun.side,
+        callback: fun.callback.clone(),
+        is_async: fun.is_async,
     }
 }
 

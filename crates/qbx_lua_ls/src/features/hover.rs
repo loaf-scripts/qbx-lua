@@ -15,7 +15,7 @@ use crate::index::{
 use crate::indexer::{described_values, render_doc};
 use crate::infer::{Decl, Infer, MemberInfo};
 use crate::locate::locate;
-use crate::luacats::{applies_on, type_name_at};
+use crate::luacats::{applies_on, own_type, type_name_at};
 use crate::types::{CallbackRole, DescribedValue, Type};
 use crate::workspace::Workspace;
 
@@ -110,8 +110,9 @@ fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: O
     }
     // The fields are those of the value when it is not nil; the `?` still says it may be.
     let optional = if *ty != bare && matches!(ty, Type::Union(types) if types.contains(&Type::Nil)) { "?" } else { "" };
+    // A class with its type arguments, as `List<string>`.
     let label = match &bare {
-        Type::Named(class, _) => format!("{class}{optional} "),
+        Type::Named(..) => format!("{bare}{optional} "),
         _ => String::new(),
     };
     let mut out = format!("{prefix}{name}: {label}{{");
@@ -205,6 +206,14 @@ fn alias_definition(name: &str, alias: &AliasDef) -> String {
         })
         .collect();
     format!("type {name} ={}", described_values(&values))
+}
+
+/// The name of a class with the type parameters it declares, as `List<T>`.
+fn with_params(name: &str, generics: &[SmolStr]) -> String {
+    match generics {
+        [] => name.to_string(),
+        generics => format!("{name}<{}>", generics.join(", ")),
+    }
 }
 
 /// `offset` is where the name is written, which decides what the guards around it rule out.
@@ -333,16 +342,19 @@ fn owner_label(owner: &Type) -> String {
     };
     match label {
         Type::GlobalTable(path) if path.starts_with('%') => String::new(),
+        // `Promise:New` of any `Promise<T>`, as lua-language-server names it.
+        Type::Named(class, _) => class.to_string(),
         other => other.to_string(),
     }
 }
 
 fn class_hover(infer: &Infer, class: &ClassDef) -> String {
-    let mut declaration = format!("(class) {}", class.name);
-    if !class.parents.is_empty() {
-        declaration.push_str(&format!(" : {}", class.parents.join(", ")));
+    let mut declaration = format!("(class) {}", with_params(&class.name, &class.generics));
+    if !class.parent_types.is_empty() {
+        let parents: Vec<String> = class.parent_types.iter().map(Type::to_string).collect();
+        declaration.push_str(&format!(" : {}", parents.join(", ")));
     }
-    let members = infer.members(&Type::Named(class.name.clone(), Vec::new()));
+    let members = infer.members(&own_type(&class.name, &class.generics));
     let mut fields: Vec<String> = members.iter().map(|member| format!("{}: {}", member.name, member.ty)).collect();
     fields.extend(class.literal_fields(infer.side()).map(|(key, value)| format!("[{key}]: {value}")));
     let indices = class.indices(infer.side());

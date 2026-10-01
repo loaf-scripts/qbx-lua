@@ -32,7 +32,7 @@ pub fn undeclared_fields(infer: &Infer, chunk: &Chunk, by_default: impl Fn(FileI
     }
     let file = classes.file();
     for access in accesses(infer, chunk, true).into_iter().filter(|access| !access.on_class_table) {
-        let Some(class) = classes.class_of(&access.owner, file) else { continue };
+        let Some((class, _)) = classes.class_of(&access.owner, file) else { continue };
         if classes.is_strict(&class, file, &by_default) && !classes.declares(&class, file, &access.key) {
             out.push((access.span, message(&access.key, &class)));
         }

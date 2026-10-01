@@ -94,7 +94,12 @@ pub struct Metatable {
 #[derive(Clone, Debug)]
 pub struct ClassDef {
     pub name: SmolStr,
+    /// The type parameters of `@class List<T>`, which a reference such as `List<string>` binds.
+    pub generics: Vec<SmolStr>,
     pub parents: Vec<SmolStr>,
+    /// Each of `parents` as written: a class with its type arguments, as `List<string>`, or a table
+    /// type such as `{ [number]: T }` or `table<string, integer>`.
+    pub parent_types: Vec<Type>,
     pub fields: Vec<Symbol>,
     /// The side each of `fields` is scoped to by `@field (server) name type`.
     pub field_sides: Vec<Option<Side>>,

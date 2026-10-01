@@ -65,7 +65,12 @@ pub struct DocIndexField {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DocClass {
     pub name: SmolStr,
+    /// The type parameters of `@class List<T>`, which a reference such as `List<string>` binds.
+    pub generics: Vec<SmolStr>,
     pub parents: Vec<SmolStr>,
+    /// Each of `parents` as written: a class with its type arguments, as `List<string>`, or a table
+    /// type such as `{ [number]: T }` or `table<string, integer>`.
+    pub parent_types: Vec<Type>,
     pub fields: Vec<DocField>,
     /// General indices, retained per declaration so each side can select its own.
     pub indices: Vec<DocIndexField>,
@@ -358,10 +363,13 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
         match tag {
             "class" => {
                 let (attributes, rest) = split_attributes(rest);
-                let Some((name, _, after)) = class_head(rest) else { continue };
+                let Some((name, params, after)) = class_head(rest) else { continue };
+                let parents = after.trim_start().strip_prefix(':').map(class_parents).unwrap_or_default();
                 group.classes.push(DocClass {
                     name: SmolStr::new(name),
-                    parents: after.trim_start().strip_prefix(':').map(class_parents).unwrap_or_default(),
+                    generics: generic_names(params).into_iter().map(SmolStr::new).collect(),
+                    parents: parents.iter().map(parent_name).collect(),
+                    parent_types: parents,
                     description: description.join("\n").trim().to_string(),
                     line: index,
                     side: side_attribute(attributes),
@@ -376,7 +384,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
             }
             "overload" if !group.classes.is_empty() && !group.has_function_tags() => {
                 if let (Some(fun), Some(class)) = (overload(rest), group.classes.last_mut()) {
-                    let owner = Type::Named(class.name.clone(), Vec::new());
+                    let owner = own_type(&class.name, &class.generics);
                     class.call = Some(if fun.mentions_self() { Arc::new(fun.with_self(&owner)) } else { fun });
                 }
             }
@@ -514,22 +522,29 @@ fn type_params(after_name: &str) -> (&str, &str) {
     after_name.strip_prefix('<').and_then(|list| list.split_once('>')).unwrap_or(("", after_name))
 }
 
-/// The parents a `@class` line lists after its `:`, by name: `Pair` for `Pair<string, integer>`. A
-/// parent that is no class name, such as `{ [number]: T }` or `table<string, any>`, is named by its
-/// type, and the description after the list names none. A union such as `B1 | C1` names its first
+/// The names in a list of type parameters, without their constraints: `T` and `K` of `T: table, K`.
+fn generic_names(list: &str) -> Vec<&str> {
+    list.split(',').filter_map(|entry| entry.trim().split([':', ' ']).next()).filter(|name| !name.is_empty()).collect()
+}
+
+/// The parents a `@class` line lists after its `:`, read as types: `Pair<string, integer>` stays one
+/// parent, and the description after the list is none. A union such as `B1 | C1` names its first
 /// type, as lua-language-server reads it.
-fn class_parents(text: &str) -> Vec<SmolStr> {
+fn class_parents(text: &str) -> Vec<Type> {
     let parents = TypeParser::new(text).parse_list().into_iter().map(|parent| match parent {
         Type::Union(types) => types.into_iter().find(|ty| *ty != Type::Nil).unwrap_or_default(),
         parent => parent,
     });
-    parents
-        .filter(|parent| !parent.is_unknown())
-        .map(|parent| match parent {
-            Type::Named(name, _) => name,
-            other => SmolStr::new(other.to_string()),
-        })
-        .collect()
+    parents.filter(|parent| !parent.is_unknown()).collect()
+}
+
+/// The name of a parent: `Pair` for `Pair<string, integer>`. A parent that is no class name, such
+/// as `{ [number]: T }` or `table<string, any>`, is named by its type.
+fn parent_name(parent: &Type) -> SmolStr {
+    match parent {
+        Type::Named(name, _) => name.clone(),
+        other => SmolStr::new(other.to_string()),
+    }
 }
 
 /// The text of a `@field` after its `(server)` attributes and `private` keyword, in either order,
@@ -544,9 +559,16 @@ pub fn field_head(rest: &str) -> (Option<Side>, Visibility, &str) {
 /// `ty`, declared for the class `class`, with `self` standing for that class.
 fn in_class(class: &DocClass, ty: Type) -> Type {
     match ty.mentions_self() {
-        true => ty.with_self(&Type::Named(class.name.clone(), Vec::new())),
+        true => ty.with_self(&own_type(&class.name, &class.generics)),
         false => ty,
     }
+}
+
+/// The type of the table that `---@class List<T>` declares, and of `self` in its fields and
+/// methods: `List<T>`, which keeps the type parameters of the class, as a class named without
+/// type arguments elsewhere does.
+pub fn own_type(name: &SmolStr, generics: &[SmolStr]) -> Type {
+    Type::Named(name.clone(), generics.iter().map(|param| Type::Named(param.clone(), Vec::new())).collect())
 }
 
 /// Reads a `@field` into the latest class of `group`. True when it adds a field of its own, the
@@ -696,18 +718,11 @@ pub fn referenced_type_names(line: &str) -> Vec<(usize, &str)> {
 /// `@class Pair<T, K>`.
 pub fn declared_generics(line: &str) -> Vec<&str> {
     let Some((tag, rest)) = split_tag(line) else { return Vec::new() };
-    let list = match tag {
-        "generic" => rest,
-        "class" => {
-            let head = split_attributes(rest).1.split(':').next().unwrap_or_default();
-            match head.split_once('<').and_then(|(_, params)| params.split_once('>')) {
-                Some((params, _)) => params,
-                None => return Vec::new(),
-            }
-        }
-        _ => return Vec::new(),
-    };
-    list.split(',').filter_map(|entry| entry.trim().split([':', ' ']).next()).filter(|name| !name.is_empty()).collect()
+    match tag {
+        "generic" => generic_names(rest),
+        "class" => class_head(split_attributes(rest).1).map_or_else(Vec::new, |(_, params, _)| generic_names(params)),
+        _ => Vec::new(),
+    }
 }
 
 /// What one entry of a `@cast` line does to the type of the variable it names.
@@ -815,13 +830,10 @@ fn type_names(line: &str) -> Option<(&str, Vec<FoundName<'_>>)> {
     };
     let mut names = TypeNames { line, found: Vec::new() };
     match tag {
+        // Generic parameters such as the `T` of `Child<T>` refer to no class or alias.
         "class" => {
-            let (_, rest) = split_attributes(rest);
-            names.declared(rest);
-            // Parsing the head as a type skips generic parameters such as the `T` of `Child<T>`.
-            let mut head = TypeParser::new(rest);
-            head.parse();
-            if let Some(parents) = head.rest().trim_start().strip_prefix(':') {
+            let after = names.declared(split_attributes(rest).1).map(|after| type_params(after).1);
+            if let Some(parents) = after.and_then(|after| after.trim_start().strip_prefix(':')) {
                 names.types(parents);
             }
         }
@@ -1101,6 +1113,21 @@ mod tests {
     }
 
     #[test]
+    fn generic_classes() {
+        let doc = parse(
+            "---@class (exact) Pair<L, R: table> : Base<R>, { [number]: L }\n---@field left L\n---@field next self?\n---@overload fun(): self",
+        );
+        let class = &doc.classes[0];
+        assert_eq!((class.name.as_str(), class.generics.as_slice()), ("Pair", ["L", "R"].map(SmolStr::new).as_slice()));
+        assert_eq!(class.parents, ["Base", "{ [number]: L }"]);
+        let parents: Vec<String> = class.parent_types.iter().map(Type::to_string).collect();
+        assert_eq!(parents, ["Base<R>", "{ [number]: L }"], "parents keep their type arguments");
+        assert_eq!(class.fields[1].ty.to_string(), "Pair<L, R>?", "`self` keeps the type parameters");
+        assert_eq!(Type::Fun(class.call.clone().unwrap()).to_string(), "fun(): Pair<L, R>");
+        assert!(parse("---@class Plain : Base").classes[0].generics.is_empty());
+    }
+
+    #[test]
     fn class_and_enum_attributes() {
         let doc = parse("---@class (partial) Player : Entity");
         assert_eq!(doc.classes[0].name, "Player");
@@ -1279,6 +1306,7 @@ mod tests {
             "@alias Value Gar^age",
             "@alias (server) Gar^age string",
             "@alias (client) Value Gar^age",
+            "@class Pair<L: table> : Gar^age<L>",
             "@field (server) value? Gar^age",
             "@field private (client) value Gar^age",
             "@overload (server) fun(): Gar^age",
@@ -1325,6 +1353,7 @@ mod tests {
     fn lists_declared_generic_parameters() {
         assert_eq!(declared_generics("@generic T, K: table, V"), ["T", "K", "V"]);
         assert_eq!(declared_generics("@class (exact) Pair<L, R> : Base"), ["L", "R"]);
+        assert_eq!(declared_generics("@class Pair<L: table, R>: Base<L>"), ["L", "R"]);
         assert!(declared_generics("@class Plain : Base").is_empty());
         assert!(declared_generics("@param value T").is_empty());
     }

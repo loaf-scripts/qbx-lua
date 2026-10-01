@@ -18,7 +18,7 @@ use qbx_lua_syntax::{NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::index::{AliasDef, ClassDef, FileId, ResourceId};
-use crate::infer::Infer;
+use crate::infer::{class_bindings, substitute, Infer};
 use crate::luacats::applies_on;
 use crate::types::{DescribedValue, Type};
 
@@ -27,6 +27,8 @@ const MAX_DEPTH: u32 = 8;
 /// A table constructor and the class it has to be.
 pub struct ClassTable<'c> {
     pub class: SmolStr,
+    /// The type arguments the class is given, as the `string` of `List<string>`.
+    pub args: Vec<Type>,
     pub table: &'c Expr,
     /// The file whose view of the type names decided the class.
     pub from: FileId,
@@ -204,41 +206,54 @@ impl<'a, 'b> Classes<'a, 'b> {
         }
     }
 
-    /// The class a value of type `ty` must be, as `from` sees the names, looking through `?` and
-    /// aliases.
-    pub fn class_of(&self, ty: &Type, from: FileId) -> Option<SmolStr> {
+    /// The class a value of type `ty` must be, with the type arguments it is given, as `from` sees
+    /// the names, looking through `?` and aliases.
+    pub fn class_of(&self, ty: &Type, from: FileId) -> Option<(SmolStr, Vec<Type>)> {
         match self.resolve(&ty.without_nil(), from, 0).without_nil() {
-            Type::Named(name, _) if !self.class_defs(&name, from).is_empty() => Some(name),
+            Type::Named(name, args) if !self.class_defs(&name, from).is_empty() => Some((name, args)),
             _ => None,
         }
     }
 
-    /// The `@field`s of `class` and its parents, leaving out those scoped to the other side. The
-    /// first declaration of a name wins, so a class can narrow a field of its parent.
-    pub fn fields(&self, class: &str, from: FileId) -> Vec<ClassField> {
+    /// The `@field`s of `class`, given the type arguments `args`, and of its parents, leaving out
+    /// those scoped to the other side. The first declaration of a name wins, so a class can narrow
+    /// a field of its parent. A class that several parents share is read once, and so is one that
+    /// names itself as a parent with other type arguments.
+    pub fn fields(&self, class: &str, args: &[Type], from: FileId) -> Vec<ClassField> {
         let mut out = Vec::new();
-        self.collect_fields(class, from, &mut out, 0);
+        self.collect_fields(class, args, from, &mut out, &mut FxHashSet::default(), 0);
         out
     }
 
-    fn collect_fields(&self, class: &str, from: FileId, out: &mut Vec<ClassField>, depth: u32) {
-        if depth > MAX_DEPTH {
+    fn collect_fields(
+        &self,
+        class: &str,
+        args: &[Type],
+        from: FileId,
+        out: &mut Vec<ClassField>,
+        visited: &mut FxHashSet<SmolStr>,
+        depth: u32,
+    ) {
+        if depth > MAX_DEPTH || !visited.insert(SmolStr::new(class)) {
             return;
         }
         let defs = self.class_defs(class, from);
+        let bindings = class_bindings(&defs, args);
         for (file, def) in &defs {
             let sides = def.field_sides.iter().copied().chain(std::iter::repeat(None));
             for (i, (field, side)) in def.fields.iter().zip(sides).enumerate() {
                 if applies_on(side, self.infer.side()) && !out.iter().any(|seen| seen.name == field.name) {
-                    let (name, ty, doc) = (field.name.clone(), field.ty.clone(), field.doc.clone());
+                    let (name, ty, doc) = (field.name.clone(), substitute(&field.ty, &bindings), field.doc.clone());
                     let values = def.field_values.get(i).cloned().unwrap_or_default();
                     out.push(ClassField { name, ty, doc, values, file: *file });
                 }
             }
         }
         for (file, def) in &defs {
-            for parent in &def.parents {
-                self.collect_fields(parent, *file, out, depth + 1);
+            for parent in &def.parent_types {
+                if let Type::Named(parent, args) = substitute(parent, &bindings) {
+                    self.collect_fields(&parent, &args, *file, out, visited, depth + 1);
+                }
             }
         }
     }
@@ -263,8 +278,8 @@ impl<'a, 'b> Classes<'a, 'b> {
             return false;
         }
         for (file, def) in self.class_defs(class, from) {
-            for parent in &def.parents {
-                let Some(parent) = self.class_of(&Type::named(parent), file) else { continue };
+            for parent in &def.parent_types {
+                let Some((parent, _)) = self.class_of(parent, file) else { continue };
                 if self.extends_at(&parent, file, ancestor, visited, depth + 1) {
                     return true;
                 }
@@ -281,30 +296,40 @@ impl<'a, 'b> Classes<'a, 'b> {
             || (!defs.is_empty() && defs.iter().all(|(file, def)| def.strict.is_none() && by_default(*file)))
     }
 
-    /// The fields of `class` and its parents that are keyed by an integer or boolean literal, like
-    /// `---@field [1] number`, with their values and the files that declare them. The first
-    /// declaration of a key wins, as with named fields.
-    fn literal_fields(&self, class: &str, from: FileId) -> Vec<(Type, Type, FileId)> {
+    /// The fields of `class`, given the type arguments `args`, and of its parents that are keyed by
+    /// an integer or boolean literal, like `---@field [1] number`, with their values and the files
+    /// that declare them. The first declaration of a key wins, as with named fields.
+    fn literal_fields(&self, class: &str, args: &[Type], from: FileId) -> Vec<(Type, Type, FileId)> {
         let mut out = Vec::new();
-        self.collect_literal_fields(class, from, &mut out, 0);
+        self.collect_literal_fields(class, args, from, &mut out, 0);
         out
     }
 
-    fn collect_literal_fields(&self, class: &str, from: FileId, out: &mut Vec<(Type, Type, FileId)>, depth: u32) {
+    fn collect_literal_fields(
+        &self,
+        class: &str,
+        args: &[Type],
+        from: FileId,
+        out: &mut Vec<(Type, Type, FileId)>,
+        depth: u32,
+    ) {
         if depth > MAX_DEPTH {
             return;
         }
         let defs = self.class_defs(class, from);
+        let bindings = class_bindings(&defs, args);
         for (file, def) in &defs {
             for (key, value) in def.literal_fields(self.infer.side()) {
                 if !out.iter().any(|(seen, ..)| seen == key) {
-                    out.push((key.clone(), value.clone(), *file));
+                    out.push((key.clone(), substitute(value, &bindings), *file));
                 }
             }
         }
         for (file, def) in &defs {
-            for parent in &def.parents {
-                self.collect_literal_fields(parent, *file, out, depth + 1);
+            for parent in &def.parent_types {
+                if let Type::Named(parent, args) = substitute(parent, &bindings) {
+                    self.collect_literal_fields(&parent, &args, *file, out, depth + 1);
+                }
             }
         }
     }
@@ -318,17 +343,21 @@ impl<'a, 'b> Classes<'a, 'b> {
     pub fn declares(&self, class: &str, from: FileId, key: &Key) -> bool {
         let named = match key {
             Key::Name(name) => {
-                self.fields(class, from).iter().any(|field| field.name == *name)
+                self.fields(class, &[], from).iter().any(|field| field.name == *name)
                     || self.members_declare(class, from, name, 0)
             }
             Key::Typed(ty) => self.kinds(ty, self.file(), 0).is_none_or(|kinds| kinds & kind::STRING != 0),
         };
+        let literal_fields = || self.literal_fields(class, &[], from);
         let literal = match key {
-            Key::Typed(ty) if ty.is_literal() => self.literal_fields(class, from).iter().any(|(key, ..)| key == ty),
-            Key::Typed(ty) => self.literal_fields(class, from).iter().any(|(key, _, file)| self.takes(key, *file, ty)),
+            Key::Typed(ty) if ty.is_literal() => literal_fields().iter().any(|(key, ..)| key == ty),
+            Key::Typed(ty) => literal_fields().iter().any(|(key, _, file)| self.takes(key, *file, ty)),
             Key::Name(_) => false,
         };
-        named || literal || self.index_for(class, from, &key.ty(), 0).is_some() || self.has_open_parent(class, from, 0)
+        named
+            || literal
+            || self.index_for(class, &[], from, &key.ty(), 0).is_some()
+            || self.has_open_parent(class, from, 0)
     }
 
     /// Whether the table that the `---@class` annotation of `class` or a parent declares sets `name`.
@@ -351,37 +380,44 @@ impl<'a, 'b> Classes<'a, 'b> {
             || defs.iter().any(|(file, def)| def.parents.iter().any(|p| self.has_open_parent(p, *file, depth + 1)))
     }
 
-    /// The type that `key` of a `class` table holds, with the file whose view of the type names it
-    /// is read with: the `@field` of a name or of a literal like `[1]`, or else the value of an
-    /// index that takes the key. A key such as `integer` that may be several fields has no one type.
-    pub fn field_type(&self, class: &str, from: FileId, key: &Key) -> Option<(Type, FileId)> {
+    /// The type that `key` of a `class` table holds, given the type arguments `args` of the class,
+    /// with the file whose view of the type names it is read with: the `@field` of a name or of a
+    /// literal like `[1]`, or else the value of an index that takes the key. A key such as `integer`
+    /// that may be several fields has no one type.
+    pub fn field_type(&self, class: &str, args: &[Type], from: FileId, key: &Key) -> Option<(Type, FileId)> {
         let field = match key {
             Key::Name(name) => {
-                self.fields(class, from).into_iter().find(|field| field.name == *name).map(|f| (f.ty, f.file))
+                self.fields(class, args, from).into_iter().find(|field| field.name == *name).map(|f| (f.ty, f.file))
             }
             Key::Typed(ty) if ty.is_literal() => {
-                self.literal_fields(class, from).into_iter().find(|(key, ..)| key == ty).map(|(_, v, file)| (v, file))
+                let mut fields = self.literal_fields(class, args, from).into_iter();
+                fields.find(|(key, ..)| key == ty).map(|(_, v, file)| (v, file))
             }
             Key::Typed(_) => None,
         };
-        field.or_else(|| self.index_for(class, from, &key.ty(), 0))
+        field.or_else(|| self.index_for(class, args, from, &key.ty(), 0))
     }
 
-    /// The value type of the first index of `class` or a parent that takes keys of type `key`,
-    /// inferred in this file, with the file that declares it.
-    fn index_for(&self, class: &str, from: FileId, key: &Type, depth: u32) -> Option<(Type, FileId)> {
+    /// The value type of the first index of `class`, given the type arguments `args`, or of a parent
+    /// that takes keys of type `key`, inferred in this file, with the file that declares it.
+    fn index_for(&self, class: &str, args: &[Type], from: FileId, key: &Type, depth: u32) -> Option<(Type, FileId)> {
         if depth > MAX_DEPTH {
             return None;
         }
         let defs = self.class_defs(class, from);
+        let bindings = class_bindings(&defs, args);
         let own = defs.iter().find_map(|(file, def)| {
             let mut indices = def.indices(self.infer.side()).into_iter();
-            let (_, value) = indices.find(|(index_key, _)| self.takes(index_key, *file, key))?;
-            Some((value.clone(), *file))
+            let (_, value) =
+                indices.find(|(index_key, _)| self.takes(&substitute(index_key, &bindings), *file, key))?;
+            Some((substitute(value, &bindings), *file))
         });
         own.or_else(|| {
-            let mut parents = defs.iter().flat_map(|(file, def)| def.parents.iter().map(move |p| (p, *file)));
-            parents.find_map(|(parent, file)| self.index_for(parent, file, key, depth + 1))
+            let mut parents = defs.iter().flat_map(|(file, def)| def.parent_types.iter().map(move |p| (p, *file)));
+            parents.find_map(|(parent, file)| match substitute(parent, &bindings) {
+                Type::Named(parent, args) => self.index_for(&parent, &args, file, key, depth + 1),
+                _ => None,
+            })
         })
     }
 
@@ -696,7 +732,7 @@ pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
             let ExprKind::Table(fields) = &found.table.kind else { return None };
             let given: Vec<&str> = fields.iter().filter_map(named_field).map(|(name, _)| name).collect();
             let missing: Vec<String> = classes
-                .fields(&found.class, found.from)
+                .fields(&found.class, &found.args, found.from)
                 .iter()
                 .filter(|field| !classes.admits_nil(&field.ty, field.file) && !given.contains(&field.name.as_str()))
                 .map(|field| format!("`{}`", field.name))
@@ -714,8 +750,8 @@ pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
 pub fn mismatched_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
     let mut out = Vec::new();
-    let mut check = |class: &str, from: FileId, key: &Key, value: &Expr| {
-        let Some((ty, file)) = classes.field_type(class, from, key) else { return };
+    let mut check = |class: &str, args: &[Type], from: FileId, key: &Key, value: &Expr| {
+        let Some((ty, file)) = classes.field_type(class, args, from, key) else { return };
         let given = classes.value_type(value);
         if classes.rejects(&ty, file, &given) {
             let shown = if classes.literal_mismatch(&ty, file, &given) { given } else { given.widen() };
@@ -730,14 +766,14 @@ pub fn mismatched_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
         let ExprKind::Table(fields) = &found.table.kind else { continue };
         for (key, _, value) in entries(infer, fields) {
             if let Some(value) = value {
-                check(&found.class, found.from, &key, value);
+                check(&found.class, &found.args, found.from, &key, value);
             }
         }
     }
     for access in accesses(infer, chunk, false) {
         // `value.field = nil` clears a field only when its type allows `nil`, as `string?` does.
-        if let (Some(value), Some(class)) = (access.value, classes.class_of(&access.owner, classes.file())) {
-            check(&class, classes.file(), &access.key, value);
+        if let (Some(value), Some((class, args))) = (access.value, classes.class_of(&access.owner, classes.file())) {
+            check(&class, &args, classes.file(), &access.key, value);
         }
     }
     out
@@ -759,12 +795,12 @@ impl<'c> Finder<'_, '_, 'c> {
     fn table(&mut self, expected: &Type, expr: &'c Expr, from: FileId, depth: u32) {
         let table = expr.unparen();
         let ExprKind::Table(fields) = &table.kind else { return };
-        let Some(class) = self.classes.class_of(expected, from) else { return };
-        self.out.push(ClassTable { class: class.clone(), table, from });
+        let Some((class, args)) = self.classes.class_of(expected, from) else { return };
+        self.out.push(ClassTable { class: class.clone(), args: args.clone(), table, from });
         if depth < MAX_DEPTH {
             for (key, _, value) in entries(self.classes.infer, fields) {
                 let Some(value) = value.filter(|value| is_table(value)) else { continue };
-                if let Some((ty, file)) = self.classes.field_type(&class, from, &key) {
+                if let Some((ty, file)) = self.classes.field_type(&class, &args, from, &key) {
                     self.table(&ty, value, file, depth + 1);
                 }
             }
