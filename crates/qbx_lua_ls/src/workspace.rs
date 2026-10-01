@@ -299,6 +299,27 @@ impl Workspace {
         id
     }
 
+    /// Indexes a document open in the editor. Its symbols are inferred with what the index held for
+    /// the file, so when it declares other classes or aliases now, as one indexed for the first time
+    /// does, a second pass reads them, as the scan's second pass does for every file, and the
+    /// methods of `---@class Name` `Name = {}` see the class.
+    pub fn index_document(
+        &mut self,
+        path: &Path,
+        source: &str,
+        chunk: &qbx_lua_syntax::ast::Chunk,
+        resolution: &qbx_lua_analysis::scope::Resolution,
+    ) -> FileId {
+        let id = self.index.allocate(path);
+        let declared = |ws: &Self| ws.index.file(id).map(|file| declared_types(&file.index)).unwrap_or_default();
+        let before = declared(self);
+        self.index_parsed(path, FileOrigin::Workspace, source, chunk, resolution);
+        if declared(self) != before {
+            self.index_parsed(path, FileOrigin::Workspace, source, chunk, resolution);
+        }
+        id
+    }
+
     /// Where a definition file outside any resource applies: on the side a `side` override, or else
     /// the name of the file or of its nearest folder that names one, gives it, and for the resource
     /// that the nearest folder named after one stands for. Folders above the workspace or library
@@ -414,6 +435,17 @@ impl Workspace {
         }
         refs
     }
+}
+
+/// The classes and aliases that a file declares. Its globals and members are left out, since typing
+/// a new `Config.Foo` changes them on every key.
+fn declared_types(index: &FileIndex) -> Vec<(&'static str, SmolStr)> {
+    let classes = index.classes.iter().map(|class| ("@class", class.name.clone()));
+    let aliases = index.aliases.iter().map(|alias| ("@alias", alias.name.clone()));
+    let mut names: Vec<(&'static str, SmolStr)> = classes.chain(aliases).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 /// The side the name of a file or folder gives, as `server_vehicle.lua`, `cl_main.lua` or a `client`

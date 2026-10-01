@@ -340,8 +340,7 @@ impl Server {
                 let is_source = !qbx_lua_analysis::project::is_not_source(doc.text.as_bytes());
                 if !doc.is_manifest() && is_source && !self.ws.lint_config.is_excluded(&doc.path) {
                     relink |= self.ws.index.file(doc.file).is_none();
-                    doc.file =
-                        self.ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution);
+                    doc.file = self.ws.index_document(&doc.path, &doc.text, &doc.chunk, &doc.resolution);
                 }
             }
         }

@@ -3777,6 +3777,49 @@ return {
 }
 
 #[test]
+fn files_see_the_classes_they_declare_as_soon_as_they_are_indexed() {
+    let mut client = Client::start(fixture_root());
+    // The global table `Test{name}` of the class `Test.{name}`, with methods that return `self`.
+    let source = |name: &str, declared: bool| {
+        let class = if declared { format!("---@class Test.{name}\n") } else { String::new() };
+        format!(
+            "{class}Test{name} = {{}}
+
+---@return self
+function Test{name}:chain() return self end
+function Test{name}:inferred() return self end
+
+---@type Test.{name}
+local value = {{}}
+local chained = value:chain()
+local inferred = value:inferred()
+"
+        )
+    };
+    let assert_methods_return = |client: &mut Client, file: &str, text: &str, class: &str| {
+        for needle in ["chained", "inferred"] {
+            let (l, c) = pos(text, &format!("local {needle}"), 6);
+            let hover = client.hover_text(file, l, c);
+            assert!(hover.contains(&format!("{needle}: {class}")), "{file}: expected {class} in {hover}");
+        }
+    };
+
+    // A file that is not on disk is indexed for the first time when it is opened.
+    let fresh = "myresource/client/fresh.lua";
+    let text = source("Fresh", true);
+    client.open_with(fresh, &text);
+    assert_methods_return(&mut client, fresh, &text, "Test.Fresh");
+
+    // An edit that declares the class takes effect without another edit.
+    let edited = "myresource/client/edited.lua";
+    client.open_with(edited, &source("Edited", false));
+    client.hover_text(edited, 0, 0);
+    let text = source("Edited", true);
+    client.change(edited, 2, &text);
+    assert_methods_return(&mut client, edited, &text, "Test.Edited");
+}
+
+#[test]
 fn backtick_generics_bind_the_type_a_string_names() {
     let mut client = Client::start(fixture_root());
     let text = "\

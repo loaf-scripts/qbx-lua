@@ -348,6 +348,32 @@ fn configured_exact_imports_respect_exclusions() {
 }
 
 #[test]
+fn open_documents_alone_are_indexed_again_for_the_classes_they_declare() {
+    let fixture = Fixture::new();
+    fixture.write("demo/fxmanifest.lua", "client_script '*.lua'\n");
+    let mut ws = fixture.workspace("demo");
+    // What `Demo{name}:chain()` returns, as the index holds it after indexing the file once.
+    let mut chained = |name: &str, document: bool| -> String {
+        let path = fixture.0.join(format!("demo/{name}.lua"));
+        let text = format!(
+            "---@class Demo.{name}\nDemo{name} = {{}}\n\n---@return self\nfunction Demo{name}:chain() return self end\n"
+        );
+        let doc = Document::new(path_to_uri(&path), path, 1, text);
+        let file = match document {
+            true => ws.index_document(&doc.path, &doc.text, &doc.chunk, &doc.resolution),
+            false => ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution),
+        };
+        let index = &ws.index.file(file).unwrap().index;
+        let chain = index.members.iter().find(|member| member.symbol.name == "chain").unwrap();
+        chain.symbol.ty.as_fun().unwrap().returns[0].to_string()
+    };
+    assert_eq!(chained("Opened", true), "Demo.Opened");
+    // The scan reads every file again once it has read them all, so each of its passes reads a
+    // file once.
+    assert_ne!(chained("Scanned", false), "Demo.Scanned");
+}
+
+#[test]
 fn manual_reindex_restores_unsaved_documents_and_their_new_file_ids() {
     let fixture = Fixture::new();
     fixture.write("demo/fxmanifest.lua", "client_script '*.lua'");
