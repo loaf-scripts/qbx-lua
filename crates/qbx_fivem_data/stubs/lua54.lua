@@ -310,8 +310,8 @@ function debug.gethook(co) end
 ---Returns a table describing a function or a stack level. `what` selects which groups of fields get filled in.
 ---@param f integer|function
 ---@param what? string
----@return debuginfo? info
----@overload fun(thread: thread, f: integer|function, what?: string): debuginfo?
+---@return debuginfo info
+---@overload fun(thread: thread, f: integer|function, what?: string): debuginfo
 ---@nodiscard
 function debug.getinfo(f, what) end
 

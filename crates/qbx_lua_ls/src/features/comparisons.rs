@@ -9,11 +9,14 @@
 //! as well: annotations often leave out the `?` of a value that may be missing, and the check for
 //! it is deliberate.
 
+use std::cell::{OnceCell, RefCell};
+
 use qbx_fivem_data::native;
 use qbx_lua_analysis::scope::{Local, LocalId, Resolved};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
+use rustc_hash::FxHashMap;
 
 use super::class_tables::{Classes, Key};
 use super::unknown_types::has_param_line;
@@ -42,11 +45,21 @@ pub struct Declared<'a, 'b> {
     classes: Classes<'a, 'b>,
     /// Whether a local that is assigned again keeps the type its annotation gives it.
     keeps_annotations: bool,
+    /// Where the expression that each `--[[@as T]]` casts starts, by where it ends.
+    cast_starts: OnceCell<FxHashMap<u32, u32>>,
+    /// The types the locals read so far are declared with.
+    declarations: RefCell<FxHashMap<LocalId, Type>>,
 }
 
 impl<'a, 'b> Declared<'a, 'b> {
     pub fn new(infer: &'a Infer<'b>) -> Self {
-        Self { infer, classes: Classes::new(infer), keeps_annotations: false }
+        Self {
+            infer,
+            classes: Classes::new(infer),
+            keeps_annotations: false,
+            cast_starts: OnceCell::new(),
+            declarations: RefCell::default(),
+        }
     }
 
     /// Takes the `---@type` or `@param` of a local at its word, also where the local is assigned
@@ -64,6 +77,10 @@ impl<'a, 'b> Declared<'a, 'b> {
     fn declared(&self, expr: &Expr, depth: u32) -> Type {
         if depth > MAX_DEPTH {
             return Type::Unknown;
+        }
+        // `local node = self.tail --[[@as LruNode]]` declares what the field holds there.
+        if let Some(cast) = self.cast(expr) {
+            return cast;
         }
         let expr = expr.unparen();
         match &expr.kind {
@@ -108,11 +125,26 @@ impl<'a, 'b> Declared<'a, 'b> {
         }
     }
 
+    /// The type that a `--[[@as T]]` after `expr` casts it to. The comment casts the whole
+    /// expression before it, so `s` keeps its own type in `'id:' .. s --[[@as string]]`.
+    fn cast(&self, expr: &Expr) -> Option<Type> {
+        let cast = self.infer.cast_after(expr.span.end)?;
+        let starts = self.cast_starts.get_or_init(|| {
+            let mut finder = CastTargets { infer: self.infer, starts: FxHashMap::default() };
+            finder.visit_block(&self.infer.ctx.chunk.block);
+            finder.starts
+        });
+        (starts.get(&expr.span.end) == Some(&expr.span.start)).then_some(cast)
+    }
+
     /// The type of a local where it is read at `offset`. One that is assigned again after its
     /// declaration is `unknown`, since its declared type may not be what it holds, unless a
     /// `---@cast` line types it. A `+T` entry adds to a type, so one that is not known stays so.
     fn local(&self, id: LocalId, offset: u32, depth: u32) -> Type {
-        let ty = self.local_declaration(id, depth);
+        let ty = match depth {
+            0 => self.declaration(id),
+            _ => self.local_declaration(id, depth),
+        };
         let typed = || {
             let mut casts = self.infer.ctx.casts().at(id, offset);
             casts.any(|cast| cast.entries.iter().any(|(entry, _)| matches!(entry, CastEntry::Replace(_))))
@@ -126,7 +158,12 @@ impl<'a, 'b> Declared<'a, 'b> {
     /// The type a local is declared with, without what the guards and casts after its declaration
     /// tell.
     pub fn declaration(&self, id: LocalId) -> Type {
-        self.local_declaration(id, 0)
+        if let Some(ty) = self.declarations.borrow().get(&id) {
+            return ty.clone();
+        }
+        let ty = self.local_declaration(id, 0);
+        self.declarations.borrow_mut().insert(id, ty.clone());
+        ty
     }
 
     fn local_declaration(&self, id: LocalId, depth: u32) -> Type {
@@ -246,6 +283,23 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
                 let answer = if *op == BinOp::Eq { "false" } else { "true" };
                 self.out.push((expr.span, format!("Comparing `{left}` with `{right}` is always {answer}")));
             }
+        }
+        visit::walk_expr(self, expr);
+    }
+}
+
+/// Finds the expressions that `--[[@as T]]` comments cast: of those that end where one starts,
+/// the outermost.
+struct CastTargets<'a, 'b> {
+    infer: &'a Infer<'b>,
+    starts: FxHashMap<u32, u32>,
+}
+
+impl<'c> Visitor<'c> for CastTargets<'_, '_> {
+    fn visit_expr(&mut self, expr: &'c Expr) {
+        if self.infer.cast_after(expr.span.end).is_some() {
+            let start = self.starts.entry(expr.span.end).or_insert(expr.span.start);
+            *start = (*start).min(expr.span.start);
         }
         visit::walk_expr(self, expr);
     }

@@ -18,6 +18,7 @@ pub mod hover;
 pub mod inlay;
 pub mod member_refs;
 mod native_argument;
+pub mod nil_checks;
 pub mod nui_resource;
 pub mod on_type;
 pub mod reference;

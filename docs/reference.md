@@ -100,7 +100,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `no-unknown` and `need-check-nil`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
@@ -701,6 +701,84 @@ types of the field's `fun(...)` when the table has a declared type: the `---@typ
 later assignments are not followed. Names that start with `ignore_unused_prefix`, and `self`, are
 not reported. To check only your own resources, set the level in an `[[overrides]]` entry instead
 of `[rules]`.
+
+## Nil checks
+
+`need-check-nil` reports a local that may hold `nil` where code indexes it, calls it, stores a value
+under it as a key, uses it in arithmetic, concatenation, `#` or a `<`, `<=`, `>` or `>=` comparison,
+or gives it as a bound of a numeric `for`, all of which raise an error for a missing value, as
+TypeScript and lua-language-server do. `==` and `~=` compare any values and are not reported. To
+turn it off:
+
+```toml
+[rules]
+"need-check-nil" = "off"
+```
+
+```lua
+---@return string?
+local function GetName() end
+
+local name = GetName()
+print(name:upper()) -- `name` may be nil: its type here is `string?`
+print(name:lower()) -- the read above raises the error first
+```
+
+A local may hold `nil` when its declared type allows it: its `---@type` or `@param`, or the
+`@return` or `@field` of the function or class its value comes from, whoever declares them,
+stubs and other resources included. `false`, as in `false|string`, counts as well. The
+[type guards](../crates/qbx_lua_ls/README.md#type-guards) and casts around the read narrow the
+type first, so `if not name then return end`, `if name then`, `name and name:upper()`,
+`assert(name)` and `---@cast name -?` all check it, as does a condition that reads from it, such as
+`if player?.job then` for `player`. `?.`, `?[` and `?:` give `nil` for a missing value and are not
+reported. Guards that together rule out every value of the type, as
+`round and (round == true or i < round)` does for a `boolean?`, keep the type whole, but the `nil`
+that `round and` rules out stays out.
+
+A local that may hold `nil` is reported as well where a call passes it for a parameter that does not
+take `nil`, in every signature the call may use as `param-type-mismatch` reads them. A parameter
+takes `nil` when it is optional, as `label?`, or its type allows it or any value, as `string?`,
+`any` or a generic do. Natives are left out, and so is an argument of another type than the
+parameter takes, which `param-type-mismatch` reports:
+
+```lua
+---@param target Player
+local function greet(target) end
+
+local player = GetPlayer() -- Player?
+greet(player) -- `player` may be nil, which parameter `target` of type `Player` does not take: ...
+```
+
+lua-language-server reports such an argument as a `param-type-mismatch`, so a
+`---@diagnostic disable` comment for that rule silences it too.
+
+Only clear cases count, and the rest is left alone:
+
+- Fields and the values of calls, which guards do not narrow:
+  `if self.target then self.target:kill() end` would be reported otherwise.
+- A local that is assigned again after its declaration, unless a `---@cast name T` types it.
+  `name = name or 'none'` is how code fills in a missing value.
+- A value of a call that a guard on another of its values covers. After
+  `local vehicle, coords = lib.getClosestVehicle(pos)` and `if not vehicle then return end`,
+  `coords` is not reported: annotations declare such values one by one, rather than as
+  [sets of values](../crates/qbx_lua_ls/README.md#sets-of-returned-values).
+- What a call gives for `source` alone, or for a local that holds it, as
+  `ESX.GetPlayerFromId(source)` or `exports.qbx_core:GetPlayer(src)` after `local src = source`:
+  lookups of the player whose event or callback runs only miss one that has just left.
+  `ESX.GetPlayerFromId(target)` is reported.
+- Reads after one reported in the same function, which points at the same missing check.
+- Reads after one that always runs before them. Once `name:upper()` has run without an error,
+  `name` held a value, so the reads after it in its block are not reported, including those in
+  functions defined there. A read inside an `if` branch, on the right of `and` and `or`, or in the
+  condition of a `repeat` loop that a `break` can leave, does not count for the code after it.
+
+Guards only narrow the code after them, so a read inside a function defined before the guard is
+reported, as `return name:upper()` is in a `local function` above `if not name then return end`:
+the function may run before the guard does. lua-language-server reports it as well.
+
+Unlike lua-language-server, qbx-lua-ls also checks arithmetic, concatenation, `#`, `<`, `<=`, `>`,
+`>=` and `for` bounds, leaves alone the lookups of `source` above, and reports a local once per
+function rather than at every read.
 
 ## Events, exports, and locales
 

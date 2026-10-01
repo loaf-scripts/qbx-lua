@@ -3560,6 +3560,310 @@ check()
 }
 
 #[test]
+fn reads_of_locals_that_may_be_nil_are_reported() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Holder
+---@field name string
+---@field job string?
+
+---@return Probe.Holder?
+local function GetHolder() end
+
+---@return number? vehicle
+---@return vector3? coords
+local function GetClosest() end
+
+---@return string?
+local function GetName() end
+
+---@param id integer
+---@param label? string
+---@param done? fun()
+---@param list string[]?
+---@param state false|string
+local function handle(id, label, done, list, state)
+    local holder = GetHolder()
+    print(holder.name)
+    print(holder.job)
+    print(label:upper())
+    done()
+    print(#list)
+    print(state:upper())
+    local amount = tonumber('5')
+    print(amount + 1)
+    local key = GetHolder()
+    local seen = {}
+    seen[key] = true
+    local branch = GetHolder()
+    if id > 1 then
+        print(branch.name)
+    end
+    local function afterBranch() return branch.name end
+    local always = GetHolder()
+    print(always.name)
+    local function afterRead() return always.job end
+    local twice = GetHolder()
+    if id > 2 then print(twice.name) else print(twice.job) end
+    local count = tonumber('5')
+    if count > 0 then print(count * 2) end
+    local limit = tonumber('5')
+    for i = 1, limit do print(i) end
+    local equal = tonumber('5')
+    print(equal == 0)
+    local suffix = GetName()
+    print('id:' .. suffix --[[@as string]])
+    local looped = GetName()
+    repeat
+        if id > 3 then break end
+    until looped:upper()
+    local function afterLoop() return looped:lower() end
+    local ended = GetName()
+    repeat until ended:upper()
+    local function afterEnd() return ended:lower() end
+
+    local guarded = GetHolder()
+    if not guarded then return end
+    print(guarded.name)
+    local inside = GetHolder()
+    if inside then print(inside.name) end
+    local either = GetHolder()
+    print(either and either.name)
+    local asserted = GetHolder()
+    assert(asserted)
+    print(asserted.name)
+    local safe = GetHolder()
+    print(safe?.name)
+    if safe?.job then print(safe.name) end
+    local cast = GetHolder()
+    ---@cast cast -?
+    print(cast.name)
+    local forced = GetHolder() --[[@as Probe.Holder]]
+    print(forced.name)
+    local filled = GetHolder()
+    filled = filled or { name = 'none' }
+    print(filled.name)
+    local vehicle, coords = GetClosest()
+    if not vehicle then return end
+    print(coords.x)
+    print(guarded.job:upper())
+    print(GetHolder().name)
+    local quiet = GetHolder()
+    ---@diagnostic disable-next-line: need-check-nil
+    print(quiet.name)
+end
+handle(1)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("need-check-nil".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [
+            finding("holder.name", "`holder` may be nil: its type here is `Probe.Holder?`"),
+            finding("label:upper", "`label` may be nil: its type here is `string?`"),
+            finding("done()", "`done` may be nil: its type here is `(fun())?`"),
+            finding("#list", "`list` may be nil: its type here is `string[]?`"),
+            finding("state:upper", "`state` may be false: its type here is `false|string`"),
+            finding("amount + 1", "`amount` may be nil: its type here is `number?`"),
+            finding("seen[key]", "`key` may be nil: its type here is `Probe.Holder?`"),
+            finding("print(branch.name)", "`branch` may be nil: its type here is `Probe.Holder?`"),
+            // The read inside the `if` does not always run.
+            finding("return branch.name", "`branch` may be nil: its type here is `Probe.Holder?`"),
+            finding("print(always.name)", "`always` may be nil: its type here is `Probe.Holder?`"),
+            finding("print(twice.name)", "`twice` may be nil: its type here is `Probe.Holder?`"),
+            finding("count > 0", "`count` may be nil: its type here is `number?`"),
+            finding("1, limit", "`limit` may be nil: its type here is `number?`"),
+            // The cast is of the whole concatenation.
+            finding("'id:' .. suffix", "`suffix` may be nil: its type here is `string?`"),
+            finding("until looped", "`looped` may be nil: its type here is `string?`"),
+            // The `break` leaves the loop without running the condition.
+            finding("return looped", "`looped` may be nil: its type here is `string?`"),
+            finding("until ended", "`ended` may be nil: its type here is `string?`"),
+        ],
+        "reads that guards, casts, an earlier read or a guarded value of the same call cover are left alone, \
+         and so are reads after one reported in the same function, locals assigned again, fields and the \
+         values of calls"
+    );
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "need-check-nil": "off" } } } } }),
+    );
+    assert!(findings(&mut client, CLIENT, &["need-check-nil"]).is_empty(), "the rule can be turned off");
+}
+
+#[test]
+fn nil_checks_leave_alone_values_the_code_relies_on() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Member
+---@field name string
+
+---@param id integer
+---@return Probe.Member?
+local function GetMember(id) end
+
+---@param id integer
+---@param slot integer
+---@return Probe.Member?
+local function GetSlot(id, slot) end
+
+local shared = GetMember(1)
+
+local function first()
+    print(shared.name)
+end
+
+RegisterNetEvent('probe:event', function(target)
+    local src = source
+    local member = GetMember(source)
+    print(member.name)
+    local same = GetMember(src)
+    print(same.name)
+    local other = GetMember(target)
+    print(other.name)
+    local slot = GetSlot(source, 1)
+    print(slot.name)
+end)
+first()
+";
+    client.open_with(CLIENT, text);
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "need-check-nil": "warning" } } } } }),
+    );
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("need-check-nil".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [
+            // A local declared outside any function is checked like any other.
+            finding("print(shared.name)", "`shared` may be nil: its type here is `Probe.Member?`"),
+            finding("print(other.name)", "`other` may be nil: its type here is `Probe.Member?`"),
+            finding("print(slot.name)", "`slot` may be nil: its type here is `Probe.Member?`"),
+        ],
+        "what a call gives for `source` alone is left alone"
+    );
+}
+
+#[test]
+fn nil_checks_leave_alone_missing_values_the_guards_rule_out() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param round? boolean
+---@param mode? 'open'|'close'
+---@param label? string
+local function scale(round, mode, label)
+    local i = 0
+    print(round and (round == true or i < round))
+    if mode and mode ~= 'open' and mode ~= 'close' then print(mode:upper()) end
+    if label ~= 'x' and label ~= 'y' then print(label:upper()) end
+end
+scale()
+";
+    client.open_with(CLIENT, text);
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "need-check-nil": "warning" } } } } }),
+    );
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [(
+            "need-check-nil".to_string(),
+            pos(text, "label:upper", 0).0 as u64,
+            "`label` may be nil: its type here is `string?`".to_string()
+        )],
+        "guards that rule out every value of the type keep it whole, but not the `nil` they rule out"
+    );
+}
+
+#[test]
+fn nil_checks_report_values_passed_for_parameters_that_do_not_take_nil() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Target
+---@field name string
+
+---@return Probe.Target?
+local function GetTarget() end
+
+---@return number?
+local function GetHandle() end
+
+---@param target Probe.Target
+local function greet(target) end
+---@param target? Probe.Target
+local function maybeGreet(target) end
+---@param label Probe.Target|nil
+local function show(label) end
+---@generic T
+---@param value T
+local function keep(value) end
+---@param n number
+local function needsNumber(n) end
+---@param target Probe.Target
+---@overload fun(target: nil)
+local function either(target) end
+local Box = {}
+---@param target Probe.Target
+function Box:put(target) end
+
+local function run()
+    local missing = GetTarget()
+    greet(missing)
+    local optional = GetTarget()
+    maybeGreet(optional)
+    local nilable = GetTarget()
+    show(nilable)
+    local generic = GetTarget()
+    keep(generic)
+    local wrong = GetTarget()
+    needsNumber(wrong)
+    local overloaded = GetTarget()
+    either(overloaded)
+    local stored = GetTarget()
+    Box:put(stored)
+    local guarded = GetTarget()
+    if guarded then greet(guarded) end
+    local read = GetTarget()
+    print(read.name)
+    greet(read)
+    local handle = GetHandle()
+    SetEntityHeading(handle, 1.0)
+    local printed = GetTarget()
+    print(printed)
+    local suppressed = GetTarget()
+    ---@diagnostic disable-next-line: param-type-mismatch
+    greet(suppressed)
+end
+run()
+";
+    client.open_with(CLIENT, text);
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "need-check-nil": "warning" } } } } }),
+    );
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("need-check-nil".to_string(), line(needle), message.to_string());
+    let passed = |local: &str| {
+        format!(
+            "`{local}` may be nil, which parameter `target` of type `Probe.Target` does not take: its type here is \
+             `Probe.Target?`"
+        )
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [
+            finding("greet(missing)", &passed("missing")),
+            finding("Box:put(stored)", &passed("stored")),
+            finding("print(read.name)", "`read` may be nil: its type here is `Probe.Target?`"),
+        ],
+        "parameters that are optional or take nil, any value or a generic, overloads that take nil, guards, \
+         earlier reads, natives, arguments of another type and suppressed `param-type-mismatch` are left alone"
+    );
+}
+
+#[test]
 fn rule_levels_of_the_config_file_win_over_the_client_settings() {
     struct Fixture(PathBuf);
     impl Drop for Fixture {

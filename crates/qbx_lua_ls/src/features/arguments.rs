@@ -67,27 +67,13 @@ impl<'c> Visitor<'c> for Calls<'_, '_> {
 
 impl Calls<'_, '_> {
     fn check(&mut self, call: &Expr, base: &Expr, method: Option<&Name>, args: &[Expr]) {
-        if args.is_empty() || (method.is_none() && self.declared.is_native(base, 0)) {
-            return;
-        }
-        // In `require 'name' --[[@as T]]`, the cast after the argument is that of the call.
-        if args.last().is_some_and(|arg| arg.span.end == call.span.end)
-            && self.infer.cast_after(call.span.end).is_some()
-        {
-            return;
-        }
-        let via_colon = method.is_some();
-        let at = base.span.start;
-        let signatures: Vec<Arc<FunType>> = definitions(self.infer, base, method)
-            .iter()
-            .flat_map(|fun| self.infer.call_signatures(fun, args, via_colon, at).0)
-            .collect();
+        let signatures = signatures(self.infer, &self.declared, call, base, method, args);
         if signatures.is_empty() {
             return;
         }
         let values: Vec<Type> = args.iter().map(|arg| self.value(arg)).collect();
         let signatures: Vec<&FunType> = signatures.iter().map(Arc::as_ref).collect();
-        self.compare(&signatures, via_colon, args, &values);
+        self.compare(&signatures, method.is_some(), args, &values);
     }
 
     /// The declared type of an argument, or the type a `--[[@as T]]` right after it gives it.
@@ -99,20 +85,8 @@ impl Calls<'_, '_> {
     /// them takes them all. Only the signatures that take as many arguments as the call passes count,
     /// unless none does.
     fn compare(&mut self, signatures: &[&FunType], via_colon: bool, args: &[Expr], values: &[Type]) {
-        let infer = self.infer;
-        let alias = |name: &str| infer.index.alias(name, infer.side()).map(|(_, alias)| &alias.ty);
-        // A call or `...` at the end passes as many values as it gives.
-        let open_ended = args.last().is_some_and(Expr::is_multi_value);
-        let takes_count = |fun: &FunType| {
-            most_arguments(fun, via_colon).is_none_or(|most| args.len() <= most)
-                && (open_ended || args.len() >= Requirement::of(fun, via_colon, &alias).arguments)
-        };
-        let mut candidates: Vec<&FunType> = signatures.iter().copied().filter(|fun| takes_count(fun)).collect();
-        if candidates.is_empty() {
-            candidates = signatures.to_vec();
-        }
         let mut closest: Option<Vec<(Span, String)>> = None;
-        for fun in candidates {
+        for fun in candidates(self.infer, signatures, via_colon, args) {
             let found = self.mismatches(fun, via_colon, args, values);
             if found.is_empty() {
                 return;
@@ -124,57 +98,109 @@ impl Calls<'_, '_> {
         self.out.extend(closest.unwrap_or_default());
     }
 
-    /// Each of `args` that the parameter of `fun` it goes to does not take. A `:` call passes its
-    /// receiver to the first parameter of a function not defined with `:`, as Lua does, and a `.`
-    /// call passes the `self` of one defined with `:` first.
+    /// Each of `args` that the parameter of `fun` it goes to does not take.
     fn mismatches(&self, fun: &FunType, via_colon: bool, args: &[Expr], values: &[Type]) -> Vec<(Span, String)> {
-        let (skip_params, skip_args) = match (via_colon, fun.is_method) {
-            (true, false) => (1, 0),
-            (false, true) => (0, 1),
-            _ => (0, 0),
-        };
-        let params = fun.params.get(skip_params..).unwrap_or_default();
-        let rest = params.last().filter(|param| param.name == "...");
-        let mut out = Vec::new();
-        for (i, (arg, given)) in args.iter().zip(values).enumerate().skip(skip_args) {
-            let param = match params.get(i - skip_args) {
-                Some(param) if param.name != "..." => param,
-                _ => match rest {
-                    Some(rest) => rest,
-                    None => break,
-                },
-            };
-            if let Some(message) = self.mismatch(fun, param, given) {
-                out.push((arg.span, message));
-            }
-        }
-        out
+        let passed = args.iter().zip(values).enumerate();
+        passed
+            .filter_map(|(i, (arg, given))| {
+                let message = mismatch(&self.classes, fun, param_for(fun, via_colon, i)?, given)?;
+                Some((arg.span, message))
+            })
+            .collect()
     }
+}
 
-    /// The message for a value of type `given` that `param` does not take.
-    fn mismatch(&self, fun: &FunType, param: &Param, given: &Type) -> Option<String> {
-        let expected = match &param.ty {
-            Type::Variadic(inner) => inner,
-            ty => ty,
-        };
-        let given = given.without_nil();
-        let is_generic = |name: &str| fun.generics.iter().any(|generic| generic == name);
-        // Resources declare classes such as `Vehicle` that share the name of a native handle, which a
-        // parameter of that type may well mean.
-        let is_handle = |name: &str| NATIVE_HANDLE_TYPES.contains(&name);
-        if matches!(given, Type::Unknown | Type::Nil | Type::BooleanLit(false))
-            || mentions(expected, &is_generic)
-            || names(expected, &is_handle)
-        {
-            return None;
-        }
-        let from = self.classes.file();
-        if !self.classes.rejects(expected, from, &given) {
-            return None;
-        }
-        let shown = if self.classes.literal_mismatch(expected, from, &given) { given } else { given.widen() };
-        Some(format!("Cannot assign `{shown}` to parameter `{}` of type `{expected}`", param.name))
+/// The signatures that a call of `base`, or of its `method`, with `args` may use: those of each
+/// function `definitions` finds, with their `@overload`s for the side of the call. None for a call
+/// without arguments, for a native, whose arguments the runtime converts, and for
+/// `require 'name' --[[@as T]]`, where the cast after the argument is that of the call.
+pub fn signatures(
+    infer: &Infer,
+    declared: &Declared,
+    call: &Expr,
+    base: &Expr,
+    method: Option<&Name>,
+    args: &[Expr],
+) -> Vec<Arc<FunType>> {
+    if args.is_empty() || (method.is_none() && declared.is_native(base, 0)) {
+        return Vec::new();
     }
+    if args.last().is_some_and(|arg| arg.span.end == call.span.end) && infer.cast_after(call.span.end).is_some() {
+        return Vec::new();
+    }
+    let via_colon = method.is_some();
+    let at = base.span.start;
+    definitions(infer, base, method).iter().flat_map(|fun| infer.call_signatures(fun, args, via_colon, at).0).collect()
+}
+
+/// The `signatures` that take as many arguments as a call passes with `args`, or all of them when
+/// none does.
+pub fn candidates<'f>(infer: &Infer, signatures: &[&'f FunType], via_colon: bool, args: &[Expr]) -> Vec<&'f FunType> {
+    let alias = |name: &str| infer.index.alias(name, infer.side()).map(|(_, alias)| &alias.ty);
+    // A call or `...` at the end passes as many values as it gives.
+    let open_ended = args.last().is_some_and(Expr::is_multi_value);
+    let takes_count = |fun: &FunType| {
+        most_arguments(fun, via_colon).is_none_or(|most| args.len() <= most)
+            && (open_ended || args.len() >= Requirement::of(fun, via_colon, &alias).arguments)
+    };
+    let candidates: Vec<&FunType> = signatures.iter().copied().filter(|fun| takes_count(fun)).collect();
+    if candidates.is_empty() {
+        signatures.to_vec()
+    } else {
+        candidates
+    }
+}
+
+/// The parameter of `fun` that argument `index` of a call goes to. A `:` call passes its receiver to
+/// the first parameter of a function not defined with `:`, as Lua does, and a `.` call passes the
+/// `self` of one defined with `:` first, which no parameter lists.
+pub fn param_for(fun: &FunType, via_colon: bool, index: usize) -> Option<&Param> {
+    let (skip_params, skip_args) = match (via_colon, fun.is_method) {
+        (true, false) => (1, 0),
+        (false, true) => (0, 1),
+        _ => (0, 0),
+    };
+    let params = fun.params.get(skip_params..).unwrap_or_default();
+    match params.get(index.checked_sub(skip_args)?) {
+        Some(param) if param.name != "..." => Some(param),
+        _ => params.last().filter(|param| param.name == "..."),
+    }
+}
+
+/// The type of the values `param` takes, one by one for a `...`.
+pub fn expected(param: &Param) -> &Type {
+    match &param.ty {
+        Type::Variadic(inner) => inner,
+        ty => ty,
+    }
+}
+
+/// The message for a value of type `given` that `param` of `fun` does not take.
+pub fn mismatch(classes: &Classes, fun: &FunType, param: &Param, given: &Type) -> Option<String> {
+    let expected = expected(param);
+    let given = given.without_nil();
+    let is_generic = |name: &str| fun.generics.iter().any(|generic| generic == name);
+    // Resources declare classes such as `Vehicle` that share the name of a native handle, which a
+    // parameter of that type may well mean.
+    let is_handle = |name: &str| NATIVE_HANDLE_TYPES.contains(&name);
+    if matches!(given, Type::Unknown | Type::Nil | Type::BooleanLit(false))
+        || mentions(expected, &is_generic)
+        || names(expected, &is_handle)
+    {
+        return None;
+    }
+    let from = classes.file();
+    if !classes.rejects(expected, from, &given) {
+        return None;
+    }
+    let shown = if classes.literal_mismatch(expected, from, &given) { given } else { given.widen() };
+    Some(format!("Cannot assign `{shown}` to parameter `{}` of type `{expected}`", param.name))
+}
+
+/// Whether `param` takes `nil`: it is optional, or its type allows `nil` or any value, as a generic
+/// does.
+pub fn takes_nil(classes: &Classes, param: &Param) -> bool {
+    param.optional || !classes.rejects(expected(param), classes.file(), &Type::Nil)
 }
 
 /// Every function a call of `base`, or of its `method`, may run: each member of that name defined

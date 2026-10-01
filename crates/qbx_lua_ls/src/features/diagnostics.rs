@@ -6,8 +6,8 @@ use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
     ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, DISCARD_RETURNS, IMPOSSIBLE_COMPARISON, INVISIBLE, MISSING_FIELDS,
-    MISSING_PARAMETER, MISSING_RETURN, NO_UNKNOWN, PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER, REDUNDANT_RETURN_VALUE,
-    RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
+    MISSING_PARAMETER, MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN, PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER,
+    REDUNDANT_RETURN_VALUE, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -24,6 +24,7 @@ use super::class_tables::missing_fields;
 use super::comparisons::impossible_comparisons;
 use super::discards::discarded_returns;
 use super::doc_names::undefined_doc_names;
+use super::nil_checks::{unchecked_nils, UncheckedNils};
 use super::returns::{mismatched_returns, missing_returns, redundant_returns};
 use super::strict_classes::undeclared_fields;
 use super::unknown_types::unknown_types;
@@ -61,11 +62,18 @@ struct CheckInput<'a> {
     doc: &'a Document,
     infer: &'a Infer<'a>,
     payloads: OnceCell<Vec<Payload<'a>>>,
+    /// The inline comments that suppress rules in the file.
+    suppressions: Suppressions,
 }
 
 impl<'a> CheckInput<'a> {
     fn payloads(&self) -> &[Payload<'a>] {
         self.payloads.get_or_init(|| payloads(self.infer, &self.doc.chunk))
+    }
+
+    /// Whether an inline comment suppresses `code` where `span` starts.
+    fn is_suppressed(&self, code: &str, span: Span) -> bool {
+        self.suppressions.is_suppressed(code, self.doc.lines.line_of(span.start))
     }
 }
 
@@ -75,7 +83,7 @@ impl<'a> CheckInput<'a> {
 /// do to the linter's own.
 fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<qbx_lua_analysis::Diagnostic> {
     type Check = fn(&CheckInput) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 15] = [
+    let checks: [(&'static str, Check); 16] = [
         (UNDEFINED_DOC_NAME, |input| {
             let side = input.ws.index.file(input.doc.file).and_then(|f| f.side);
             undefined_doc_names(&input.ws.index, &input.doc.text, &input.doc.chunk, side)
@@ -100,27 +108,24 @@ fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<
         (REDUNDANT_PARAMETER, |input| redundant_payloads(input.payloads())),
         (NO_UNKNOWN, |input| unknown_types(input.infer, &input.ws.lint_config.ignore_unused_prefix)),
         (IMPOSSIBLE_COMPARISON, |input| impossible_comparisons(input.infer, &input.doc.chunk)),
+        (NEED_CHECK_NIL, |input| {
+            let UncheckedNils { reads, arguments } = unchecked_nils(input.infer, &input.doc.chunk);
+            // lua-language-server reports a value that may be nil passed for a parameter as a
+            // `param-type-mismatch`, so code written for it suppresses that rule there.
+            let suppressed = |(span, _): &(Span, String)| input.is_suppressed(PARAM_TYPE_MISMATCH, *span);
+            reads.into_iter().chain(arguments.into_iter().filter(|finding| !suppressed(finding))).collect()
+        }),
     ];
     let ctx = FileContext::new(doc.file, &doc.text, &doc.chunk, &doc.resolution);
     let infer = Infer::new(&ctx, &ws.index);
-    let input = CheckInput { ws, doc, infer: &infer, payloads: OnceCell::new() };
     let suppressions = Suppressions::parse(&doc.text, &doc.chunk.comments, &doc.lines);
+    let input = CheckInput { ws, doc, infer: &infer, payloads: OnceCell::new(), suppressions };
     let mut out = Vec::new();
     for (code, check) in checks {
         let Some(severity) = config.severity(code) else { continue };
-        out.extend(
-            check(&input)
-                .into_iter()
-                .filter(|(span, _)| !suppressions.is_suppressed(code, doc.lines.line_of(span.start)))
-                .map(|(span, message)| qbx_lua_analysis::Diagnostic {
-                    code,
-                    severity,
-                    span,
-                    message,
-                    tag: None,
-                    fix: None,
-                }),
-        );
+        out.extend(check(&input).into_iter().filter(|(span, _)| !input.is_suppressed(code, *span)).map(
+            |(span, message)| qbx_lua_analysis::Diagnostic { code, severity, span, message, tag: None, fix: None },
+        ));
     }
     out
 }

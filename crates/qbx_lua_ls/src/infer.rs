@@ -764,6 +764,15 @@ impl<'a> Infer<'a> {
         }
     }
 
+    /// Whether the guards after the last cast that holds where `id` is read at `offset` rule out
+    /// `value`, also where they rule out every value of its type, which `narrowed` keeps whole then:
+    /// `round` is no `nil` in `round and (round == true or i < round)`, whatever else it holds.
+    pub fn rules_out(&self, id: LocalId, offset: u32, value: &Type) -> bool {
+        let since = self.ctx.casts().at(id, offset).last().map(|cast| cast.span.start);
+        let mut facts = self.ctx.guards().since(id, since, Span::empty(offset));
+        facts.try_fold(value.clone(), |left, fact| fact.assume(&left)).is_none_or(|left| left != *value)
+    }
+
     /// `ty` as one entry of a `---@cast` line changes it.
     fn cast(&self, ty: Type, entry: &CastEntry) -> Type {
         match entry {
@@ -791,7 +800,7 @@ impl<'a> Infer<'a> {
     }
 
     /// `ty` with the aliases it names, also in a union, replaced by what they stand for.
-    fn expand_aliases(&self, ty: &Type, depth: u32) -> Type {
+    pub fn expand_aliases(&self, ty: &Type, depth: u32) -> Type {
         let resolved = self.resolve_alias(ty);
         match &resolved {
             Type::Union(parts) if depth < 8 => {

@@ -103,6 +103,8 @@ pub const SELF_COMPARISON: &str = "self-comparison";
 pub const COUNT_DOWN_LOOP: &str = "count-down-loop";
 /// Reported by qbx-lua-ls, which infers the types; the linter itself has no type information.
 pub const IMPOSSIBLE_COMPARISON: &str = "impossible-comparison";
+/// Reported by qbx-lua-ls, which infers the types; the linter itself has no type information.
+pub const NEED_CHECK_NIL: &str = "need-check-nil";
 pub const LOWERCASE_GLOBAL: &str = "lowercase-global";
 pub const IMPLICIT_GLOBAL: &str = "implicit-global";
 pub const BUILTIN_OVERWRITE: &str = "builtin-overwrite";
@@ -175,6 +177,7 @@ pub static RULES: &[Rule] = &[
     rule(SELF_COMPARISON, Suspicious, WARN, false, "Both sides of a comparison are the same expression."),
     rule(COUNT_DOWN_LOOP, Suspicious, WARN, true, "A numeric for loop counts up from a start above its end, or from #list to 1, without a negative step."),
     rule(IMPOSSIBLE_COMPARISON, Suspicious, INFO, false, "Both sides of an == or ~= have types that share no value, so the comparison always gives the same answer (language server only)."),
+    rule(NEED_CHECK_NIL, Correctness, WARN, false, "A local whose declared type allows nil or false is indexed, called, used in arithmetic, concatenation, # or an ordering comparison, or given as a for bound without a check (language server only)."),
     rule(LOWERCASE_GLOBAL, Suspicious, WARN, false, "A global with a lowercase first letter is defined; this is usually a missing 'local'."),
     rule(IMPLICIT_GLOBAL, Suspicious, WARN, false, "A global is created from inside a function and never declared at file scope."),
     rule(BUILTIN_OVERWRITE, Suspicious, WARN, false, "A runtime global or native is overwritten."),

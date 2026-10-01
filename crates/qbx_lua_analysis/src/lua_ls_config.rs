@@ -46,6 +46,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "discard-returns",
     "cast-type-mismatch",
     "no-unknown",
+    "need-check-nil",
 ];
 
 #[derive(Debug, Default)]
