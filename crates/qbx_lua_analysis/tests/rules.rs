@@ -573,6 +573,15 @@ fn documented_parameters_need_an_argument() {
     );
     assert!(missing(&format!("{opt_first}f(nil, 1)")).is_empty());
 
+    // As in LuaLS, the docs reach the function past a directive; only a blank line detaches them.
+    let directive =
+        "---@param level string\n-- qbx-lint: disable-next-line lowercase-global\nfunction infoprint(level) end\n";
+    assert_eq!(
+        missing(&format!("{directive}infoprint()")),
+        ["'infoprint' is called with 0 arguments, but needs 1; 'level' (string) will be nil"]
+    );
+    assert!(missing("---@param level string\n-- note\n\nlocal function f(level) end\nf()").is_empty());
+
     // The cases below behave as in LuaLS: nothing that may be nil or is left undocumented is required.
     for source in [
         "function Plain(a, b) end\nPlain(1)",

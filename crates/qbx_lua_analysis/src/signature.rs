@@ -70,7 +70,8 @@ pub fn global_key(root: &str, fields: &[&str]) -> Option<SmolStr> {
     (!parts.is_empty()).then(|| SmolStr::new(parts.join(".")))
 }
 
-/// The `@alias` declarations of every `---` comment block in a file, with their types.
+/// The `@alias` declarations of every `---` comment block in a file, with their types. Like LuaLS,
+/// other comments inside a block are passed over; a blank line or code ends it.
 pub fn doc_aliases(source: &str, comments: &[Comment]) -> Vec<(SmolStr, Type)> {
     let mut aliases = Vec::new();
     if !source.contains("@alias") {
@@ -92,16 +93,10 @@ pub fn doc_aliases(source: &str, comments: &[Comment]) -> Vec<(SmolStr, Type)> {
         if !adjacent {
             flush(&mut block);
         }
-        match comment.span.text(source).strip_prefix("---") {
-            Some(line) => {
-                block.push(line);
-                previous_end = Some(comment.span.end);
-            }
-            None => {
-                flush(&mut block);
-                previous_end = None;
-            }
+        if let Some(line) = comment.span.text(source).strip_prefix("---") {
+            block.push(line);
         }
+        previous_end = Some(comment.span.end);
     }
     flush(&mut block);
     aliases
@@ -277,6 +272,18 @@ mod tests {
         assert!(may_be_nil(&named("Wrapped"), &alias));
         assert!(!may_be_nil(&named("Mode"), &alias));
         assert!(!may_be_nil(&named("Player"), &alias));
+    }
+
+    #[test]
+    fn alias_blocks_pass_over_other_comments() {
+        let source = "---@alias Mode\n-- note\n---| 'a'\n---| 'b'\n\n---@alias Wide\n--[[ note ]]\n---| string\n---| number\n\n---@alias Strict number\n\n-- note\n---| nil";
+        let chunk = parse(source);
+        let aliases = doc_aliases(source, &chunk.comments);
+        let alias = |name: &str| aliases.iter().find(|(n, _)| n == name).map(|(_, ty)| ty);
+        let named = |name: &str| Type::Named(SmolStr::new(name), Vec::new());
+        assert!(!may_be_nil(&named("Mode"), &alias), "a plain comment keeps the values");
+        assert!(!may_be_nil(&named("Wide"), &alias), "a block comment keeps the values");
+        assert!(!may_be_nil(&named("Strict"), &alias), "a blank line ends the alias");
     }
 
     #[test]

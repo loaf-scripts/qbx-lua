@@ -106,7 +106,9 @@ pub fn builtins() -> &'static Builtins {
     })
 }
 
-/// The `---` doc lines directly above `offset`, top to bottom, with the `---` prefix removed.
+/// The `---` doc lines directly above `offset`, top to bottom, with the `---` prefix removed. Like
+/// LuaLS, other comments on lines of their own are passed over, so a `-- qbx-lint:` directive
+/// between the docs and the code keeps them; a blank line or code ends the block.
 pub fn leading_doc_lines<'a>(source: &'a str, comments: &[Comment], offset: u32) -> Vec<&'a str> {
     let mut lines = Vec::new();
     let mut cursor = offset;
@@ -116,36 +118,39 @@ pub fn leading_doc_lines<'a>(source: &'a str, comments: &[Comment], offset: u32)
         if gap.bytes().filter(|b| *b == b'\n').count() > 1 || !gap.trim().is_empty() {
             break;
         }
-        let text = comment.span.text(source);
-        let Some(doc) = text.strip_prefix("---") else { break };
         if !source[..comment.span.start as usize].rsplit('\n').next().unwrap_or("").trim().is_empty() {
             break;
         }
-        lines.push(doc);
+        if let Some(doc) = comment.span.text(source).strip_prefix("---") {
+            lines.push(doc);
+        }
         cursor = comment.span.start;
     }
     lines.reverse();
     lines
 }
 
-/// Runs of adjacent `---` line comments, each one annotation block.
+/// Runs of adjacent `---` line comments, each one annotation block. Like LuaLS, other comments
+/// inside a run are passed over; a blank line or code ends it.
 pub fn doc_blocks<'c>(source: &str, comments: &'c [Comment]) -> Vec<Vec<&'c Comment>> {
     let mut blocks: Vec<Vec<&Comment>> = Vec::new();
+    let mut block: Vec<&Comment> = Vec::new();
     let mut previous_end: Option<u32> = None;
     for comment in comments {
-        if comment.kind != CommentKind::Line || !comment.span.text(source).starts_with("---") {
-            previous_end = None;
-            continue;
-        }
         let adjacent = previous_end.is_some_and(|end| {
             let gap = &source[end as usize..comment.span.start as usize];
             gap.bytes().filter(|b| *b == b'\n').count() <= 1 && gap.trim().is_empty()
         });
-        match blocks.last_mut() {
-            Some(block) if adjacent => block.push(comment),
-            _ => blocks.push(vec![comment]),
+        if !adjacent && !block.is_empty() {
+            blocks.push(std::mem::take(&mut block));
+        }
+        if comment.kind == CommentKind::Line && comment.span.text(source).starts_with("---") {
+            block.push(comment);
         }
         previous_end = Some(comment.span.end);
+    }
+    if !block.is_empty() {
+        blocks.push(block);
     }
     blocks
 }
@@ -205,5 +210,23 @@ mod tests {
         assert_eq!(leading_doc_lines(source, &chunk.comments, f), [" first", "@deprecated"]);
         let g = chunk.block.stmts[2].span.start;
         assert!(leading_doc_lines(source, &chunk.comments, g).is_empty());
+    }
+
+    #[test]
+    fn doc_lines_pass_over_other_comments_on_their_own_lines() {
+        let source = "---@param a number\n-- qbx-lint: disable-next-line lowercase-global\nfunction lower(a) end\n\
+            ---@param b number\n-- one\n-- two\nlocal function plain(b) end\n\
+            ---@param c number\n--[[ block\ncomment ]]\nlocal function block(c) end\n\
+            --- first\n-- note\n---@param d number\nlocal function middle(d) end\n\
+            ---@param e number\n-- one\n\nlocal function blank(e) end\n\
+            ---@param f number\nlocal x = 1 -- trailing\nlocal function trailing(f) end";
+        let chunk = parse(source);
+        let docs = |index: usize| leading_doc_lines(source, &chunk.comments, chunk.block.stmts[index].span.start);
+        assert_eq!(docs(0), ["@param a number"], "a qbx-lint directive");
+        assert_eq!(docs(1), ["@param b number"], "plain comments");
+        assert_eq!(docs(2), ["@param c number"], "a block comment");
+        assert_eq!(docs(3), [" first", "@param d number"], "a plain comment inside the docs");
+        assert!(docs(4).is_empty(), "a blank line after a plain comment");
+        assert!(docs(6).is_empty(), "a comment after code");
     }
 }

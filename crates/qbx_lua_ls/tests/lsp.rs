@@ -1127,6 +1127,106 @@ onShop('closed', function(closedShop) end)
 }
 
 #[test]
+fn hover_reads_docs_past_other_comments() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param level string
+-- qbx-lint: disable-next-line lowercase-global
+function infoprint(level, ...) end
+
+--- Spawns a vehicle.
+---@param model string
+-- The model may also be a hash.
+---@return number
+local function spawn(model) end
+
+---@param detached number
+-- note
+
+local function blank(detached) end
+
+local spawned = spawn('adder')
+
+---@class Probe.Plain
+-- note
+---@field size number
+
+---@class Probe.Blank
+
+---@field size number
+
+---@alias Probe.Mode
+--[[ note ]]
+---| 'on'
+---| 'off'
+
+---@type Probe.Plain
+local plain = {}
+local plainSize = plain.size
+---@type Probe.Blank
+local blanked = {}
+local blankSize = blanked.size
+---@type Probe.Mode
+local modeValue
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        ("infoprint(level", "level: string"),
+        ("spawn(model)", "spawn(model: string): number"),
+        ("spawn(model)", "Spawns a vehicle."),
+        ("spawned =", "spawned: number"),
+        ("plainSize =", "plainSize: number"),
+        ("modeValue", "type Probe.Mode = \"on\"|\"off\""),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    // A blank line detaches the docs.
+    for (needle, unexpected) in [("blank(detached)", "detached: number"), ("blankSize =", "blankSize: number")] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(!hover.contains(unexpected), "{needle}: unexpected {unexpected:?} in {hover}");
+    }
+}
+
+#[test]
+fn generics_reach_annotations_past_other_comments() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@generic Plain
+-- note
+---@param x Plain
+local function idPlain(x) return x end
+
+---@generic Block
+--[[ note ]]
+---@param y Block
+local function idBlock(y) return y end
+
+---@generic Blank
+
+---@param z Blank
+local function idBlank(z) return z end
+
+print(idPlain, idBlock, idBlank)
+";
+    client.open_with(CLIENT, text);
+    client.diagnostics_for(CLIENT);
+    let uri = client.uri(CLIENT).to_string();
+    let found: Vec<(u64, String)> = client.diagnostics[&uri]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == "undefined-doc-name")
+        .map(|d| (d["range"]["start"]["line"].as_u64().unwrap(), d["message"].as_str().unwrap().into()))
+        .collect();
+    let (line, _) = pos(text, "z Blank", 0);
+    assert_eq!(found, [(line as u64, "Undefined type or alias `Blank`".to_string())], "as in LuaLS");
+}
+
+#[test]
 fn calls_show_the_overload_they_pick() {
     let mut client = Client::start(fixture_root());
     let text = "---@param action string

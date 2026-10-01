@@ -165,25 +165,24 @@ impl<'a> Indexer<'a> {
         matches!(self.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Global(_)))
     }
 
-    /// Groups adjacent `---` comments and records the classes and aliases they declare.
+    /// Groups adjacent `---` comments and records the classes and aliases they declare. Like LuaLS,
+    /// other comments between them are passed over; a blank line or code ends the group.
     fn doc_comments(&mut self, comments: &[Comment]) {
         let mut group: Vec<&Comment> = Vec::new();
+        let mut previous_end: Option<u32> = None;
         for comment in comments {
-            let text = comment.span.text(self.source);
-            let adjacent = group.last().is_some_and(|prev: &&Comment| {
-                let gap = &self.source[prev.span.end as usize..comment.span.start as usize];
+            let adjacent = previous_end.is_some_and(|end| {
+                let gap = &self.source[end as usize..comment.span.start as usize];
                 gap.bytes().filter(|b| *b == b'\n').count() <= 1 && gap.trim().is_empty()
             });
             if !adjacent {
                 self.flush_doc_group(&group);
                 group.clear();
             }
-            if text.starts_with("---") {
+            if comment.span.text(self.source).starts_with("---") {
                 group.push(comment);
-            } else {
-                self.flush_doc_group(&group);
-                group.clear();
             }
+            previous_end = Some(comment.span.end);
         }
         self.flush_doc_group(&group);
     }
