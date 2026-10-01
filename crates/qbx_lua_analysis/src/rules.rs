@@ -89,6 +89,8 @@ pub const INVISIBLE: &str = "invisible";
 pub const RETURN_TYPE_MISMATCH: &str = "return-type-mismatch";
 /// Reported by qbx-lua-ls, which reads the `@return` annotations with the types they allow.
 pub const MISSING_RETURN: &str = "missing-return";
+/// Reported by qbx-lua-ls, which reads the `@return` annotations of every function.
+pub const REDUNDANT_RETURN_VALUE: &str = "redundant-return-value";
 /// Reported by qbx-lua-ls, which reads the LuaCATS types; the linter itself has no type information.
 pub const CAST_TYPE_MISMATCH: &str = "cast-type-mismatch";
 /// Reported by qbx-lua-ls, which infers the types; the linter itself has no type information.
@@ -162,6 +164,7 @@ pub static RULES: &[Rule] = &[
     rule(INVISIBLE, Correctness, WARN, false, "A private, protected or package field or method of a LuaCATS class is used outside its class, subclasses or file (language server only)."),
     rule(RETURN_TYPE_MISMATCH, Correctness, WARN, false, "A function returns a value of a different type than its @return annotation declares (language server only)."),
     rule(MISSING_RETURN, Correctness, WARN, false, "A function with a required @return value can end, or return, without it (language server only)."),
+    rule(REDUNDANT_RETURN_VALUE, Correctness, WARN, false, "A function returns more values than its @return annotations declare (language server only)."),
     rule(CAST_TYPE_MISMATCH, Correctness, WARN, false, "A ---@cast gives a variable a type that its declared type does not take (language server only)."),
     rule(NO_UNKNOWN, Style, OFF, false, "A parameter, local or loop variable has no type: none is declared and none can be inferred (language server only)."),
     rule(CONST_REASSIGN, Correctness, ERROR, false, "A <const> or <close> local is assigned to."),

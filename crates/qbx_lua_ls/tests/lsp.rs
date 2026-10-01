@@ -4749,6 +4749,75 @@ local kept = RegisterServerCallback('test:kept', function(source) return 2 end)
 }
 
 #[test]
+fn returns_with_more_values_than_declared_are_reported() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return integer
+local function one() return 1, 2 end
+
+---@return boolean ok
+---@return string? err
+local function two() return true, nil, 3, 4 end
+
+---@return integer, ...string
+local function rest() return 1, 'a', 'b' end
+
+---@return number? ...
+local function scalars() return 1, 2, 3 end
+
+---@return integer first ...
+local function described() return 1, 2 end
+
+---@return false | (string, string)
+local function name() return 'Joe', 'Doe', 'Smith' end
+
+---@param a? string
+---@return integer
+---@overload fun(a: string): integer, string
+local function both(a) return 1, a end
+
+---@return string
+local function escape(text) return text:gsub('%%', '%%%%') end
+
+---@return integer
+local function tail() return 1, print() end
+
+---@return integer
+local function more() return 1, 2, one() end
+
+---@return integer
+local function quiet()
+    ---@diagnostic disable-next-line: redundant-return-value
+    return 1, 2
+end
+
+local function plain() return 1, 2, 3 end
+
+---@return boolean
+RegisterNetEvent('test:check', function() return true, 'extra' end)
+
+print(rest, scalars, described, name, both, escape, tail, more, quiet, plain)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("redundant-return-value".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["redundant-return-value"]),
+        [
+            finding("local function one()", "`@return` allows at most 1 value, but this returns 2 values"),
+            finding("local function two()", "`@return` allows at most 2 values, but this returns 4 values"),
+            finding("local function described()", "`@return` allows at most 1 value, but this returns 2 values"),
+            finding("local function name()", "`@return` allows at most 2 values, but this returns 3 values"),
+            finding("local function more()", "`@return` allows at most 1 value, but this returns at least 2 values"),
+            finding("return true, 'extra'", "`@return` allows at most 1 value, but this returns 2 values"),
+        ],
+        "a trailing `...T` or `T ...`, the longest set of values or `@overload`, what a call at the end gives, \
+         undocumented functions and suppressed lines pass, while a `...` after the name of a value describes it"
+    );
+}
+
+#[test]
 fn hover_binds_generics_from_arguments_and_callbacks() {
     let mut client = Client::start(fixture_root());
     let text = "\

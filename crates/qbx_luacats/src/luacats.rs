@@ -458,6 +458,14 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                     let ty = parser.parse();
                     parser.skip_ws();
                     let remainder = parser.rest();
+                    // `...` in place of the name, as in `@return number? ...`, returns any number of
+                    // such values, as LuaLS reads it.
+                    let (ty, remainder) = match remainder.strip_prefix("...") {
+                        Some(after) if after.is_empty() || after.starts_with([' ', '\t', ',']) => {
+                            (Type::Variadic(Box::new(ty)), after)
+                        }
+                        _ => (ty, remainder),
+                    };
                     let word = remainder.split(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or_default();
                     let after = &remainder[word.len()..];
                     let named = !word.is_empty() && (after.is_empty() || after.starts_with([' ', '\t', ',']));

@@ -100,7 +100,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
@@ -508,10 +508,16 @@ function written in a table, whose doc comment goes above its field. qbx-lua-ls 
 
 - `return-type-mismatch` for a returned value that clearly is not of its `@return` type: a
   different kind of value, such as `return 5` for `---@return string`, or a literal the type does
-  not list. A trailing `---@return ...string` covers every further value.
+  not list. A trailing `---@return ...string`, or `---@return string ...`, covers every further
+  value.
 - `missing-return` for a `return` with fewer values than the function requires, and at the `end`
   of a function whose body can run past it without returning. A value is required unless its type
   allows `nil`, as `string?`, `string|nil` or `any` do.
+- `redundant-return-value` for the values a `return` passes beyond those `@return` declares. A
+  trailing `...T` takes any number of values, and an `@overload` that declares more values allows
+  them. Only the values written out count: a call or `...` at the end may give none, so
+  `return 1, print()` passes for `---@return integer`, and `return text:gsub(...)` for
+  `---@return string` although `gsub` also returns a count.
 
 A body finishes without running past its end when it ends in `return`, `error(...)`, an
 `if`/`else` whose branches all finish, or a loop such as `while true do` that only a `return`
@@ -528,10 +534,10 @@ local function GetName() ... end
 ```
 
 Each `return` then has to be one of the sets: `return false` and `return "Joe", "Doe"` are, while
-`return "Joe"` is a `missing-return` and `return 1, "Doe"` a `return-type-mismatch`. A `return` is
-compared with the set it comes closest to. This notation is a qbx extension of LuaCATS, which
-qbx-lua-ls also uses to narrow the locals a call declares; see its
-[type guards](../crates/qbx_lua_ls/README.md#type-guards).
+`return "Joe"` is a `missing-return`, `return 1, "Doe"` a `return-type-mismatch` and
+`return "Joe", "Doe", "Smith"` a `redundant-return-value`. A `return` is compared with the set it
+comes closest to. This notation is a qbx extension of LuaCATS, which qbx-lua-ls also uses to narrow
+the locals a call declares; see its [type guards](../crates/qbx_lua_ls/README.md#type-guards).
 
 Only clear cases count. Values whose type is not known are skipped, and so is a local that is
 assigned again after its declaration, since its declared type may not be what it holds. The same

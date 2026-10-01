@@ -42,6 +42,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `invisible` | warning | A field or method that a `---@class` keeps `private`, `protected` or `package`, with `---@field private name type` or `---@private` above the statement that sets it, is read, set or called outside its class, subclasses or file. See [Member visibility](reference.md#member-visibility). Reported by qbx-lua-ls only. |
 | `return-type-mismatch` | warning | A function returns a value that its `@return` type does not take, such as a number for `string`. Reported by qbx-lua-ls only. |
 | `missing-return` | warning | A function with a required `@return` value can reach its end without returning, or has a `return` with fewer values than required. Reported by qbx-lua-ls only. |
+| `redundant-return-value` | warning | A `return` passes more values than the function's `@return` annotations declare. A trailing `...T` takes any number. Reported by qbx-lua-ls only. |
 | `cast-type-mismatch` | warning | A `---@cast name T` gives a local a type that its declared type does not take, such as `string` for a local declared as `integer`, a literal the type does not list, or a class it neither names nor extends. Reported by qbx-lua-ls only. |
 | `no-unknown` | off | A parameter, local or loop variable has no type: none is declared with `@param` or `@type`, and none can be inferred. Reported by qbx-lua-ls only. |
 | `const-reassign` | error | An assignment to a `<const>` or `<close>` local. |

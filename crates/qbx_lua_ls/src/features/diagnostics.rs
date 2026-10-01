@@ -6,8 +6,8 @@ use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
     ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, IMPOSSIBLE_COMPARISON, INVISIBLE, MISSING_FIELDS, MISSING_PARAMETER,
-    MISSING_RETURN, NO_UNKNOWN, PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD,
-    UNDEFINED_DOC_NAME,
+    MISSING_RETURN, NO_UNKNOWN, PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER, REDUNDANT_RETURN_VALUE, RETURN_TYPE_MISMATCH,
+    UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -23,7 +23,7 @@ use super::casts::mismatched_casts;
 use super::class_tables::missing_fields;
 use super::comparisons::impossible_comparisons;
 use super::doc_names::undefined_doc_names;
-use super::returns::{mismatched_returns, missing_returns};
+use super::returns::{mismatched_returns, missing_returns, redundant_returns};
 use super::strict_classes::undeclared_fields;
 use super::unknown_types::unknown_types;
 use super::visibility::invisible_members;
@@ -74,7 +74,7 @@ impl<'a> CheckInput<'a> {
 /// do to the linter's own.
 fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<qbx_lua_analysis::Diagnostic> {
     type Check = fn(&CheckInput) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 13] = [
+    let checks: [(&'static str, Check); 14] = [
         (UNDEFINED_DOC_NAME, |input| {
             let side = input.ws.index.file(input.doc.file).and_then(|f| f.side);
             undefined_doc_names(&input.ws.index, &input.doc.text, &input.doc.chunk, side)
@@ -92,6 +92,7 @@ fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<
         (INVISIBLE, |input| invisible_members(input.infer, &input.doc.chunk)),
         (RETURN_TYPE_MISMATCH, |input| mismatched_returns(input.infer, &input.doc.chunk)),
         (MISSING_RETURN, |input| missing_returns(input.infer, &input.doc.chunk)),
+        (REDUNDANT_RETURN_VALUE, |input| redundant_returns(input.infer, &input.doc.chunk)),
         (CAST_TYPE_MISMATCH, |input| mismatched_casts(input.infer)),
         (MISSING_PARAMETER, |input| missing_payloads(input.infer, input.payloads())),
         (REDUNDANT_PARAMETER, |input| redundant_payloads(input.payloads())),

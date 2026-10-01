@@ -1,8 +1,9 @@
-//! `return-type-mismatch` and `missing-return`: a function documented with `@return` has to return
-//! values of those types. A value of a different kind, or a literal the type does not list, is a
-//! mismatch; a `return` with fewer values than the required ones, or a body that can run past its
-//! end, is missing one. A value is required unless its type allows `nil`. An empty body is missing
-//! its values too, except in a `---@meta` file, whose functions only declare their signatures.
+//! `return-type-mismatch`, `missing-return` and `redundant-return-value`: a function documented with
+//! `@return` has to return values of those types. A value of a different kind, or a literal the type
+//! does not list, is a mismatch; a `return` with fewer values than the required ones, or a body that
+//! can run past its end, is missing one; a `return` with more values than declared returns values
+//! nobody expects. A value is required unless its type allows `nil`. An empty body is missing its
+//! values too, except in a `---@meta` file, whose functions only declare their signatures.
 //! Returned tables typed as a class are checked like other class tables, by `missing-fields`,
 //! `assign-type-mismatch` and `undeclared-field`.
 //!
@@ -65,7 +66,7 @@ pub fn missing_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let is_meta = is_meta_file(infer.ctx.source, chunk);
     let mut out = Vec::new();
     for function in documented(infer, chunk) {
-        let Documented { func, returns, sets } = &function;
+        let Documented { func, returns, sets, .. } = &function;
         let required = required_values(&classes, returns);
         if (required == 0 && sets.is_empty()) || (is_meta && func.body.stmts.is_empty()) {
             continue;
@@ -92,6 +93,35 @@ pub fn missing_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
                 types.join(", ")
             );
             out.push((func.end_span, message));
+        }
+    }
+    out
+}
+
+/// Each `return` that passes more values than its function's `@return` declares, at the values it
+/// does not declare. A trailing `...T` takes any number of values, and of several sets, or of the
+/// signatures `@overload` adds, the longest decides. Only the values written out count: a call or
+/// `...` at the end may give none, or more than it needs to, as `return text:gsub(...)` passes on
+/// the count of replacements.
+pub fn redundant_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
+    let is_open = |types: &[Type]| matches!(types.last(), Some(Type::Variadic(_)));
+    let mut out = Vec::new();
+    for Documented { func, returns, sets, overloads } in documented(infer, chunk) {
+        let declared: Vec<&Vec<Type>> = std::iter::once(&returns).chain(&sets).chain(&overloads).collect();
+        if declared.iter().any(|types| is_open(types)) {
+            continue;
+        }
+        let most = declared.iter().map(|types| types.len()).max().unwrap_or(0);
+        for (_, exprs) in return_stmts(&func.body) {
+            let open_ended = exprs.last().is_some_and(Expr::is_multi_value);
+            let written = exprs.len() - usize::from(open_ended);
+            let (Some(first), Some(last)) = (exprs.get(most), exprs.last()) else { continue };
+            if written <= most {
+                continue;
+            }
+            let returned = if open_ended { format!("at least {}", values(written)) } else { values(written) };
+            let message = format!("`@return` allows at most {}, but this returns {returned}", values(most));
+            out.push((first.span.to(last.span), message));
         }
     }
     out
@@ -132,6 +162,8 @@ struct Documented<'c> {
     returns: Vec<Type>,
     /// The sets of values of `@return false | (string, string)`, which `returns` then merges.
     sets: Vec<Vec<Type>>,
+    /// The values each `@overload` returns, or each set of them it lists.
+    overloads: Vec<Vec<Type>>,
 }
 
 impl Documented<'_> {
@@ -163,11 +195,16 @@ impl<'c> Visitor<'c> for Finder<'_, '_, 'c> {
     fn visit_stmt(&mut self, stmt: &'c Stmt) {
         for (doc, functions) in self.infer.ctx.function_docs(stmt) {
             if !doc.returns.is_empty() {
+                let overloads: Vec<Vec<Type>> = doc
+                    .overloads
+                    .iter()
+                    .flat_map(|overload| std::iter::once(&overload.returns).chain(&overload.return_sets).cloned())
+                    .collect();
                 let documented = |func| {
                     let ty = |ty: &Type| self.infer.doc_type_for(stmt, func, ty);
                     let returns = doc.returns.iter().map(|r| ty(&r.ty)).collect();
                     let sets = doc.return_sets.iter().map(|set| set.iter().map(ty).collect()).collect();
-                    Documented { func, returns, sets }
+                    Documented { func, returns, sets, overloads: overloads.clone() }
                 };
                 self.out.extend(functions.into_iter().map(documented));
             }

@@ -88,6 +88,7 @@ fn bad_resource_reports_every_rule() {
                 | "invisible"
                 | "return-type-mismatch"
                 | "missing-return"
+                | "redundant-return-value"
                 | "cast-type-mismatch"
                 | "no-unknown"
                 | "impossible-comparison"
