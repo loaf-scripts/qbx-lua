@@ -44,7 +44,8 @@ Available features depend on the editor's LSP client.
   methods: `exports.phone` and `exports['phone']` take the members of the declared type before the
   exports the resource registers, also for resources the workspace lacks.
 - Type guards: after `if not name then return end`, inside `if name then`, and in the other
-  [guarded code](#type-guards), a local is no longer `nil` or `false`. A guard on one value of
+  [guarded code](#type-guards), a local is no longer `nil` or `false`, and `type(data) == "table"`
+  or `state == "busy"` narrow it to that kind or value. A guard on one value of
   `local ok, err = f()` also narrows the others, for functions that return
   [sets of values](#sets-of-returned-values) such as `false | (string, string)`.
 - Diagnostics and quick fixes with resource and client/server context, plus LuaCATS type checks:
@@ -119,12 +120,37 @@ end
 print(name) -- string
 ```
 
-Guards are `name`, `not name`, comparisons with `nil`, `true` and `false`, and those joined by
-`and` and `or`. They apply to the branches of an `if` or `elseif`, to the code after an `if` whose
-other branches all end in `return`, `error(...)`, `break` or `goto`, to the body of a `while`, to
-the right side of `and` and `or`, and to the code after `assert(name)`. A local that is assigned
-again after its declaration is not narrowed, since a guard says nothing about the new value, and
-neither are globals and fields.
+Guards are `name`, comparisons with `nil`, `true`, `false`, a string or an integer, `type(name)`
+and `math.type(name)` compared with a name they give, and those joined by `and`, `or` and `not`.
+They apply to the branches of an `if` or `elseif`, to the code after an `if` whose other branches
+all end in `return`, `error(...)`, `break` or `goto`, to the body of a `while`, to the right side of
+`and` and `or`, and to the code after `assert(name)`. A local that is assigned again after its
+declaration is not narrowed, since a guard says nothing about the new value, and neither are
+globals and fields.
+
+A comparison with a literal narrows the local to that literal: inside `if state == "busy" then`, a
+`"active"|"busy"|nil` and a `string` are both `"busy"`, and in the `else` branch the first is
+`"active"|nil`. `type(name)` keeps the values of the kind it names. Classes count as tables, and
+the `vector2`, `vector3`, `vector4`, `quat` and `matrix` of CfxLua go by their own names:
+
+```lua
+---@param data PlayerData|string|nil
+local function load(data)
+    if type(data) ~= "table" then
+        return
+    end
+    print(data) -- PlayerData
+end
+```
+
+A value of no known type takes the kind it is checked for, and so does one whose type has none of
+that kind, since such a check handles values the annotations leave out: inside
+`if type(count) == "string" then`, an `integer` is a `string`. `math.type(name)` tells an `integer`
+from a `float`, and `kind == "table"` after `local kind = type(name)` narrows like
+`type(name) == "table"`. Only the global `type` counts, also through a local that holds it, as
+after `local type = type`, and not `table.type` of ox_lib. Where one of
+several checks held, as inside `if type(value) == "string" or type(value) == "number" then`, the
+local is of the kinds they let through.
 
 ### Sets of returned values
 

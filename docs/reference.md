@@ -465,7 +465,9 @@ if type(value) == "tabel" then end        -- Comparing `lua_type` with `"tabel"`
 A side has a type when something declares it: a literal, an operator such as `not` or `..`, a
 `@param`, `@type` or `@return`, a `@field` of a class, an alias or enum, a stub or a native. A
 local that is never assigned again has the type of the value it is declared with, so
-`local state = GetState()` is checked like the call.
+`local state = GetState()` is checked like the call, and inside a
+[type guard](../crates/qbx_lua_ls/README.md#type-guards) the type the guard narrows it to: the right
+side of `class ~= 13 or class ~= 14` only runs when `class` is `13`, so it is always true.
 
 Only clear cases count, and the rest is left alone:
 

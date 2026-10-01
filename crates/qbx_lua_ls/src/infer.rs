@@ -611,16 +611,23 @@ impl<'a> Infer<'a> {
             return ty;
         }
         // An alias such as `Name = string|nil` is narrowed through what it stands for.
-        let declared = match &ty {
-            Type::Named(..) => self.resolve_alias(&ty),
-            _ => ty.clone(),
-        };
-        // A guard that the type rules out altogether, like `if not name` for a `string`, is skipped.
-        let narrowed = facts.fold(declared.clone(), |narrowed, fact| fact.apply(&narrowed).unwrap_or(narrowed));
-        if narrowed == declared {
-            ty
-        } else {
-            narrowed
+        let declared = self.expand_aliases(&ty, 0);
+        // Guards that leave no value of the type are ignored, like `if not name` for a `string`, or
+        // `action ~= "open" and action ~= "close"` for an `"open"|"close"`: such code handles values
+        // the annotations leave out, or never runs.
+        match facts.try_fold(declared.clone(), |narrowed, fact| fact.assume(&narrowed)) {
+            Some(narrowed) if narrowed != declared => narrowed,
+            _ => ty,
+        }
+    }
+
+    /// `ty` with the aliases it names, also in a union, replaced by what they stand for.
+    fn expand_aliases(&self, ty: &Type, depth: u32) -> Type {
+        match self.resolve_alias(ty) {
+            Type::Union(parts) if depth < 8 => {
+                Type::union(parts.iter().map(|part| self.expand_aliases(part, depth + 1)))
+            }
+            other => other,
         }
     }
 
@@ -643,8 +650,7 @@ impl<'a> Infer<'a> {
         }
         let sets = self.linked_sets(stmt)?;
         let value = |set: &[Type], position: usize| match set.get(position) {
-            Some(ty @ Type::Named(..)) => self.resolve_alias(ty),
-            Some(ty) => ty.clone(),
+            Some(ty) => self.expand_aliases(ty, 0),
             None => Type::Nil,
         };
         let is_possible = |set: &&Vec<Type>| {

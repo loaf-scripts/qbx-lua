@@ -1940,6 +1940,143 @@ print(firstname, lastname) -- after
 }
 
 #[test]
+fn type_checks_and_literal_comparisons_narrow_the_locals_they_test() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Checked
+---@field name string
+
+---@return integer|string|fun()|nil
+local function many() end
+
+---@return 'a'|'b'|nil
+local function letter() end
+
+---@param action 'open'|'close'
+local function toggle(action)
+    if action ~= 'open' and action ~= 'close' then
+        print(action == 'open') -- neither
+    end
+    if action == 'open' then return end
+    if action == 'close' then return end
+    print(action) -- ruled out
+end
+toggle('open')
+
+---@param id string|integer
+local function aliased(id)
+    local type = type
+    if type(id) == 'string' then
+        print(id) -- aliased type
+    end
+end
+aliased(1)
+
+---@param data Checked|string|nil
+---@param coords vector3|table
+---@param count integer
+local function check(data, coords, count, cb, decoded)
+    if type(data) == 'table' then
+        print(data) -- class
+    elseif type(data) == 'nil' then
+        print(data) -- nil kind
+    else
+        print(data) -- rest
+    end
+    if type(coords) == 'vector3' then
+        print(coords) -- vector
+    end
+    if type(cb) == 'function' then
+        print(cb) -- callback
+    end
+    if type(count) == 'string' then
+        print(count) -- defensive
+    end
+    if count == 0 then
+        print(count) -- zero
+    end
+    local value = many()
+    if type(value) == 'number' then
+        print(value) -- number
+    end
+    if not (type(value) == 'string') then
+        print(value) -- not string
+    end
+    if type(value) == 'string' or type(value) == 'number' then
+        print(value) -- either
+    end
+    if math.type(value) == 'integer' then
+        print(value) -- integer
+    end
+    if table.type(value) == 'array' then
+        print(value) -- other function
+    end
+    local kind = type(value)
+    if kind == 'string' then
+        print(value) -- through a local
+    end
+    local which = letter()
+    if which == 'a' then
+        if which == 'b' then return end
+        print(which) -- equal
+    elseif which then
+        print(which) -- other letter
+    end
+    if which ~= 'a' then
+        print(which) -- differs
+    end
+    if type(decoded) ~= 'table' then
+        return
+    end
+    print(decoded) -- after
+end
+check()
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("data) -- class", "data: Checked {"),
+        ("data) -- nil kind", "data: nil\n"),
+        ("data) -- rest", "data: string\n"),
+        // CfxLua's `type` names its vectors.
+        ("coords) -- vector", "coords: vector3 {"),
+        // A value of no known type is of the kind it is checked for.
+        ("cb) -- callback", "cb: function\n"),
+        ("decoded) -- after", "decoded: table\n"),
+        // So is one whose type has no value of that kind, as code checks for what annotations leave out.
+        ("count) -- defensive", "count: string\n"),
+        ("count) -- zero", "count: 0\n"),
+        ("value) -- number", "value: integer\n"),
+        ("value) -- not string", "value: integer|(fun())|nil\n"),
+        ("value) -- either", "value: integer|string\n"),
+        ("value) -- integer", "value: integer\n"),
+        ("value) -- other function", "value: integer|string|(fun())|nil\n"),
+        ("value) -- through a local", "value: string\n"),
+        ("which) -- equal", "which: \"a\"\n"),
+        ("which) -- other letter", "which: \"b\"\n"),
+        ("which) -- differs", "which: \"b\"?\n"),
+        // Guards that leave no value keep the declared type, so `action == 'open'` is not reported.
+        ("action == 'open') -- neither", "action: \"open\"|\"close\"\n"),
+        ("action) -- ruled out", "action: \"open\"|\"close\"\n"),
+        // `local type = type` keeps the checks.
+        ("id) -- aliased type", "id: string\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (line, _) = pos(text, "which == 'b'", 0);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["impossible-comparison"]),
+        [(
+            "impossible-comparison".to_string(),
+            line as u64,
+            "Comparing `\"a\"` with `\"b\"` is always false".to_string()
+        )],
+        "comparisons see the narrowed types"
+    );
+}
+
+#[test]
 fn returns_have_to_match_one_of_the_sets_of_values() {
     let mut client = Client::start(fixture_root());
     let text = "\
