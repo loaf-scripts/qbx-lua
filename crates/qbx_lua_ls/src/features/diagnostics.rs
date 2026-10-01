@@ -5,7 +5,7 @@ use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
     ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, IMPOSSIBLE_COMPARISON, INVISIBLE, MISSING_FIELDS, MISSING_PARAMETER,
-    MISSING_RETURN, NO_UNKNOWN, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
+    MISSING_RETURN, NO_UNKNOWN, REDUNDANT_PARAMETER, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -15,7 +15,7 @@ use qbx_lua_syntax::Span;
 use serde::{Deserialize, Serialize};
 
 use super::assignments::mismatched_assignments;
-use super::callback_payloads::missing_payloads;
+use super::callback_payloads::{missing_payloads, redundant_payloads};
 use super::casts::mismatched_casts;
 use super::class_tables::missing_fields;
 use super::comparisons::impossible_comparisons;
@@ -51,12 +51,12 @@ fn strict_by_default(ws: &Workspace, file: FileId) -> bool {
 }
 
 /// Findings for rules qbx-lint registers but cannot check, because they need the LuaCATS types only
-/// the server indexes, and the part of `missing-parameter` that depends on the handler a
-/// `@callback` wrapper call reaches. Inline suppression comments apply to them as they do to the
-/// linter's own.
+/// the server indexes, and the parts of `missing-parameter` and `redundant-parameter` that depend on
+/// the handler a `@callback` wrapper call reaches. Inline suppression comments apply to them as they
+/// do to the linter's own.
 fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<qbx_lua_analysis::Diagnostic> {
     type Check = fn(&Workspace, &Document) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 11] = [
+    let checks: [(&'static str, Check); 12] = [
         (UNDEFINED_DOC_NAME, |ws, doc| {
             let side = ws.index.file(doc.file).and_then(|f| f.side);
             undefined_doc_names(&ws.index, &doc.text, &doc.chunk, side)
@@ -75,6 +75,7 @@ fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<
         (MISSING_RETURN, |ws, doc| with_infer(ws, doc, |infer| missing_returns(infer, &doc.chunk))),
         (CAST_TYPE_MISMATCH, |ws, doc| with_infer(ws, doc, mismatched_casts)),
         (MISSING_PARAMETER, |ws, doc| with_infer(ws, doc, |infer| missing_payloads(infer, &doc.chunk))),
+        (REDUNDANT_PARAMETER, |ws, doc| with_infer(ws, doc, |infer| redundant_payloads(infer, &doc.chunk))),
         (NO_UNKNOWN, |ws, doc| with_infer(ws, doc, |infer| unknown_types(infer, &ws.lint_config.ignore_unused_prefix))),
         (IMPOSSIBLE_COMPARISON, |ws, doc| with_infer(ws, doc, |infer| impossible_comparisons(infer, &doc.chunk))),
     ];

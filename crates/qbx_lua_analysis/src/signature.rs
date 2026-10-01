@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use qbx_lua_syntax::ast::{Expr, ExprKind, FuncBody, Name};
 use qbx_lua_syntax::{Comment, SmolStr};
-use qbx_luacats::luacats::parse_doc_lines;
+use qbx_luacats::luacats::{parse_doc_lines, DocGroup};
 use qbx_luacats::types::{FunType, Param, Type};
 
 use crate::env::leading_doc_lines;
@@ -33,6 +33,19 @@ pub fn documented(
     }
     let names: Vec<SmolStr> = func.params.iter().map(|p| p.text.clone()).collect();
     Some(Arc::new(doc.fun_type(&names, func.vararg.is_some(), is_method)))
+}
+
+/// The signature of the function `func`: the one the doc comment above `stmt_start` gives, or else
+/// its parameters, which take any value.
+pub fn defined(source: &str, comments: &[Comment], stmt_start: u32, func: &FuncBody, is_method: bool) -> Arc<FunType> {
+    documented(source, comments, stmt_start, func, is_method).unwrap_or_else(|| undocumented(func, is_method))
+}
+
+/// The parameters of `func`, which take any value, as the signature of a function without a doc
+/// comment.
+pub fn undocumented(func: &FuncBody, is_method: bool) -> Arc<FunType> {
+    let names: Vec<SmolStr> = func.params.iter().map(|p| p.text.clone()).collect();
+    Arc::new(DocGroup::default().fun_type(&names, func.vararg.is_some(), is_method))
 }
 
 /// The variable an `a.b.c` or `a['b']` chain starts from, and the field names after it.
@@ -155,6 +168,15 @@ impl<'f> Requirement<'f> {
     }
 }
 
+/// How many arguments a call made with `:` (`via_colon`) or `.` can pass to `fun`, with positions
+/// counted as `Requirement::of` counts them; `None` when its `...` takes any number.
+pub fn most_arguments(fun: &FunType, via_colon: bool) -> Option<usize> {
+    if fun.params.last().is_some_and(|p| p.name == "...") {
+        return None;
+    }
+    Some((usize::from(fun.is_method) + fun.params.len()).saturating_sub(usize::from(via_colon)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +236,24 @@ mod tests {
 
         let fun = signature("---@param a? string\n---@param b number\nfunction f(a, b) end").unwrap();
         assert_eq!(Requirement::of(&fun, false, &|_| None).first_missing(0).unwrap().name, "b");
+    }
+
+    fn most(source: &str, via_colon: bool) -> Option<usize> {
+        let chunk = parse(source);
+        let stmt = chunk.block.stmts.last().unwrap();
+        let StmtKind::Function { name, func } = &stmt.kind else { panic!("not a function statement") };
+        most_arguments(&defined(source, &chunk.comments, stmt.span.start, func, name.method.is_some()), via_colon)
+    }
+
+    #[test]
+    fn most_arguments_count_every_parameter() {
+        assert_eq!(most("function f(a, b) end", false), Some(2), "undocumented parameters count");
+        assert_eq!(most("---@param a string\nfunction f(a, b) end", false), Some(2));
+        assert_eq!(most("function f(a, ...) end", false), None);
+        assert_eq!(most("---@type fun(a: string, ...: any)\nfunction f(a, ...) end", false), None);
+        assert_eq!(most("function M:m(a) end", true), Some(1));
+        assert_eq!(most("function M:m(a) end", false), Some(2), "self is passed explicitly");
+        assert_eq!(most("function M.f(a) end", true), Some(0), "the receiver fills 'a'");
     }
 
     #[test]

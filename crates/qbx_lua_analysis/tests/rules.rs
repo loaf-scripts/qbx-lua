@@ -507,6 +507,17 @@ const OPAQUE: &str = "FXAP";
 /// The `missing-parameter` messages for `source`, a `side` script of a resource whose other scripts
 /// are `others` (side, source).
 fn missing_parameters(source: &str, side: Option<Side>, others: &[(Option<Side>, &str)]) -> Vec<String> {
+    call_messages("missing-parameter", source, side, others)
+}
+
+/// The `redundant-parameter` messages for `source`, as `missing_parameters` finds them.
+fn redundant_parameters(source: &str, side: Option<Side>, others: &[(Option<Side>, &str)]) -> Vec<String> {
+    call_messages("redundant-parameter", source, side, others)
+}
+
+/// The messages of `code` for `source`, a `side` script of a resource whose other scripts are
+/// `others` (side, source).
+fn call_messages(code: &str, source: &str, side: Option<Side>, others: &[(Option<Side>, &str)]) -> Vec<String> {
     let chunk = parse(source);
     let resolution = resolve(&chunk);
     let summary = summarize(source, &chunk, &resolution);
@@ -541,7 +552,7 @@ fn missing_parameters(source: &str, side: Option<Side>, others: &[(Option<Side>,
         locale: None,
         relative_path: "",
     };
-    check_file(&input).into_iter().filter(|d| d.code == "missing-parameter").map(|d| d.message).collect()
+    check_file(&input).into_iter().filter(|d| d.code == code).map(|d| d.message).collect()
 }
 
 #[test]
@@ -653,6 +664,66 @@ fn overloads_scoped_to_the_other_side_do_not_excuse_a_call() {
     let local = "---@param a string\n---@param b number\n---@overload (server) fun(a: string)\nlocal function f(a, b) end\nf('x')";
     assert_eq!(missing_parameters(local, Some(Side::Client), &[]).len(), 1);
     assert!(missing_parameters(local, Some(Side::Server), &[]).is_empty());
+}
+
+#[test]
+fn calls_with_more_arguments_than_parameters() {
+    let redundant = |source: &str| redundant_parameters(source, None, &[]);
+    assert_eq!(
+        redundant("---@param n number\nlocal function f(n) end\nf(1, 2, 3)"),
+        ["'f' is called with 3 arguments, but takes at most 1"]
+    );
+    assert_eq!(
+        redundant("local function noop() end\nnoop(function() end)"),
+        ["'noop' is called with 1 argument, but takes none"],
+        "undocumented functions take their parameters"
+    );
+    let two = "local function two(a, b) return a, b end\n";
+    assert_eq!(
+        redundant(&format!("{two}two(1, 2, two(3, 4))")),
+        ["'two' is called with 3 arguments, but takes at most 2"],
+        "a call after the parameters counts as one argument"
+    );
+
+    let methods = "local M = {}\nfunction M:m(x) end\nfunction M.f(x) end\n";
+    let method = |call: &str| redundant(&format!("{methods}{call}"));
+    assert_eq!(method("M:m(1, 2)"), ["'M:m' is called with 2 arguments, but takes at most 1"]);
+    assert_eq!(method("M.m(M, 1, 2)"), ["'M.m' is called with 3 arguments, but takes at most 2"]);
+    assert_eq!(method("M:f(1)"), ["'M:f' is called with 1 argument, but takes none"], "the receiver fills 'x'");
+    assert!(method("M.m(M, 1)").is_empty());
+
+    for source in [
+        &format!("{two}two(1, two(2, 3))"),
+        "local function f(a, ...) end\nf(1, 2, 3)",
+        "---@param ... number\nlocal function f(...) end\nf(1, 2, 3)",
+        "---@param a number\n---@overload fun(a: number, b: string)\nlocal function f(a) end\nf(1, 'x')",
+        "local function f(a) end\nf = print\nf(1, 2)",
+        "local function f(a) end\n---@diagnostic disable-next-line: redundant-parameter\nf(1, 2)",
+        "SetEntityCoords(PlayerPedId(), 1.0, 2.0, 3.0, false, false, false, true, 1)",
+    ] {
+        assert_eq!(redundant(source), Vec::<String>::new(), "{source}");
+    }
+}
+
+#[test]
+fn the_definition_that_takes_the_most_arguments_decides() {
+    let client = (Some(Side::Client), "---@param message string\nfunction Notify(message) end");
+    let server = (Some(Side::Server), "function Notify(source, message) end");
+    let both = [client, server];
+    assert_eq!(
+        redundant_parameters("Notify(1, 'hi')", Some(Side::Client), &both),
+        ["'Notify' is called with 2 arguments, but takes at most 1"]
+    );
+    assert!(redundant_parameters("Notify(1, 'hi')", Some(Side::Server), &both).is_empty());
+    assert!(
+        redundant_parameters("Notify(1, 'hi')", Some(Side::Shared), &both).is_empty(),
+        "shared code may reach the server definition"
+    );
+
+    let local =
+        "---@param a string\n---@overload (server) fun(a: string, b: number)\nlocal function f(a) end\nf('x', 1)";
+    assert_eq!(redundant_parameters(local, Some(Side::Client), &[]).len(), 1);
+    assert!(redundant_parameters(local, Some(Side::Server), &[]).is_empty());
 }
 
 #[test]

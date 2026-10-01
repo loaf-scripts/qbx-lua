@@ -73,8 +73,8 @@ Available features depend on the editor's LSP client.
 - Signature help, parameter hints, semantic tokens, folding and document/workspace symbols.
 - QB-Core and ESX server callback completion, navigation and payload hints from local handlers.
 - Callback systems a resource wraps itself, declared with `---@callback`, with name completion,
-  payload hints, response types and `missing-parameter` for payloads that leave out a value the
-  handler requires.
+  payload hints, response types, and `missing-parameter` and `redundant-parameter` for payloads
+  that leave out a value the handler requires or pass more than it takes.
 - References on event and callback names: every registration and trigger of the name. Go to
   definition on a registration returns the registration itself, so editors such as VS Code show
   the calls that trigger it.

@@ -1423,7 +1423,7 @@ local counted = AwaitServerCallback('countClamps', 'ABC 123')
 }
 
 #[test]
-fn callback_payloads_need_what_their_handler_requires() {
+fn callback_payloads_need_what_their_handler_requires_and_takes() {
     const SHARED: &str = "myresource/shared/config.lua";
     let mut client = Client::start(fixture_root());
     client.open_with(
@@ -1491,6 +1491,11 @@ AwaitServerCallback('untyped')
 local price = Shop:await('shop:price')
 AwaitServerCallback('unknown')
 print(sum, one, both, price)
+AwaitServerCallback('add', 1, 2, 3)
+AwaitServerCallback('add', 1, 2, GetValues())
+AwaitServerCallback('add', 1, GetValues())
+AwaitServerCallback('untyped', 1, 2)
+TriggerServerCallback('notify', function() end, 'hi', 5, true)
 ";
     client.open_with(CLIENT, text);
     let line = |needle: &str| pos(text, needle, 0).0 as u64;
@@ -1516,6 +1521,26 @@ print(sum, one, both, price)
             ),
         ],
         "the player the server passes first, optional and undocumented parameters, open-ended calls and unknown names pass"
+    );
+    let redundant =
+        |needle: &str, message: &str| ("redundant-parameter".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["redundant-parameter"]),
+        [
+            redundant(
+                "AwaitServerCallback('add', 1, 2, 3)",
+                "Callback 'add' is called with 3 arguments, but its handler takes at most 2"
+            ),
+            redundant(
+                "AwaitServerCallback('add', 1, 2, GetValues())",
+                "Callback 'add' is called with 3 arguments, but its handler takes at most 2"
+            ),
+            redundant(
+                "TriggerServerCallback('notify'",
+                "Callback 'notify' is called with 3 arguments, but its handler takes at most 2"
+            ),
+        ],
+        "a call after the handler's parameters counts as one value, and undocumented parameters take one each"
     );
 }
 

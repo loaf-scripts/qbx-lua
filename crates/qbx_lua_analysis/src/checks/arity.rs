@@ -13,13 +13,13 @@ use crate::project::ResourceEnv;
 use crate::rules;
 use crate::scope::{LocalId, LocalKind, Resolved};
 use crate::side_guard::SideRegions;
-use crate::signature::{documented, global_key, member_path, Requirement};
+use crate::signature::{defined, global_key, member_path, most_arguments, undocumented, Requirement};
 
 /// Every value assigned to a local or to a field of a local table, by local and dotted field path.
 type LocalDefs = FxHashMap<(LocalId, SmolStr), Vec<Option<Arc<FunType>>>>;
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
-    if sink.enabled(rules::MISSING_PARAMETER).is_none() {
+    if sink.enabled(rules::MISSING_PARAMETER).is_none() && sink.enabled(rules::REDUNDANT_PARAMETER).is_none() {
         return;
     }
     let own_env;
@@ -56,12 +56,14 @@ impl LocalCollector<'_, '_> {
         self.defs.entry((id, SmolStr::new(fields.join(".")))).or_default().push(signature);
     }
 
+    /// The signature of a function `value`, and `None` for other values, which may be any function.
     fn signature(&self, stmt: &Stmt, value: Option<&Expr>, single: bool) -> Option<Arc<FunType>> {
         match value.map(|e| &e.kind) {
             // A doc comment above `local a, b = ...` does not say which value it describes.
             Some(ExprKind::Function(func)) if single => {
-                documented(self.input.source, &self.input.chunk.comments, stmt.span.start, func, false)
+                Some(defined(self.input.source, &self.input.chunk.comments, stmt.span.start, func, false))
             }
+            Some(ExprKind::Function(func)) => Some(undocumented(func, false)),
             _ => None,
         }
     }
@@ -73,7 +75,7 @@ impl<'ast> Visitor<'ast> for LocalCollector<'_, '_> {
             StmtKind::LocalFunction { name, func } => {
                 if let Some(id) = self.local(name) {
                     let signature =
-                        documented(self.input.source, &self.input.chunk.comments, stmt.span.start, func, false);
+                        Some(defined(self.input.source, &self.input.chunk.comments, stmt.span.start, func, false));
                     self.add(id, &[], signature);
                 }
             }
@@ -91,13 +93,13 @@ impl<'ast> Visitor<'ast> for LocalCollector<'_, '_> {
             StmtKind::Function { name, func } => {
                 if let Some(id) = self.local(&name.base) {
                     let fields: Vec<&str> = name.path.iter().chain(&name.method).map(|n| n.text.as_str()).collect();
-                    let signature = documented(
+                    let signature = Some(defined(
                         self.input.source,
                         &self.input.chunk.comments,
                         stmt.span.start,
                         func,
                         name.method.is_some(),
-                    );
+                    ));
                     self.add(id, &fields, signature);
                 }
             }
@@ -168,9 +170,8 @@ impl Calls<'_, '_, '_> {
         span: Span,
         display: &str,
     ) {
-        let Some(passed) = passed_count(args, 0) else { return };
         let side = self.regions.effective(call.span.start, self.input.side);
-        let defs: Vec<Option<&Arc<FunType>>> = match self.input.resolution.resolve_at(root.span.start) {
+        let defs: Vec<Option<Arc<FunType>>> = match self.input.resolution.resolve_at(root.span.start) {
             Some(Resolved::Local(id)) => {
                 // Parameters and loop variables start out with a value this file does not know.
                 let kind = self.input.resolution.local(id).kind;
@@ -178,7 +179,7 @@ impl Calls<'_, '_, '_> {
                     return;
                 }
                 match self.locals.get(&(id, SmolStr::new(fields.join(".")))) {
-                    Some(defs) => defs.iter().map(Option::as_ref).collect(),
+                    Some(defs) => defs.clone(),
                     None => return,
                 }
             }
@@ -186,26 +187,37 @@ impl Calls<'_, '_, '_> {
             Some(Resolved::Global(_)) if self.env.opaque => return,
             Some(Resolved::Global(_)) => {
                 let Some(path) = global_key(&root.text, fields) else { return };
-                self.env.function_defs(&path, side).collect()
+                self.env.function_defs(&path, side).map(|def| def.cloned()).collect()
             }
             None => return,
         };
+        // A value other than a function literal may be any function.
+        let Some(defs) = defs.into_iter().collect::<Option<Vec<_>>>() else { return };
+        // Any definition or overload may be the one that runs, unless the overload is scoped to the
+        // other side.
+        let signatures: Vec<&FunType> = defs
+            .iter()
+            .flat_map(|fun| {
+                let overloads = fun.overloads.iter().filter(|overload| applies_on(overload.side, side));
+                std::iter::once(fun).chain(overloads).map(|fun| fun.as_ref())
+            })
+            .collect();
+        if signatures.is_empty() {
+            return;
+        }
+        self.missing(&signatures, args, via_colon, span, display);
+        self.redundant(&signatures, args, via_colon, display);
+    }
 
-        // Any definition or overload that accepts fewer arguments may be the one that runs, unless
-        // the overload is scoped to the other side.
+    /// `missing-parameter`, for the signature that needs the fewest arguments.
+    fn missing(&mut self, signatures: &[&FunType], args: &[Expr], via_colon: bool, span: Span, display: &str) {
+        let Some(passed) = passed_count(args, 0) else { return };
         let env = self.env;
         let alias = |name: &str| env.alias(name);
-        let mut least: Option<Requirement> = None;
-        for def in defs {
-            let Some(fun) = def else { return };
-            let overloads = fun.overloads.iter().filter(|overload| applies_on(overload.side, side));
-            for candidate in std::iter::once(fun).chain(overloads) {
-                let requirement = Requirement::of(candidate, via_colon, &alias);
-                if least.as_ref().is_none_or(|least| requirement.arguments < least.arguments) {
-                    least = Some(requirement);
-                }
-            }
-        }
+        let least = signatures
+            .iter()
+            .map(|fun| Requirement::of(fun, via_colon, &alias))
+            .min_by_key(|requirement| requirement.arguments);
         let Some(least) = least.filter(|least| passed < least.arguments) else { return };
         let missing = match least.first_missing(passed) {
             Some(param) => format!("'{}' ({})", param.name, param.ty),
@@ -219,6 +231,26 @@ impl Calls<'_, '_, '_> {
                 plural(passed),
                 least.arguments
             ),
+        );
+    }
+
+    /// `redundant-parameter`, for the signature that takes the most arguments, at the arguments
+    /// after them. A call or `...` among those counts as one argument.
+    fn redundant(&mut self, signatures: &[&FunType], args: &[Expr], via_colon: bool, display: &str) {
+        let mut most = 0;
+        for fun in signatures {
+            let Some(count) = most_arguments(fun, via_colon) else { return };
+            most = most.max(count);
+        }
+        let (Some(first), Some(last)) = (args.get(most), args.last()) else { return };
+        let takes = match most {
+            0 => "takes none".to_string(),
+            most => format!("takes at most {most}"),
+        };
+        self.sink.report(
+            rules::REDUNDANT_PARAMETER,
+            first.span.to(last.span),
+            format!("'{display}' is called with {} argument{}, but {takes}", args.len(), plural(args.len())),
         );
     }
 }

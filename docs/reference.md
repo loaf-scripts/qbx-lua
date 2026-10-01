@@ -100,7 +100,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `return-type-mismatch`, `missing-return`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `return-type-mismatch`, `missing-return`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
@@ -270,6 +270,16 @@ decides. An `@overload (server) fun(...)` or `@overload (client) fun(...)` only 
 on that side, as decided by the script's manifest side and any `IsDuplicityVersion()` or
 `lib.context` guard around the call; shared code counts both.
 
+`redundant-parameter` reports the arguments a call passes beyond the parameters of the function,
+whose values are lost. Every parameter counts, documented or not, and a `...` takes any number of
+arguments. Here the signature that takes the most arguments decides. A call or `...` among the
+extra arguments counts as one:
+
+```lua
+local function noop() end
+noop(function() end) -- 'noop' is called with 1 argument, but takes none
+```
+
 A function `@field` that repeats the name of an unscoped one is another signature of it, as LuaLS
 reads it, rather than a second field: a call picks the signature its arguments fit, and hover shows
 the descriptions of both. Repeated with `(server)` or `(client)`, the signature only applies on
@@ -287,15 +297,16 @@ A method defined with `:` and called with `.` needs `self` as its first argument
 several definitions, for example a client and a server `Notify`, a call is compared with those its
 side can reach, and is not checked when any of them is not a function. A `:` call passes its
 receiver as the first argument whatever that parameter is named, so `function Locale.new(_, opts)`
-called as `Locale:new(opts)` receives both. Calls whose last argument
-is another call or `...` pass an unknown number of arguments and are skipped, as are natives,
-runtime functions, exports, and methods of objects returned by calls, such as
+called as `Locale:new(opts)` receives both. Calls whose last argument is another call or `...`
+pass an unknown number of arguments, so `missing-parameter` skips them. Neither rule checks
+natives, runtime functions, exports, or methods of objects returned by calls, such as
 `GetPlayer(source):setJob(job)`.
 
 qbx-lua-ls also checks the payload of calls to `---@callback await` and `trigger` wrappers. The
 values passed in the wrapper's `...` go to the handler registered under the name the call passes,
-on the other side, so they have to cover that handler's required parameters. A handler registered
-outside the client receives the calling player first, so that parameter is not counted:
+on the other side, so they have to cover that handler's required parameters, and
+`redundant-parameter` reports those it does not take. A handler registered outside the client
+receives the calling player first, so that parameter is not counted:
 
 ```lua
 ---@param num1 number
@@ -306,7 +317,8 @@ RegisterServerCallback('add', function(source, num1, num2) ... end)
 AwaitServerCallback('add')
 ```
 
-When several handlers are registered under the name, the one that needs the fewest values decides.
+When several handlers are registered under the name, the one that needs the fewest values decides,
+and for `redundant-parameter` the one that takes the most.
 
 ## Strict classes
 
@@ -659,8 +671,9 @@ complete knowledge of its globals or locale usage. Readable scripts are still an
 Unknown-export checks are suppressed for opaque resources and resources with non-Lua scripts.
 An opaque resource may also handle events named with its `resource:` prefix, so a wrong-side
 diagnostic is suppressed when the missing handler could be in that resource. Computed export
-registrations similarly prevent a complete list of exports. `missing-parameter` does not check
-calls to globals in an opaque resource, since an encrypted script may define them differently.
+registrations similarly prevent a complete list of exports. `missing-parameter` and
+`redundant-parameter` do not check calls to globals in an opaque resource, since an encrypted
+script may define them differently.
 
 Read-only linting uses replacement characters for invalid UTF-8 bytes. `--fix`, `fmt`, and
 `fmt --check` report an encoding error for such source, and do not rewrite it. Convert its encoding

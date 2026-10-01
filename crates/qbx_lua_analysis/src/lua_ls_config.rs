@@ -31,6 +31,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "duplicate-set-field",
     "count-down-loop",
     "missing-parameter",
+    "redundant-parameter",
     "undefined-doc-name",
     "undefined-doc-param",
     "duplicate-doc-alias",

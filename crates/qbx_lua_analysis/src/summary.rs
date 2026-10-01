@@ -6,7 +6,7 @@ use qbx_lua_syntax::{Comment, SmolStr, Span};
 use qbx_luacats::types::{FunType, Type};
 
 use crate::scope::{GlobalRefKind, Resolution, Resolved, MAIN_CHUNK};
-use crate::signature::{doc_aliases, documented, global_key, member_path};
+use crate::signature::{defined, doc_aliases, global_key, member_path, undocumented};
 
 #[derive(Clone, Debug)]
 pub struct GlobalDef {
@@ -21,7 +21,8 @@ pub struct GlobalDef {
 pub struct FunctionDef {
     /// Dotted path of the global or field, e.g. `Notify` or `Utils.round`.
     pub path: SmolStr,
-    /// `None` when the value is not a function, or its doc comment says nothing about its parameters.
+    /// `None` when the value is not a function. A function whose doc comment says nothing about its
+    /// parameters has them without types.
     pub signature: Option<Arc<FunType>>,
 }
 
@@ -134,7 +135,7 @@ impl<'ast> Visitor<'ast> for FieldDefs<'_> {
                 let fields: Vec<&str> = name.path.iter().chain(&name.method).map(|n| n.text.as_str()).collect();
                 if let Some(path) = global_key(&name.base.text, &fields) {
                     let signature =
-                        documented(self.source, self.comments, stmt.span.start, func, name.method.is_some());
+                        Some(defined(self.source, self.comments, stmt.span.start, func, name.method.is_some()));
                     self.functions.push(FunctionDef { path, signature });
                 }
             }
@@ -147,8 +148,9 @@ impl<'ast> Visitor<'ast> for FieldDefs<'_> {
                     // A doc comment above `a, b = ...` does not say which value it describes.
                     let signature = match exprs.get(index).map(|e| &e.kind) {
                         Some(ExprKind::Function(func)) if targets.len() == 1 => {
-                            documented(self.source, self.comments, stmt.span.start, func, false)
+                            Some(defined(self.source, self.comments, stmt.span.start, func, false))
                         }
+                        Some(ExprKind::Function(func)) => Some(undocumented(func, false)),
                         _ => None,
                     };
                     self.functions.push(FunctionDef { path, signature });
