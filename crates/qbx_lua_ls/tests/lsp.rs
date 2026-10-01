@@ -5275,6 +5275,135 @@ fn goes_to_namespaced_types_and_enums_in_unsaved_files() {
 }
 
 #[test]
+fn goes_to_the_types_the_value_comes_with_and_to_the_enums_of_tables() {
+    let mut client = Client::start(fixture_root());
+    // Two resources that this one does not see declare `Test.Owner`; the export of one returns it.
+    let shop =
+        "---@class Test.Owner\n\n---@return Test.Owner\nfunction GetOwner() end\n\nexports('GetOwner', GetOwner)\n";
+    client.open_with("shop/server.lua", shop);
+    client.open_with("late/server.lua", "---@class Test.Owner\n");
+    client.open_with("myresource/shared/config.lua", "---@enum Test.Color\nColors = { Red = 1 }\n");
+    let text = "\
+---@enum Test.Mode
+local Modes = { On = 1 }
+local owner = exports.shop:GetOwner()
+print(Modes, Colors, owner)
+";
+    client.open_with(SERVER, text);
+    let mut types_of = |needle: &str| -> Vec<(String, u64)> {
+        let (line, column) = pos(text, needle, 0);
+        let result = client.request("textDocument/typeDefinition", client.position_params(SERVER, line, column));
+        let locations = result.as_array().cloned().unwrap_or_default();
+        let file =
+            |uri: &str| uri.rsplit('/').take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+        locations
+            .iter()
+            .map(|location| {
+                (file(location["uri"].as_str().unwrap()), location["range"]["start"]["line"].as_u64().unwrap())
+            })
+            .collect()
+    };
+    let at = |file: &str, line: u64| (file.to_string(), line);
+    assert_eq!(types_of("GetOwner()"), [at("shop/server.lua", 0)], "as the file of the export sees the name");
+    assert_eq!(types_of("owner)"), [at("shop/server.lua", 0)], "a local that the export gives");
+    assert_eq!(types_of("Colors,"), [at("shared/config.lua", 1)], "the global table of an enum");
+    assert_eq!(types_of("Modes,"), [at("server/main.lua", 1)], "the local table of an enum");
+}
+
+#[test]
+fn goes_to_the_declarations_of_the_types_of_values() {
+    let mut client = Client::start(fixture_root());
+    const TYPES: &str = "myresource/shared/config.lua";
+    let types = "\
+---@class Test.Player
+---@field job Test.Job
+Players = {}
+
+---@class Test.Job
+
+---@alias Test.Mode 'a'|'b'
+
+---@enum Test.Color
+Colors = { Red = 1 }
+
+---@class Test.Box<T>
+---@field value T
+
+---@return Test.Player
+function GetPlayer() end
+
+---@alias Test.Pet Test.Player|Test.Job
+---@alias Test.MaybePet Test.Pet?
+---@alias Test.Pets Test.Pet[]
+";
+    client.open_with(TYPES, types);
+    let text = "\
+---@type Test.Player|Test.Job
+local either
+---@type Test.Player[]
+local list = {}
+---@type table<string, Test.Job>
+local map = {}
+---@type Test.Mode
+local mode
+---@type Test.Color
+local color
+---@type Test.Box<Test.Job>
+local box
+---@type integer
+local count = 1
+local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+local config = { a = 1 }
+local player = GetPlayer()
+---@param target Test.Player
+local function use(target) return target end
+---@type Test.MaybePet
+local pet
+---@type Test.Pets
+local pets
+print(either, list, map, mode, color, box, count, vehicle, config, player.job, GetPlayer(), use, pet, pets)
+";
+    client.open_with(CLIENT, text);
+    let capabilities = serde_json::to_value(qbx_lua_ls::server::capabilities()).unwrap();
+    assert_eq!(capabilities["typeDefinitionProvider"], true);
+    let player = (TYPES, 0);
+    let job = (TYPES, 4);
+    let print_line = text.lines().count() as u32 - 1;
+    let print = text.lines().last().unwrap();
+    let mut types_of = |line: u32, column: u32| -> Vec<(&str, u64)> {
+        let result = client.request("textDocument/typeDefinition", client.position_params(CLIENT, line, column));
+        let locations = result.as_array().cloned().unwrap_or_default();
+        locations
+            .iter()
+            .map(|location| {
+                assert_eq!(location["uri"], client.uri(TYPES).as_str(), "{result}");
+                (TYPES, location["range"]["start"]["line"].as_u64().unwrap())
+            })
+            .collect()
+    };
+    let at = |name: &str| print.find(name).unwrap() as u32 + 1;
+    assert_eq!(types_of(print_line, at("either")), [player, job], "each type of a union");
+    assert_eq!(types_of(print_line, at("list")), [player], "the elements of an array");
+    assert_eq!(types_of(print_line, at("map")), [job], "the keys and values of a table");
+    assert_eq!(types_of(print_line, at("mode")), [(TYPES, 6)], "an alias");
+    assert_eq!(types_of(print_line, at("color")), [(TYPES, 9)], "the table of an enum");
+    assert_eq!(types_of(print_line, at("box")), [(TYPES, 11), job], "a generic class and its argument");
+    assert_eq!(types_of(print_line, at("player.job") + 7), [job], "a field");
+    assert_eq!(types_of(print_line, at("GetPlayer")), [player], "what a function returns");
+    assert_eq!(types_of(16, 7), [player], "a local that a call gives");
+    assert_eq!(types_of(18, 35), [player], "a parameter");
+    assert_eq!(
+        types_of(print_line, at("pet,")),
+        [(TYPES, 18), (TYPES, 17), player, job],
+        "an alias and the types it stands for, through `?` and another alias"
+    );
+    assert_eq!(types_of(print_line, at("pets)")), [(TYPES, 19)], "not the elements of an array it stands for");
+    for name in ["count", "vehicle", "config"] {
+        assert_eq!(types_of(print_line, at(name)), [], "{name}: built-in types, native handles and plain tables");
+    }
+}
+
+#[test]
 fn annotation_features_ignore_names_outside_type_positions() {
     let mut client = Client::start(fixture_root());
     let lines = [

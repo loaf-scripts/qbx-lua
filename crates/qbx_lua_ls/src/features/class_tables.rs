@@ -146,7 +146,11 @@ impl<'a, 'b> Classes<'a, 'b> {
     /// sees none, those of the one resource that declares the name count; several resources make it
     /// ambiguous.
     #[allow(clippy::type_complexity)]
-    fn declarations(&self, name: &str, from: FileId) -> (Vec<(FileId, &'b ClassDef)>, Vec<(FileId, &'b AliasDef)>) {
+    pub(crate) fn declarations(
+        &self,
+        name: &str,
+        from: FileId,
+    ) -> (Vec<(FileId, &'b ClassDef)>, Vec<(FileId, &'b AliasDef)>) {
         let index = self.infer.index;
         let side = self.infer.side();
         let mut classes = index.class_defs(name);

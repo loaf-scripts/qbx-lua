@@ -40,6 +40,9 @@ Available features depend on the editor's LSP client.
 - Definitions, references and rename for locals, globals and fields, including static string
   keys such as `Config['name']` and supported `---@field` declarations.
 - Hover and definitions for the classes, aliases and enums named in LuaCATS annotations.
+- Go to type definition: the `---@class`, `---@alias` or `---@enum` of a value's type, through
+  unions, arrays, `table<K, V>` and what a function returns, and the classes an alias of a union
+  stands for.
 - Exports typed by LuaLS definitions, as `---@type PhoneExports` above `exports.phone = {}`, or
   `---@class qbx_core` above `exports.qbx_core = {}` with `function exports.qbx_core:GetCid()`
   methods: `exports.phone` and `exports['phone']` take the members of the declared type before the

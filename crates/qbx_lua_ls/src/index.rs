@@ -648,6 +648,16 @@ impl Index {
         self.alias_slots(name).collect()
     }
 
+    /// The `---@enum`s whose table has its fields indexed under `owner`, whatever side they are
+    /// scoped to.
+    pub fn enums_of_table(&self, owner: &str) -> Vec<(FileId, &AliasDef)> {
+        let slots = self.aliases.values().flatten();
+        slots
+            .filter_map(|(f, i)| Some((*f, self.file(*f)?.index.aliases.get(*i as usize)?)))
+            .filter(|(_, alias)| alias.table.as_ref().is_some_and(|table| table.owner == owner))
+            .collect()
+    }
+
     pub fn class_names(&self) -> impl Iterator<Item = &SmolStr> {
         self.classes.keys().chain(self.aliases.keys())
     }
