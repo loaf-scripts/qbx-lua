@@ -86,6 +86,7 @@ fn bad_resource_reports_every_rule() {
                 | "undeclared-field"
                 | "return-type-mismatch"
                 | "missing-return"
+                | "cast-type-mismatch"
                 | "no-unknown"
                 | "impossible-comparison"
         );

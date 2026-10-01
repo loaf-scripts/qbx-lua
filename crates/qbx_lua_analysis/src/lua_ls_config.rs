@@ -34,6 +34,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "assign-type-mismatch",
     "return-type-mismatch",
     "missing-return",
+    "cast-type-mismatch",
     "no-unknown",
 ];
 

@@ -237,6 +237,36 @@ impl<'a, 'b> Classes<'a, 'b> {
         }
     }
 
+    /// Whether the class `class`, as `from` sees it, is `ancestor` or extends it through its parents.
+    pub fn extends(&self, class: &str, from: FileId, ancestor: &str) -> bool {
+        self.extends_at(class, from, ancestor, &mut FxHashSet::default(), 0)
+    }
+
+    fn extends_at(
+        &self,
+        class: &str,
+        from: FileId,
+        ancestor: &str,
+        visited: &mut FxHashSet<SmolStr>,
+        depth: u32,
+    ) -> bool {
+        if class == ancestor {
+            return true;
+        }
+        if depth > MAX_DEPTH || !visited.insert(SmolStr::new(class)) {
+            return false;
+        }
+        for (file, def) in self.class_defs(class, from) {
+            for parent in &def.parents {
+                let Some(parent) = self.class_of(&Type::named(parent), file) else { continue };
+                if self.extends_at(&parent, file, ancestor, visited, depth + 1) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Whether `class` is strict as `from` sees it: a declaration says `(strict)` or `(exact)`, or
     /// none says `(loose)` and `by_default` holds for the file of each.
     pub fn is_strict(&self, class: &str, from: FileId, by_default: impl Fn(FileId) -> bool) -> bool {
@@ -494,7 +524,7 @@ impl<'a, 'b> Classes<'a, 'b> {
     }
 
     /// The parts of a union, with the aliases it names resolved.
-    fn flatten(&self, ty: &Type, from: FileId, out: &mut Vec<Type>, depth: u32) {
+    pub(crate) fn flatten(&self, ty: &Type, from: FileId, out: &mut Vec<Type>, depth: u32) {
         if depth > MAX_DEPTH {
             out.push(Type::Unknown);
             return;

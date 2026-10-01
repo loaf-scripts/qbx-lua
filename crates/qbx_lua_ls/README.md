@@ -56,8 +56,9 @@ Available features depend on the editor's LSP client.
   a `---@class (strict)` does not declare, and `return-type-mismatch` and `missing-return` for
   functions, including callback handlers, that do not return what their `@return` declares.
   `impossible-comparison` reports an `==` or `~=` between values whose declared types share no
-  value, such as `GetState() == "invalid"` for a function that returns `"active"|"busy"`. The
-  opt-in `no-unknown` reports parameters, locals and loop variables that have no type.
+  value, such as `GetState() == "invalid"` for a function that returns `"active"|"busy"`, and
+  `cast-type-mismatch` a `---@cast` to a type the local is not declared to take. The opt-in
+  `no-unknown` reports parameters, locals and loop variables that have no type.
 - Signature help, parameter hints, semantic tokens, folding and document/workspace symbols.
 - QB-Core and ESX server callback completion, navigation and payload hints from local handlers.
 - Callback systems a resource wraps itself, declared with `---@callback`, with name completion,
@@ -184,6 +185,9 @@ Casts also apply to locals that are assigned again, and only to locals. A guard 
 took effect before a cast tells nothing about the type it gives, while one after it narrows that
 type. `+T` and `-T` change the type the guards around their line leave instead, so
 `---@cast items +number[]` inside `if items then` keeps out the `nil` of a `string[]?`.
+`cast-type-mismatch` reports a cast to a type the declared type of the local does not take,
+such as `---@cast count string` for an `integer`; see the
+[reference](../../docs/reference.md#casts).
 
 ### Sets of returned values
 

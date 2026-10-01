@@ -4,8 +4,8 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
-    ASSIGN_TYPE_MISMATCH, IMPOSSIBLE_COMPARISON, MISSING_FIELDS, MISSING_PARAMETER, MISSING_RETURN, NO_UNKNOWN,
-    RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
+    ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, IMPOSSIBLE_COMPARISON, MISSING_FIELDS, MISSING_PARAMETER, MISSING_RETURN,
+    NO_UNKNOWN, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::assignments::mismatched_assignments;
 use super::callback_payloads::missing_payloads;
+use super::casts::mismatched_casts;
 use super::class_tables::missing_fields;
 use super::comparisons::impossible_comparisons;
 use super::doc_names::undefined_doc_names;
@@ -54,7 +55,7 @@ fn strict_by_default(ws: &Workspace, file: FileId) -> bool {
 /// linter's own.
 fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<qbx_lua_analysis::Diagnostic> {
     type Check = fn(&Workspace, &Document) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 9] = [
+    let checks: [(&'static str, Check); 10] = [
         (UNDEFINED_DOC_NAME, |ws, doc| {
             let side = ws.index.file(doc.file).and_then(|f| f.side);
             undefined_doc_names(&ws.index, &doc.text, &doc.chunk, side)
@@ -70,6 +71,7 @@ fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<
         }),
         (RETURN_TYPE_MISMATCH, |ws, doc| with_infer(ws, doc, |infer| mismatched_returns(infer, &doc.chunk))),
         (MISSING_RETURN, |ws, doc| with_infer(ws, doc, |infer| missing_returns(infer, &doc.chunk))),
+        (CAST_TYPE_MISMATCH, |ws, doc| with_infer(ws, doc, mismatched_casts)),
         (MISSING_PARAMETER, |ws, doc| with_infer(ws, doc, |infer| missing_payloads(infer, &doc.chunk))),
         (NO_UNKNOWN, |ws, doc| with_infer(ws, doc, |infer| unknown_types(infer, &ws.lint_config.ignore_unused_prefix))),
         (IMPOSSIBLE_COMPARISON, |ws, doc| with_infer(ws, doc, |infer| impossible_comparisons(infer, &doc.chunk))),

@@ -35,6 +35,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `undeclared-field` | warning | A field or key that a strict `---@class`, marked `(strict)` or `(exact)` or made strict by `strict_classes`, does not declare is set in a table constructor or assignment, or read. Reported by qbx-lua-ls only. |
 | `return-type-mismatch` | warning | A function returns a value that its `@return` type does not take, such as a number for `string`. Reported by qbx-lua-ls only. |
 | `missing-return` | warning | A function with a required `@return` value can reach its end without returning, or has a `return` with fewer values than required. Reported by qbx-lua-ls only. |
+| `cast-type-mismatch` | warning | A `---@cast name T` gives a local a type that its declared type does not take, such as `string` for a local declared as `integer`, a literal the type does not list, or a class it neither names nor extends. Reported by qbx-lua-ls only. |
 | `no-unknown` | off | A parameter, local or loop variable has no type: none is declared with `@param` or `@type`, and none can be inferred. Reported by qbx-lua-ls only. |
 | `const-reassign` | error | An assignment to a `<const>` or `<close>` local. |
 | `self-assignment` | warning | A variable is assigned to itself. |

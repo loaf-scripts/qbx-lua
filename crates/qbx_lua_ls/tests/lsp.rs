@@ -3453,6 +3453,119 @@ local cast = 5 --[[@as string]]
 }
 
 #[test]
+fn casts_to_types_the_declared_type_does_not_take_are_reported() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return string|integer
+local function get() end
+
+---@type integer
+local count = 1
+---@cast count string
+---@cast count number
+---@cast count integer?
+---@param mode 'a'|'b'
+local function use(mode)
+    ---@cast mode 'c'
+    ---@cast mode 'a'
+    ---@cast mode string
+end
+local value = get()
+---@cast value boolean
+---@cast value +boolean, -integer
+local literal = 5
+---@cast literal string
+local function untyped() return {} end
+local decoded = untyped()
+---@cast decoded string
+local placeholder = nil
+---@cast placeholder string?
+---@cast missing string
+---@diagnostic disable-next-line: cast-type-mismatch
+---@cast count boolean
+use(value, decoded)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("cast-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["cast-type-mismatch"]),
+        [
+            finding("@cast count string", "Cannot convert `integer` to `string`"),
+            finding("@cast count integer?", "Cannot convert `integer` to `integer?`"),
+            finding("@cast mode 'c'", "Cannot convert `\"a\"|\"b\"` to `\"c\"`"),
+            finding("@cast value boolean", "Cannot convert `string|integer` to `boolean`"),
+            finding("@cast literal", "Cannot convert `integer` to `string`"),
+        ],
+        "types inferred from what a function returns, locals declared as `nil`, `+` and `-` entries, unknown names \
+         and suppressed lines are left alone"
+    );
+}
+
+#[test]
+fn casts_to_classes_the_declared_type_does_not_extend_are_reported() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Animal
+---@class Test.Dog : Test.Animal
+---@class Test.Puppy : Test.Dog
+---@class Test.Car
+---@class Test.List<T>
+---@alias Test.Pet Test.Dog|Test.Car
+
+---@return Test.Animal
+local function getAnimal() end
+
+---@param animal Test.Animal?
+---@param list Test.List<string>
+---@param any table
+---@param named string|Test.Animal
+local function use(animal, list, any, named)
+    ---@cast animal Test.Car
+    ---@cast animal Test.Puppy
+    ---@cast animal Test.Dog|Test.Car
+    ---@cast animal Test.Pet
+    ---@cast animal table
+    ---@cast list Test.List<integer>
+    ---@cast any Test.Car
+    ---@cast named Test.Car
+    ---@cast named Test.Dog
+end
+
+---@param dog Test.Dog
+local function back(dog)
+    ---@cast dog Test.Animal
+end
+
+local returned = getAnimal()
+---@cast returned Test.Car
+---@type Test.Animal
+local built = {}
+---@cast built Test.Car
+use(back, returned, built)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("cast-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["cast-type-mismatch"]),
+        [
+            finding("@cast animal Test.Car", "Cannot convert `Test.Animal?` to `Test.Car`"),
+            finding("@cast animal Test.Dog|", "Cannot convert `Test.Animal?` to `Test.Dog|Test.Car`"),
+            finding("@cast animal Test.Pet", "Cannot convert `Test.Animal?` to `Test.Pet`"),
+            finding("@cast named Test.Car", "Cannot convert `string|Test.Animal` to `Test.Car`"),
+            finding("@cast dog", "Cannot convert `Test.Dog` to `Test.Animal`"),
+            finding("@cast returned", "Cannot convert `Test.Animal` to `Test.Car`"),
+        ],
+        "a class needs one the declared type names or extends, as in lua-language-server: a subclass passes, a \
+         parent does not, type arguments are not compared, `table` takes any class, and so does a local declared \
+         with a table constructor"
+    );
+}
+
+#[test]
 fn a_global_declared_as_nil_takes_any_value() {
     let mut client = Client::start(fixture_root());
     let text = "\

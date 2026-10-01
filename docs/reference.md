@@ -100,7 +100,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `missing-parameter`, `undefined-doc-name`, `missing-fields`, `assign-type-mismatch`, `return-type-mismatch`, `missing-return` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `missing-parameter`, `undefined-doc-name`, `missing-fields`, `assign-type-mismatch`, `return-type-mismatch`, `missing-return`, `cast-type-mismatch` and `no-unknown`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
@@ -445,6 +445,35 @@ storing it anywhere passes. A `--[[@as T]]` or `---@as T` right after a value, o
 it to `T` as in lua-language-server, which silences a check that the code knows better than:
 `local count = GetValue() --[[@as integer]]` stores an `integer`. On a call, the cast types its
 first value.
+
+## Casts
+
+A `---@cast` line changes the type of a local from its line on: `---@cast name T` makes it a `T`,
+`+T` and `-T` add and take out a type, and `+?` and `-?` add and take out `nil`. qbx-lua-ls
+describes where a cast holds with its
+[type guards](../crates/qbx_lua_ls/README.md#casts).
+
+`cast-type-mismatch` reports a `---@cast name T` whose `T` the declared type of the local does not
+take. The check is that of `assign-type-mismatch`, for each type `T` lists: a different kind of
+value, or a literal the declared type does not list.
+
+```lua
+---@type integer
+local count = 1
+---@cast count string  -- Cannot convert `integer` to `string`
+---@cast count integer? -- Cannot convert `integer` to `integer?`
+---@cast count number   -- passes
+```
+
+The declared type is the `---@type` or `@param` of the local, or else that of the value it is
+declared with, as for `impossible-comparison`: a literal, or what a function declares it returns.
+A local whose type is only inferred, or that is assigned again and has no annotation, is not
+checked, and neither is one declared as `nil`, which the cast gives its type as in
+lua-language-server, nor the `+T` and `-T` entries, which change the type rather than replace it.
+As in lua-language-server, a class has to be one that the declared type names or extends: a
+`Test.Animal` can be cast to its subclass `Test.Dog`, but a `Test.Dog` not to `Test.Animal`, and
+neither to an unrelated class. Type arguments are not compared, a declared type that is no class,
+like `table` or `any`, takes any class, and so does a local declared with a table constructor.
 
 ## Impossible comparisons
 

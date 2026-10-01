@@ -119,6 +119,12 @@ impl<'a, 'b> Declared<'a, 'b> {
         self.infer.narrowed(id, offset, ty)
     }
 
+    /// The type a local is declared with, without what the guards and casts after its declaration
+    /// tell.
+    pub fn declaration(&self, id: LocalId) -> Type {
+        self.local_declaration(id, 0)
+    }
+
     fn local_declaration(&self, id: LocalId, depth: u32) -> Type {
         let local = self.infer.ctx.resolution.local(id);
         if local.refs.iter().any(|r| r.write) && !(self.keeps_annotations && self.is_annotated(local)) {
