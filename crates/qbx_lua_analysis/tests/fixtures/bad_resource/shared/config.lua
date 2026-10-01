@@ -9,6 +9,7 @@ function Notify(message, duration)
     print(message, duration)
 end
 
+---@param msg string
 function Config.Notify(message)
     print(message)
 end

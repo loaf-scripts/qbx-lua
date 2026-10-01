@@ -831,3 +831,85 @@ function M.f() end
 return reset";
     assert_eq!(reported_lines(source, "duplicate-set-field"), [4, 8, 11]);
 }
+
+#[test]
+fn doc_params_name_parameters_of_the_documented_function() {
+    let source = "---@param undocumented integer
+local function wrongName(actual) return actual end
+---@param ... any
+local function noVararg(x) return x end
+---@param self table
+function M.dot() end
+---@param src number
+---@param extra string
+RegisterNetEvent('ev', function(src) print(src) end)
+---@param source number
+AddEventHandler('playerDropped', function() print(source) end)
+---@param a number
+local notAFunction = 5
+---@param a number
+
+local afterBlank = function(a) return a end
+return wrongName, noVararg, notAFunction, afterBlank";
+    assert_eq!(reported_lines(source, "undefined-doc-param"), [1, 3, 5, 8, 10, 12, 14]);
+    let messages: Vec<String> = findings(source, "undefined-doc-param").into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages[0], "the function below has no parameter 'undocumented'");
+    assert_eq!(messages[5], "no function follows the @param 'a' annotation");
+
+    for quiet in [
+        "M = {}\n---@param self table\n---@param x number\nfunction M:method(x) return self, x end",
+        "---@param x number\n---@param y? number\n---@param ... any\nlocal function vararg(x, y, ...) return x, y, ... end\nreturn vararg",
+        // The functions of the statement below, also on its later lines.
+        "---@param source number\n---@param data table\nlib.callback.register('name',\n    function(source, data) return source, data end)",
+        "---@param a number\nlocal function multi(\n    a\n) return a end\nreturn multi",
+        "---@param a number\n---@param b number\nlocal x, y = 1, function(a, b) return a + b end\nreturn x, y",
+        // Every function that starts on the line below, as LuaLS binds it.
+        "local t = {\n    ---@param args table\n    onSelect = function(args) return args end,\n}\nreturn t",
+        "---@param x number\nfoo(bar(function(x) return x end))",
+        "---@param b number\nreturn function(b) return b end",
+        // The variables of a `for ... in` loop.
+        "---@param k string\nfor k in pairs({}) do print(k) end",
+        // Comment lines between the doc comment and the code.
+        "---@param d number\n-- qbx-lint: disable-next-line lowercase-global\nfunction lower(d) return d end",
+        "---@param e number\n--[[ note ]]\nlocal function block(e) return e end\nreturn block",
+        // A doc comment after code describes that line, and directives inside the comment apply.
+        "local z = 1 ---@param q number\nreturn z",
+        "---@diagnostic disable-next-line: undefined-doc-param\n---@param targets table\nfunction AddTargets(...) return ... end",
+        "local Config = {} ---@type table\n---@param a number\nlocal function f(a) return a, Config end\nreturn f",
+        // The parameter names of a `@type fun(...)` in the comment.
+        "---@param a number\n---@type fun(a: number)\nlocal handler\nreturn handler",
+        "---@param b number\n---@param ... any\n---@type fun(b: number, ...: any)|nil\nlocal wrapped = wrap(print)\nreturn wrapped",
+        // A local or global function the statement passes by name.
+        "local function play(data) print(data) end\n---@param data table\nexports('Play', play)",
+        "local onDrop = function(reason) print(reason) end\n---@param reason string\nAddEventHandler('playerDropped', onDrop)",
+        "function setChannel(channel) print(channel) end\n---@param channel number\nexports('setChannel', setChannel)",
+        // Definition files document stubs.
+        "---@meta\n\n---@param ped integer\nfunction Stub(...) end",
+    ] {
+        assert_eq!(reported_lines(quiet, "undefined-doc-param"), Vec::<u32>::new(), "{quiet}");
+    }
+
+    // The lines below a doc comment after code, names a `@type fun(...)` or a passed function does
+    // not have, and names passed that hold no function.
+    let source = "local Config = {} ---@type table
+---@param wrong number
+local function f(a) return a, Config end
+---@param c number
+---@type fun(a: number)
+local handler
+---@param other table
+exports('F', f)
+local value = 1
+---@param x number
+print(value)
+return handler";
+    assert_eq!(
+        findings(source, "undefined-doc-param"),
+        [
+            (2, "the function below has no parameter 'wrong'".to_string()),
+            (4, "the function below has no parameter 'c'".to_string()),
+            (7, "the function below has no parameter 'other'".to_string()),
+            (10, "no function follows the @param 'x' annotation".to_string()),
+        ]
+    );
+}

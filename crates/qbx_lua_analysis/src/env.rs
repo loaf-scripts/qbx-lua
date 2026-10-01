@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use qbx_fivem_data::{Side, STUBS};
 use qbx_lua_syntax::ast::*;
-use qbx_lua_syntax::{parse, Comment, SmolStr};
+use qbx_lua_syntax::{parse, Comment, CommentKind, SmolStr};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug)]
@@ -126,6 +126,28 @@ pub fn leading_doc_lines<'a>(source: &'a str, comments: &[Comment], offset: u32)
     }
     lines.reverse();
     lines
+}
+
+/// Runs of adjacent `---` line comments, each one annotation block.
+pub fn doc_blocks<'c>(source: &str, comments: &'c [Comment]) -> Vec<Vec<&'c Comment>> {
+    let mut blocks: Vec<Vec<&Comment>> = Vec::new();
+    let mut previous_end: Option<u32> = None;
+    for comment in comments {
+        if comment.kind != CommentKind::Line || !comment.span.text(source).starts_with("---") {
+            previous_end = None;
+            continue;
+        }
+        let adjacent = previous_end.is_some_and(|end| {
+            let gap = &source[end as usize..comment.span.start as usize];
+            gap.bytes().filter(|b| *b == b'\n').count() <= 1 && gap.trim().is_empty()
+        });
+        match blocks.last_mut() {
+            Some(block) if adjacent => block.push(comment),
+            _ => blocks.push(vec![comment]),
+        }
+        previous_end = Some(comment.span.end);
+    }
+    blocks
 }
 
 /// Whether a `---@meta` line above the first statement marks the file as a definition file.

@@ -3,8 +3,9 @@
 //! language server indexes the declarations, so qbx-lint registers the rule and this module reports it.
 
 use qbx_fivem_data::Side;
+use qbx_lua_analysis::env::doc_blocks;
 use qbx_lua_syntax::ast::Chunk;
-use qbx_lua_syntax::{Comment, CommentKind, Span};
+use qbx_lua_syntax::{Comment, Span};
 
 use crate::index::Index;
 use crate::infer::NATIVE_HANDLE_TYPES;
@@ -58,26 +59,4 @@ pub fn undefined_doc_names(index: &Index, source: &str, chunk: &Chunk, side: Opt
         }
     }
     out
-}
-
-/// Runs of adjacent `---` line comments, each one annotation block.
-fn doc_blocks<'c>(source: &str, comments: &'c [Comment]) -> Vec<Vec<&'c Comment>> {
-    let mut blocks: Vec<Vec<&Comment>> = Vec::new();
-    let mut previous_end: Option<u32> = None;
-    for comment in comments {
-        if comment.kind != CommentKind::Line || !comment.span.text(source).starts_with("---") {
-            previous_end = None;
-            continue;
-        }
-        let adjacent = previous_end.is_some_and(|end| {
-            let gap = &source[end as usize..comment.span.start as usize];
-            gap.bytes().filter(|b| *b == b'\n').count() <= 1 && gap.trim().is_empty()
-        });
-        match blocks.last_mut() {
-            Some(block) if adjacent => block.push(comment),
-            _ => blocks.push(vec![comment]),
-        }
-        previous_end = Some(comment.span.end);
-    }
-    blocks
 }

@@ -32,6 +32,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "count-down-loop",
     "missing-parameter",
     "undefined-doc-name",
+    "undefined-doc-param",
     "missing-fields",
     "assign-type-mismatch",
     "return-type-mismatch",

@@ -720,6 +720,32 @@ pub fn parse_cast(line: &str) -> Option<DocCast<'_>> {
     Some(DocCast { name, entries })
 }
 
+/// The name a `@param`, `@field`, `@class`, `@alias` or `@enum` line declares, with the byte it
+/// starts at. A field keyed like `[string]` gives its key with the brackets.
+pub fn declared_name(line: &str) -> Option<(usize, &str)> {
+    let (tag, rest) = split_tag(line)?;
+    let rest = match tag {
+        "class" | "alias" | "enum" => split_attributes(rest).1,
+        "param" if rest.starts_with("...") => return Some((line.len() - rest.len(), "...")),
+        "param" => rest,
+        "field" => {
+            let rest = field_head(rest).1;
+            if let Some(key) = rest.strip_prefix('[') {
+                let mut parser = TypeParser::new(key);
+                parser.parse();
+                let after = parser.rest().trim_start().strip_prefix(']')?;
+                let start = line.len() - rest.len();
+                return Some((start, &line[start..line.len() - after.len()]));
+            }
+            rest
+        }
+        _ => return None,
+    };
+    let mut parser = TypeParser::new(rest);
+    let name = parser.ident()?;
+    Some((line.len() - parser.rest().len() - name.len(), name))
+}
+
 /// The tag of a doc line and the class and alias names on it.
 fn type_names(line: &str) -> Option<(&str, Vec<FoundName<'_>>)> {
     let (tag, rest) = match listed_value(line) {
@@ -1219,6 +1245,28 @@ mod tests {
         assert_eq!(parse_cast("@cast value").map(|cast| cast.entries.len()), Some(0));
         assert_eq!(parse_cast("@type value string"), None);
         assert_eq!(parse_cast("@cast"), None);
+    }
+
+    #[test]
+    fn finds_the_name_a_line_declares() {
+        fn name(line: &str) -> Option<&str> {
+            declared_name(line).map(|(start, name)| {
+                assert_eq!(&line[start..start + name.len()], name, "{line}");
+                name
+            })
+        }
+        assert_eq!(name(" @param source number"), Some("source"));
+        assert_eq!(name("@param name? string"), Some("name"));
+        assert_eq!(name("@param ... any"), Some("..."));
+        assert_eq!(name("@field (server) private  money number"), Some("money"));
+        assert_eq!(name("@field public (client) hud table"), Some("hud"));
+        assert_eq!(name("@field [string] number"), Some("[string]"));
+        assert_eq!(name("@field [ 'key' ] boolean"), Some("[ 'key' ]"));
+        assert_eq!(name("@class (exact) Pair<L, R> : Base"), Some("Pair"));
+        assert_eq!(name("@alias (client) Key 'E'|'F'"), Some("Key"));
+        assert_eq!(name("@enum (key) Jobs"), Some("Jobs"));
+        assert_eq!(name("@return string name"), None);
+        assert_eq!(name("@param"), None);
     }
 
     #[test]
