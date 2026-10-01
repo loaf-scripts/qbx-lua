@@ -136,7 +136,9 @@ print(name) -- string
 ```
 
 Guards are `name`, comparisons with `nil`, `true`, `false`, a string or an integer, `type(name)`
-and `math.type(name)` compared with a name they give, and those joined by `and`, `or` and `not`.
+and `math.type(name)` compared with a name they give, reads from the local, and those joined by
+`and`, `or` and `not`. A read such as `name.job`, `name?.job`, `name[key]` or `name:get()` is only
+true when `name` holds a value, and so are `name?.job == "police"` and `name?.job ~= nil`.
 They apply to the branches of an `if` or `elseif`, to the code after an `if` whose other branches
 all end in `return`, `error(...)`, `break` or `goto`, to the body of a `while`, to the right side of
 `and` and `or`, and to the code after `assert(name)`. A local that is assigned again after its

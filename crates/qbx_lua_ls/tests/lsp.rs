@@ -1927,6 +1927,59 @@ local copy = name
 }
 
 #[test]
+fn guards_that_read_from_a_local_narrow_it() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Reader
+---@field job string?
+---@field get fun(self: Reader): string
+
+---@param data Reader?
+---@param other Reader?
+---@param third Reader?
+---@param fourth Reader?
+local function read(data, other, third, fourth)
+    if data?.job then
+        print(data) -- safe field
+    end
+    if other?.job == 'police' then
+        print(other) -- compared field
+    end
+    if third:get() then
+        print(third) -- method
+    end
+    if not fourth?.job then
+        print(fourth) -- not read
+        return
+    end
+    print(fourth) -- after read
+    if data?.job == nil then
+        print(data) -- compared with nil
+    end
+    if data?.job ~= nil then
+        print(data) -- not nil
+    end
+end
+read()
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("data) -- safe field", "data: Reader {"),
+        ("other) -- compared field", "other: Reader {"),
+        ("third) -- method", "third: Reader {"),
+        // A false `fourth?.job` may come from a `nil` field.
+        ("fourth) -- not read", "fourth: Reader? {"),
+        ("fourth) -- after read", "fourth: Reader {"),
+        ("data) -- compared with nil", "data: Reader? {"),
+        ("data) -- not nil", "data: Reader {"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn guards_pick_the_set_of_values_a_call_returned() {
     let mut client = Client::start(fixture_root());
     let text = "\

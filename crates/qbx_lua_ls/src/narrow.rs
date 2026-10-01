@@ -241,6 +241,21 @@ impl Finder<'_> {
         Some(id)
     }
 
+    /// The local that the fields, indexes and calls of `expr` are read from, as `data` in
+    /// `data?.job.name` and `data:get()`. A value read through it means that it holds one.
+    fn read_from(&self, expr: &Expr) -> Option<LocalId> {
+        let expr = expr.unparen();
+        let base = match &expr.kind {
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } | ExprKind::MethodCall { base, .. } => base,
+            ExprKind::Call { callee, .. } if !matches!(callee.kind, ExprKind::Name(_)) => callee,
+            _ => return None,
+        };
+        match &base.unparen().kind {
+            ExprKind::Name(_) => self.local(base),
+            _ => self.read_from(base),
+        }
+    }
+
     fn is_reassigned(&self, local: LocalId) -> bool {
         self.resolution.local(local).refs.iter().any(|r| r.write)
     }
@@ -318,6 +333,21 @@ impl Finder<'_> {
                 }
                 if let Some((local, kind)) = self.kind_check(lhs, rhs).or_else(|| self.kind_check(rhs, lhs)) {
                     out.push((local, if equal { Fact::Kind(kind) } else { Fact::NotKind(kind) }));
+                }
+                // `data?.job == 'police'` and `data?.job ~= nil` read a value from `data`.
+                for (side, other) in [(lhs, rhs), (rhs, lhs)] {
+                    if let (Some(local), Some(value)) = (self.read_from(side), literal(other)) {
+                        if equal != (value == Type::Nil) {
+                            out.push((local, Fact::Truthy));
+                        }
+                    }
+                }
+            }
+            // `data?.job`, `data.job`, `data[key]` and `data:get()` are only true when `data` holds a
+            // value: `?.` gives `nil` for a `nil` one, and the others raise an error.
+            _ if holds => {
+                if let Some(local) = self.read_from(cond) {
+                    out.push((local, Fact::Truthy));
                 }
             }
             _ => {}
