@@ -18,7 +18,7 @@ use qbx_lua_syntax::{NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::index::{AliasDef, ClassDef, FileId, ResourceId};
-use crate::infer::{class_bindings, substitute, Infer};
+use crate::infer::{class_bindings, expanded_bindings, substitute, Infer};
 use crate::luacats::applies_on;
 use crate::types::{DescribedValue, Type};
 
@@ -191,14 +191,16 @@ impl<'a, 'b> Classes<'a, 'b> {
         self.declarations(name, from).1
     }
 
-    /// `ty`, or the type of the one alias it names as `from` sees it.
+    /// `ty`, or the type of the one alias it names as `from` sees it, with the type arguments of a
+    /// generic alias in place of its parameters.
     fn resolve(&self, ty: &Type, from: FileId, depth: u32) -> Type {
         match ty {
-            Type::Named(name, args)
-                if args.is_empty() && depth < MAX_DEPTH && self.class_defs(name, from).is_empty() =>
-            {
+            Type::Named(name, args) if depth < MAX_DEPTH && self.class_defs(name, from).is_empty() => {
                 match self.alias_defs(name, from).as_slice() {
-                    [(file, alias)] => self.resolve(&alias.ty, *file, depth + 1),
+                    [(file, alias)] => {
+                        let ty = substitute(&alias.ty, &expanded_bindings(&alias.generics, args));
+                        self.resolve(&ty, *file, depth + 1)
+                    }
                     _ => ty.clone(),
                 }
             }
@@ -506,13 +508,19 @@ impl<'a, 'b> Classes<'a, 'b> {
             Type::Function | Type::Fun(_) => kind::FUNCTION,
             Type::Thread | Type::Userdata => kind::OTHER,
             Type::Variadic(inner) => return self.kinds(inner, from, depth + 1),
-            Type::Named(name, _) => {
+            Type::Named(name, args) => {
                 let classes = self.class_defs(name, from);
                 let aliases = self.alias_defs(name, from);
                 match (classes.is_empty(), aliases.as_slice()) {
                     // Classes describe tables, and also userdata such as `vector3`.
                     (false, []) => kind::TABLE | kind::OTHER,
-                    (true, [(file, alias)]) => return self.kinds(&alias.ty, *file, depth + 1),
+                    (true, [(file, alias)]) => {
+                        let bindings = expanded_bindings(&alias.generics, args);
+                        return match bindings.is_empty() {
+                            true => self.kinds(&alias.ty, *file, depth + 1),
+                            false => self.kinds(&substitute(&alias.ty, &bindings), *file, depth + 1),
+                        };
+                    }
                     // Unknown, a generic, or declared as more than one thing.
                     _ => return None,
                 }

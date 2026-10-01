@@ -2494,6 +2494,7 @@ function AddItem(item) end
 local hidden
 
 ---@alias Mode 'a'|Unknown
+---@alias Boxed<V> { value: V, kind: BoxKind }
 print(get, hidden)
 
 ---@param kind WheelKind
@@ -2524,7 +2525,7 @@ local function check(kind, expected) end
         (line as u64, column as u64, format!("Undefined type or alias `{name}`"))
     };
     // Handle types, stub classes, generics, `self`, `@see` and suppressed lines are not reported.
-    assert_eq!(found, [at("Spot"), at("Missing"), at("Unknown")]);
+    assert_eq!(found, [at("Spot"), at("Missing"), at("Unknown"), at("BoxKind")]);
 }
 
 #[test]
@@ -5053,6 +5054,53 @@ print(count, half, bare)
         ],
         "`right` of `Test.Pair<string>` and `value` of a `Test.Holder` without arguments take any value, but are required"
     );
+}
+
+#[test]
+fn generic_aliases_bind_their_type_parameters() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Box<T> { value: T }
+---@alias Test.Result<T> T|nil
+
+---@generic T
+---@param result Test.Result<T>
+---@return T
+local function unwrap(result) end
+
+---@param target number|Test.Box<integer>
+local function send(target) return target end
+
+---@type Test.Box<integer>
+local box = {}
+---@type Test.Box
+local anyBox = {}
+---@type Test.Result<string>
+local result = nil
+
+local boxed = box.value
+local unboxed = anyBox.value
+local unwrapped = unwrap('x')
+print(result, send)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("local boxed", "boxed: integer"),
+        // Without type arguments the parameters of an alias are unknown, as lua-language-server
+        // reads them.
+        ("local unboxed", "unboxed: unknown"),
+        // A generic function binds `T` through the alias of its parameter.
+        ("local unwrapped", "unwrapped: string"),
+        // A value of several types keeps them while the fields of the table among them follow.
+        (" target end", "target: number|Test.Box<integer> {\n    value: integer,"),
+        ("local result", "type Test.Result<T> = T?"),
+        ("Test.Box<integer>", "type Test.Box<T> = { value: T }"),
+    ] {
+        let delta = if needle.starts_with("local ") { 6 } else { 1 };
+        let (l, c) = pos(text, needle, delta);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
 }
 
 #[test]

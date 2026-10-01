@@ -235,6 +235,7 @@ impl<'a> Indexer<'a> {
             let range = self.range(group[alias.line.min(group.len() - 1)].span);
             self.out.aliases.push(AliasDef {
                 name: alias.name,
+                generics: alias.generics,
                 ty: alias.ty,
                 doc: (!alias.description.is_empty()).then(|| Arc::from(alias.description.as_str())),
                 range,
@@ -388,7 +389,16 @@ impl<'a> Indexer<'a> {
             Arc::new(EnumTable { owner: SmolStr::new(owner), members })
         });
         let range = self.range(span);
-        self.out.aliases.push(AliasDef { name, ty, doc: None, range, side, values: Vec::new(), table });
+        self.out.aliases.push(AliasDef {
+            name,
+            generics: Vec::new(),
+            ty,
+            doc: None,
+            range,
+            side,
+            values: Vec::new(),
+            table,
+        });
     }
 
     fn push_element(&mut self, owner: SmolStr, key: Option<Type>, value: Type) {

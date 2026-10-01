@@ -110,9 +110,11 @@ fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: O
     }
     // The fields are those of the value when it is not nil; the `?` still says it may be.
     let optional = if *ty != bare && matches!(ty, Type::Union(types) if types.contains(&Type::Nil)) { "?" } else { "" };
-    // A class with its type arguments, as `List<string>`.
+    // A class with its type arguments, as `List<string>`, or the types a value of several may be,
+    // as `number|ArrayLike<number>`, unless one is a table whose fields only the overview names.
     let label = match &bare {
         Type::Named(..) => format!("{bare}{optional} "),
+        Type::Union(types) if !types.iter().any(is_table_value) => format!("{ty} "),
         _ => String::new(),
     };
     let mut out = format!("{prefix}{name}: {label}{{");
@@ -133,6 +135,12 @@ fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: O
         out.push_str(optional);
     }
     out
+}
+
+/// Whether `ty` is a table that a hover shows by its fields alone, such as `{ name: string }` or
+/// the table a local holds, rather than by a name.
+fn is_table_value(ty: &Type) -> bool {
+    matches!(ty, Type::Shape(_) | Type::GlobalTable(_) | Type::Require(_) | Type::Exports(_))
 }
 
 /// A table the index holds with only integer keys, such as `local list = { 'a', 'b' }` or
@@ -180,7 +188,8 @@ fn alias_expansions<'a>(infer: &Infer<'a>, ty: &Type) -> Vec<(SmolStr, &'a Alias
             continue;
         }
         let Some((_, alias)) = infer.index.alias(name, infer.side()) else { continue };
-        if table_part(infer, &alias.ty, 0).is_unknown() {
+        // `Result<string>` of `---@alias Result<T> T|nil` stands for `string?`, which is no table.
+        if table_part(infer, part, 0).is_unknown() {
             out.push((name.clone(), alias));
         }
     }
@@ -190,6 +199,7 @@ fn alias_expansions<'a>(infer: &Infer<'a>, ty: &Type) -> Vec<(SmolStr, &'a Alias
 /// An alias as written out in a hover: `type Mode = "fast"|"slow"`, or with each value on a line of
 /// its own when the `---|` lines that list them describe any.
 fn alias_definition(name: &str, alias: &AliasDef) -> String {
+    let name = with_params(name, &alias.generics);
     if alias.values.iter().all(|listed| listed.description.is_empty()) {
         return format!("type {name} = {}", alias.ty);
     }
@@ -208,7 +218,7 @@ fn alias_definition(name: &str, alias: &AliasDef) -> String {
     format!("type {name} ={}", described_values(&values))
 }
 
-/// The name of a class with the type parameters it declares, as `List<T>`.
+/// The name of a class or alias with the type parameters it declares, as `List<T>`.
 fn with_params(name: &str, generics: &[SmolStr]) -> String {
     match generics {
         [] => name.to_string(),

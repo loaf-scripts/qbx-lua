@@ -10,7 +10,7 @@ use super::member_refs::member_target;
 use super::with_infer;
 use crate::document::Document;
 use crate::index::{EventFamily, EventKind, FileId, FileOrigin};
-use crate::infer::{Decl, Infer};
+use crate::infer::{expanded_bindings, substitute, Decl, Infer};
 use crate::locate::locate;
 use crate::luacats::applies_on;
 use crate::types::Type;
@@ -229,7 +229,7 @@ fn named_types(infer: &Infer, ty: &Type, out: &mut Vec<Named>, depth: u32) {
         Type::Named(name, args) => {
             if !out.iter().any(|known| matches!(known, Named::Type(known) if known == name)) {
                 out.push(Named::Type(name.clone()));
-                aliased_types(infer, name, out, depth);
+                aliased_types(infer, name, args, out, depth);
             }
             args.iter().for_each(|arg| named_types(infer, arg, out, depth + 1));
         }
@@ -257,15 +257,17 @@ fn named_types(infer: &Infer, ty: &Type, out: &mut Vec<Named>, depth: u32) {
     }
 }
 
-/// The classes and aliases that the alias `name` stands for: the one it names, or each that a union
-/// or a `?` of it names, as `Dog` and `Animal` for `---@alias Pet Dog|Animal`. The types an array
-/// or a table type of it holds are not its own, as lua-language-server reads them.
-fn aliased_types(infer: &Infer, name: &str, out: &mut Vec<Named>, depth: u32) {
+/// The classes and aliases that the alias `name`, given the type arguments `args`, stands for: the
+/// one it names, or each that a union or a `?` of it names, as `Dog` and `Animal` for
+/// `---@alias Pet Dog|Animal`. The types an array or a table type of it holds are not its own, as
+/// lua-language-server reads them.
+fn aliased_types(infer: &Infer, name: &str, args: &[Type], out: &mut Vec<Named>, depth: u32) {
     if infer.index.class(name, infer.side()).is_some() {
         return;
     }
     let Some((_, alias)) = infer.index.alias(name, infer.side()) else { return };
-    let parts = match &alias.ty {
+    let ty = substitute(&alias.ty, &expanded_bindings(&alias.generics, args));
+    let parts = match &ty {
         Type::Union(parts) => parts.as_slice(),
         one => std::slice::from_ref(one),
     };

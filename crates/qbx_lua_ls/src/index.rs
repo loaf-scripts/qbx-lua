@@ -146,6 +146,9 @@ impl ClassDef {
 #[derive(Clone, Debug)]
 pub struct AliasDef {
     pub name: SmolStr,
+    /// The type parameters of `@alias Box<T> { value: T }`, which a reference such as
+    /// `Box<integer>` binds.
+    pub generics: Vec<SmolStr>,
     pub ty: Type,
     pub doc: Option<Arc<str>>,
     pub range: Range,

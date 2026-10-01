@@ -1320,9 +1320,10 @@ impl<'a> Infer<'a> {
         let mut current = ty.clone();
         for _ in 0..8 {
             match &current {
-                Type::Named(name, _) if self.index.class(name, self.side).is_none() => {
+                // `Box<integer>` is the type of `---@alias Box<T> { value: T }` with `integer` for `T`.
+                Type::Named(name, args) if self.index.class(name, self.side).is_none() => {
                     match self.index.alias(name, self.side) {
-                        Some((_, alias)) => current = alias.ty.clone(),
+                        Some((_, alias)) => current = substitute(&alias.ty, &expanded_bindings(&alias.generics, args)),
                         None => break,
                     }
                 }
@@ -1872,12 +1873,23 @@ impl<'a> Infer<'a> {
                 }
                 _ => {}
             },
-            // `List<T>` takes the `string` of a `List<string>`.
+            // `List<T>` takes the `string` of a `List<string>`, and `Result<T>` of
+            // `---@alias Result<T> T|nil` what `T|nil` takes, unless it is given a `Result<string>`.
             Type::Named(name, params) if !params.is_empty() => {
-                if let Type::Named(given, args) = self.resolve_alias(&arg.without_nil()) {
-                    if given == *name {
+                let given = match arg.without_nil() {
+                    Type::Named(given, args) if given == *name => Type::Named(given, args),
+                    other => self.resolve_alias(&other),
+                };
+                match given {
+                    Type::Named(given, args) if given == *name => {
                         for (param, arg) in params.iter().zip(&args) {
                             self.unify(fun, param, arg, returned, bound, depth + 1);
+                        }
+                    }
+                    _ => {
+                        let expanded = self.resolve_alias(param);
+                        if expanded != *param {
+                            self.unify(fun, &expanded, arg, returned, bound, depth + 1);
                         }
                     }
                 }
@@ -2583,7 +2595,8 @@ impl<'a> Infer<'a> {
         defs.retain(|(_, class)| applies_on(class.side, self.side));
         if defs.is_empty() {
             if let Some((_, alias)) = self.index.alias(name, self.side) {
-                out.extend(self.guarded(|| self.members_matching(&alias.ty, filter)));
+                let ty = substitute(&alias.ty, &expanded_bindings(&alias.generics, args));
+                out.extend(self.guarded(|| self.members_matching(&ty, filter)));
             }
             return;
         }
@@ -2664,6 +2677,15 @@ pub(crate) fn generic_bindings(params: &[SmolStr], args: &[Type]) -> Vec<(SmolSt
     let itself =
         |param: &SmolStr, arg: &Type| matches!(arg, Type::Named(name, args) if name == param && args.is_empty());
     params.iter().cloned().zip(args.iter().cloned()).filter(|(param, arg)| !itself(param, arg)).collect()
+}
+
+/// What the type parameters of an alias stand for where its type is read in place, as `Box<integer>`
+/// reads the `{ value: T }` of `---@alias Box<T> { value: T }`: those `generic_bindings` binds,
+/// with a parameter left without an argument unknown, as lua-language-server reads the `value` of
+/// a `---@type Box`.
+pub(crate) fn expanded_bindings(params: &[SmolStr], args: &[Type]) -> Vec<(SmolStr, Type)> {
+    let missing = params.iter().skip(args.len()).map(|param| (param.clone(), Type::Unknown));
+    generic_bindings(params, args).into_iter().chain(missing).collect()
 }
 
 /// The type parameters of a class bound to `args`, as the declaration of it among `defs` that

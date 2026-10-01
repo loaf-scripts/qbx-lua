@@ -90,6 +90,9 @@ pub struct DocClass {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DocAlias {
     pub name: SmolStr,
+    /// The type parameters of `@alias Box<T> { value: T }`, which a reference such as
+    /// `Box<integer>` binds.
+    pub generics: Vec<SmolStr>,
     pub ty: Type,
     pub description: String,
     pub line: usize,
@@ -391,12 +394,11 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
             "overload" => group.overloads.extend(overload(rest)),
             "alias" => {
                 let (attributes, rest) = split_attributes(rest);
-                let mut parser = TypeParser::new(rest);
-                let Some(name) = parser.ident() else { continue };
-                parser.skip_ws();
-                let ty = if parser.rest().trim().is_empty() { Type::Unknown } else { parser.parse() };
+                let Some((name, params, after)) = class_head(rest) else { continue };
+                let ty = if after.trim().is_empty() { Type::Unknown } else { TypeParser::new(after).parse() };
                 group.aliases.push(DocAlias {
                     name: SmolStr::new(name),
+                    generics: generic_names(params).into_iter().map(SmolStr::new).collect(),
                     ty,
                     description: description.join("\n").trim().to_string(),
                     line: index,
@@ -507,8 +509,8 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
     group
 }
 
-/// The name that a `@class` line declares, the list of type parameters after it, as `T, K` for
-/// `Pair<T, K>`, and the text after both.
+/// The name that a `@class` or `@alias` line declares, the list of type parameters after it, as
+/// `T, K` for `Pair<T, K>`, and the text after both.
 fn class_head(rest: &str) -> Option<(&str, &str, &str)> {
     let mut parser = TypeParser::new(rest);
     let name = parser.ident()?;
@@ -714,13 +716,15 @@ pub fn referenced_type_names(line: &str) -> Vec<(usize, &str)> {
     }
 }
 
-/// The generic parameters a doc line declares: the `T, K` of `@generic T, K: table` or of
-/// `@class Pair<T, K>`.
+/// The generic parameters a doc line declares: the `T, K` of `@generic T, K: table`, of
+/// `@class Pair<T, K>` or of `@alias Pair<T, K> [T, K]`.
 pub fn declared_generics(line: &str) -> Vec<&str> {
     let Some((tag, rest)) = split_tag(line) else { return Vec::new() };
     match tag {
         "generic" => generic_names(rest),
-        "class" => class_head(split_attributes(rest).1).map_or_else(Vec::new, |(_, params, _)| generic_names(params)),
+        "class" | "alias" => {
+            class_head(split_attributes(rest).1).map_or_else(Vec::new, |(_, params, _)| generic_names(params))
+        }
         _ => Vec::new(),
     }
 }
@@ -838,8 +842,8 @@ fn type_names(line: &str) -> Option<(&str, Vec<FoundName<'_>>)> {
             }
         }
         "alias" => {
-            if let Some(rest) = names.declared(split_attributes(rest).1) {
-                names.types(rest);
+            if let Some(after) = names.declared(split_attributes(rest).1) {
+                names.types(type_params(after).1);
             }
         }
         "enum" => {
@@ -1128,6 +1132,24 @@ mod tests {
     }
 
     #[test]
+    fn generic_aliases() {
+        let doc = parse(
+            "---@alias Result<T> T|nil\n---@alias (server) Box<T, K> { value: T, key: K }\n---@alias Plain string",
+        );
+        let aliases: Vec<(String, Vec<SmolStr>, String)> =
+            doc.aliases.iter().map(|a| (a.name.to_string(), a.generics.clone(), a.ty.to_string())).collect();
+        assert_eq!(
+            aliases,
+            [
+                ("Result".into(), vec!["T".into()], "T?".into()),
+                ("Box".into(), vec!["T".into(), "K".into()], "{ value: T, key: K }".into()),
+                ("Plain".into(), vec![], "string".into()),
+            ]
+        );
+        assert_eq!(doc.aliases[1].side, Some(Side::Server));
+    }
+
+    #[test]
     fn class_and_enum_attributes() {
         let doc = parse("---@class (partial) Player : Entity");
         assert_eq!(doc.classes[0].name, "Player");
@@ -1306,6 +1328,8 @@ mod tests {
             "@alias Value Gar^age",
             "@alias (server) Gar^age string",
             "@alias (client) Value Gar^age",
+            "@alias Box<T> { value: T, garage: Gar^age }",
+            "@alias Gar^age<T> T|nil",
             "@class Pair<L: table> : Gar^age<L>",
             "@field (server) value? Gar^age",
             "@field private (client) value Gar^age",
@@ -1341,6 +1365,7 @@ mod tests {
         }
         assert_eq!(names("@class Garage : Base, Other"), ["Base", "Other"]);
         assert_eq!(names("@alias Mode Kind|'a'"), ["Kind"]);
+        assert_eq!(names("@alias Box<T> { value: T, kind: Kind }"), ["T", "Kind"]);
         assert_eq!(names("@enum Jobs"), Vec::<&str>::new());
         assert_eq!(names("@param cb fun(point: Point): Garage?"), ["Point", "Garage"]);
         assert_eq!(names("@field (server) spots table<string, Spot>"), ["Spot"]);
@@ -1354,6 +1379,8 @@ mod tests {
         assert_eq!(declared_generics("@generic T, K: table, V"), ["T", "K", "V"]);
         assert_eq!(declared_generics("@class (exact) Pair<L, R> : Base"), ["L", "R"]);
         assert_eq!(declared_generics("@class Pair<L: table, R>: Base<L>"), ["L", "R"]);
+        assert_eq!(declared_generics("@alias (server) Box<T> { value: T }"), ["T"]);
+        assert!(declared_generics("@alias Plain string").is_empty());
         assert!(declared_generics("@class Plain : Base").is_empty());
         assert!(declared_generics("@param value T").is_empty());
     }
@@ -1426,6 +1453,7 @@ mod tests {
             "@type str^ing",
             "@generic Gar^age: string",
             "@class Child<Gar^age>: Parent",
+            "@alias Box<Gar^age> { value: Garage }",
             "@class (Gar^age) Child",
             "@enum (Gar^age) Mode",
             "@alias (Gar^age) Mode string",
