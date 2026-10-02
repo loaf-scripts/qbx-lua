@@ -78,6 +78,8 @@ pub struct DocClass {
     /// literal, with their values, in declaration order.
     pub literal_fields: Vec<DocIndexField>,
     pub call: Option<Arc<FunType>>,
+    /// The `@operator` lines of the class, in declaration order.
+    pub operators: Vec<DocOperator>,
     pub description: String,
     pub line: usize,
     /// The side of `@class (server) Name`.
@@ -85,6 +87,16 @@ pub struct DocClass {
     /// `Some(true)` for `@class (strict) Name` or LuaLS's `(exact)`, `Some(false)` for `(loose)`, and
     /// `None` when the configured default decides.
     pub strict: Option<bool>,
+}
+
+/// `---@operator add(Vec): Vec`: what an operation on a value of the class gives, for an operand of
+/// the given type. A unary operation such as `unm` or `len`, and `call` without a list, take none.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocOperator {
+    /// The metamethod name without its `__`, such as `add`, `concat`, `unm` or `call`.
+    pub name: SmolStr,
+    pub operand: Option<Type>,
+    pub result: Type,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -358,6 +370,27 @@ fn overload(rest: &str) -> Option<Arc<FunType>> {
     }
 }
 
+/// An `@operator name(operand): result` or `@operator name: result` line.
+fn operator(rest: &str) -> Option<DocOperator> {
+    let rest = rest.trim_start();
+    let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
+    let (name, after) = rest.split_at(end);
+    if name.is_empty() {
+        return None;
+    }
+    let (operand, after) = match after.trim_start().strip_prefix('(') {
+        Some(inner) if inner.trim_start().starts_with(')') => (None, inner.trim_start()[1..].trim_start()),
+        Some(inner) => {
+            let mut parser = TypeParser::new(inner);
+            let operand = parser.parse();
+            (Some(operand), parser.rest().trim_start().strip_prefix(')')?)
+        }
+        None => (None, after),
+    };
+    let result = after.trim_start().strip_prefix(':').map(|result| TypeParser::new(result).parse()).unwrap_or_default();
+    Some(DocOperator { name: SmolStr::new(name), operand, result })
+}
+
 /// Parses the `---` lines of one contiguous doc comment; every line has its `---` prefix removed.
 pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
     let mut group = DocGroup::default();
@@ -406,6 +439,16 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                 }
             }
             "overload" => group.overloads.extend(overload(rest)),
+            "operator" => {
+                if let (Some(operator), Some(class)) = (operator(rest), group.classes.last_mut()) {
+                    let operator = DocOperator {
+                        operand: operator.operand.map(|ty| in_class(class, ty)),
+                        result: in_class(class, operator.result),
+                        ..operator
+                    };
+                    class.operators.push(operator);
+                }
+            }
             "alias" => {
                 let (attributes, rest) = split_attributes(rest);
                 let Some((name, params, after)) = class_head(rest) else { continue };
@@ -1153,6 +1196,29 @@ mod tests {
         assert_eq!(class.fields[1].ty.to_string(), "Pair<L, R>?", "`self` keeps the type parameters");
         assert_eq!(Type::Fun(class.call.clone().unwrap()).to_string(), "fun(): Pair<L, R>");
         assert!(parse("---@class Plain : Base").classes[0].generics.is_empty());
+    }
+
+    #[test]
+    fn class_operators() {
+        let doc = parse(
+            "---@class Vec<T>\n---@operator add(Vec): Vec\n---@operator unm: self\n---@operator call(): integer\n---@operator mul (number) : Vec # scales",
+        );
+        let operators: Vec<(String, Option<String>, String)> = doc.classes[0]
+            .operators
+            .iter()
+            .map(|op| (op.name.to_string(), op.operand.as_ref().map(Type::to_string), op.result.to_string()))
+            .collect();
+        assert_eq!(
+            operators,
+            [
+                ("add".into(), Some("Vec".into()), "Vec".into()),
+                ("unm".into(), None, "Vec<T>".into()),
+                ("call".into(), None, "integer".into()),
+                ("mul".into(), Some("number".into()), "Vec".into()),
+            ],
+            "`self` is the class, and `()` takes no operand"
+        );
+        assert!(parse("---@operator add(Vec): Vec").classes.is_empty(), "an operator outside a class declares nothing");
     }
 
     #[test]

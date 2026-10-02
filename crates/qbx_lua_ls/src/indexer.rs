@@ -238,6 +238,7 @@ impl<'a> Indexer<'a> {
                 indices: class.indices,
                 literal_fields: class.literal_fields,
                 call: class.call,
+                operators: class.operators,
                 doc: (!class.description.is_empty()).then(|| Arc::from(class.description.as_str())),
                 range,
                 side: class.side,

@@ -5968,6 +5968,69 @@ local inferred = value:inferred()
 }
 
 #[test]
+fn class_operators_type_the_operations_on_their_values() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Vec<T>
+---@operator add(Test.Vec): Test.Vec
+---@operator add(number): string
+---@operator unm: Test.Vec
+---@operator concat(string): Test.Vec
+---@operator len: integer
+---@operator band(Test.Vec): Test.Vec
+---@operator call(integer): boolean
+
+---@class Test.Sub : Test.Vec
+
+---@class Test.Callable
+---@overload fun(): string
+---@operator call: integer
+
+---@type Test.Vec<integer>
+local v
+---@type Test.Vec?
+local maybe
+---@type Test.Sub
+local sub
+---@type Test.Callable
+local callable
+local sum = v + v
+local scaled = v + 2
+local swapped = 2 + v
+local missing = v + true
+local negated = -v
+local joined = v .. 'x'
+local count = #v
+local masked = v & v
+local called = v(1)
+local optional = maybe + v
+local inherited = sub + sub
+local overloaded = callable()
+local moved = vector3(1, 2, 3) + 1
+";
+    client.open_with(CLIENT, text);
+    for (name, expected) in [
+        ("sum", "Test.Vec"),
+        ("scaled", "string"),
+        ("swapped", "string"),
+        ("missing", "unknown"),
+        ("negated", "Test.Vec"),
+        ("joined", "Test.Vec"),
+        ("count", "integer"),
+        ("masked", "Test.Vec"),
+        ("called", "boolean"),
+        ("optional", "Test.Vec"),
+        ("inherited", "number"),
+        ("overloaded", "string"),
+        ("moved", "vector3"),
+    ] {
+        let (l, c) = pos(text, &format!("local {name}"), 6);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(&format!("{name}: {expected}")), "{name}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn backtick_generics_bind_the_type_a_string_names() {
     let mut client = Client::start(fixture_root());
     let text = "\

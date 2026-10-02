@@ -14,7 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::callback_wrappers::{self, Wrapper};
 use crate::index::{instance_class, instance_owner, ClassDef, FileId, Index, SymbolKind};
 use crate::locate::statement_at;
-use crate::luacats::{applies_on, own_type, parse_doc_lines, CastEntry, DocGroup};
+use crate::luacats::{applies_on, own_type, parse_doc_lines, CastEntry, DocGroup, DocOperator};
 use crate::narrow::{Casts, Guards};
 use crate::types::{CallbackRole, FunType, Param, Shape, ShapeField, Type, TypeParser};
 
@@ -663,15 +663,7 @@ impl<'a> Infer<'a> {
             ExprKind::Index { base, index, .. } => self.index_expr(base, index),
             ExprKind::Table(fields) => self.table(fields),
             ExprKind::Binary { op, lhs, rhs, .. } => self.binary(*op, lhs, rhs),
-            ExprKind::Unary { op, expr } => match op {
-                UnOp::Not => Type::Boolean,
-                UnOp::Len => match self.expr(expr) {
-                    Type::Named(name, _) if name.starts_with("vector") => Type::Number,
-                    _ => Type::Integer,
-                },
-                UnOp::BNot => Type::Integer,
-                UnOp::Neg => self.expr(expr).widen(),
-            },
+            ExprKind::Unary { op, expr } => self.unary(*op, expr),
             ExprKind::Call { .. } | ExprKind::MethodCall { .. } | ExprKind::Error => Type::Unknown,
         }
     }
@@ -1839,9 +1831,85 @@ impl<'a> Infer<'a> {
         in_constructor.chain(assigned).map(|value| self.expr(value)).collect()
     }
 
-    fn binary(&self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Type {
+    fn unary(&self, op: UnOp, operand: &Expr) -> Type {
+        let name = match op {
+            UnOp::Not => return Type::Boolean,
+            UnOp::Len => "len",
+            UnOp::BNot => "bnot",
+            UnOp::Neg => "unm",
+        };
+        let ty = match op {
+            UnOp::BNot if !self.index.operator_names().contains(name) => return Type::Integer,
+            _ => self.expr(operand).widen(),
+        };
+        if let Some(result) = self.operator(&ty, name, None) {
+            return result;
+        }
         match op {
-            BinOp::Concat => Type::String,
+            UnOp::Len => match ty {
+                Type::Named(name, _) if name.starts_with("vector") => Type::Number,
+                _ => Type::Integer,
+            },
+            UnOp::Neg => ty,
+            _ => Type::Integer,
+        }
+    }
+
+    /// What the `@operator name` lines of the class of `ty` give for an operand of type `operand`,
+    /// or with `None` for an operation without one: the first whose operand is of that type, or
+    /// else takes it, and `unknown` when none does. `None` when `ty` is no class or its class
+    /// declares no such operator. A class does not take the operators of its parents, as Lua looks
+    /// a metamethod up in the metatable itself.
+    fn operator(&self, ty: &Type, name: &str, operand: Option<&Type>) -> Option<Type> {
+        let Type::Named(class, args) = self.resolve_alias(&ty.without_nil()) else { return None };
+        let mut defs = self.index.class_defs(&class);
+        defs.retain(|(_, def)| applies_on(def.side, self.side));
+        let operators: Vec<&DocOperator> =
+            defs.iter().flat_map(|(_, def)| &def.operators).filter(|operator| operator.name == name).collect();
+        if operators.is_empty() {
+            return None;
+        }
+        let bindings = class_bindings(&defs, &args);
+        let declared = |operator: &DocOperator| operator.operand.as_ref().map(|ty| substitute(ty, &bindings));
+        let any = FunType::default();
+        let takes = |declared: &Type, given: &Type| match (
+            self.value_kinds(&any, declared, true, 0),
+            self.value_kinds(&any, given, false, 0),
+        ) {
+            (Some(taken), Some(given)) => taken & given != 0,
+            _ => true,
+        };
+        let found = match operand {
+            Some(given) => operators.iter().find(|operator| declared(operator).as_ref() == Some(given)).or_else(|| {
+                operators.iter().find(|operator| declared(operator).is_none_or(|declared| takes(&declared, given)))
+            }),
+            None => operators.first(),
+        };
+        Some(found.map_or(Type::Unknown, |operator| substitute(&operator.result, &bindings)))
+    }
+
+    /// What `left op right` gives through the `@operator name` lines of the class of `left`, or
+    /// else of `right`, as lua-language-server reads `1 + v`. `unknown` when a class declares the
+    /// operator for no operand of the other's type, and `None` when neither declares it.
+    fn binary_operator(&self, name: &str, left: &Type, right: &Type) -> Option<Type> {
+        let from_left = self.operator(left, name, Some(right));
+        if from_left.as_ref().is_some_and(|ty| !ty.is_unknown()) {
+            return from_left;
+        }
+        match self.operator(right, name, Some(left)) {
+            Some(ty) if !ty.is_unknown() => Some(ty),
+            from_right => from_left.or(from_right),
+        }
+    }
+
+    fn binary(&self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Type {
+        // Operands are only inferred for an operator that some class declares.
+        let operator = |name: &str| match self.index.operator_names().contains(name) {
+            true => self.binary_operator(name, &self.expr(lhs).widen(), &self.expr(rhs).widen()),
+            false => None,
+        };
+        match op {
+            BinOp::Concat => operator("concat").unwrap_or(Type::String),
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Type::Boolean,
             // `a and b` is `b` whenever `a` holds a value, so an unknown `b` leaves it unknown.
             BinOp::And => match self.expr(rhs).widen() {
@@ -1856,10 +1924,34 @@ impl<'a> Infer<'a> {
                 };
                 Type::union([left, self.expr(rhs).widen()])
             }
-            BinOp::BAnd | BinOp::BOr | BinOp::BXor | BinOp::Shl | BinOp::Shr | BinOp::IDiv => Type::Integer,
+            BinOp::BAnd | BinOp::BOr | BinOp::BXor | BinOp::Shl | BinOp::Shr | BinOp::IDiv => {
+                let name = match op {
+                    BinOp::BAnd => "band",
+                    BinOp::BOr => "bor",
+                    BinOp::BXor => "bxor",
+                    BinOp::Shl => "shl",
+                    BinOp::Shr => "shr",
+                    _ => "idiv",
+                };
+                operator(name).unwrap_or(Type::Integer)
+            }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
                 let (left, right) = (self.expr(lhs).widen(), self.expr(rhs).widen());
                 let is_vector = |t: &Type| matches!(t, Type::Named(n, _) if n.starts_with("vector") || n == "quat");
+                let name = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::Mul => "mul",
+                    BinOp::Div => "div",
+                    BinOp::Mod => "mod",
+                    _ => "pow",
+                };
+                // The stubs do not list every operand a vector takes, such as the number of
+                // `vector3(1, 2, 3) + 1`.
+                match self.binary_operator(name, &left, &right) {
+                    Some(ty) if !ty.is_unknown() || !(is_vector(&left) || is_vector(&right)) => return ty,
+                    _ => {}
+                }
                 if is_vector(&left) {
                     left
                 } else if is_vector(&right) {
@@ -1888,7 +1980,10 @@ impl<'a> Infer<'a> {
                 match self.resolve_alias(&ty) {
                     Type::Named(name, args) => {
                         let call = self.index.class(&name, self.side).and_then(|(_, c)| c.call.clone());
-                        let call = call.filter(|f| applies_on(f.side, self.side))?;
+                        let call = match call.filter(|f| applies_on(f.side, self.side)) {
+                            Some(call) => call,
+                            None => self.call_operator(&name)?,
+                        };
                         let bindings = self.class_bindings_of(&name, &args);
                         match bindings.is_empty() {
                             true => Some((call, None)),
@@ -1899,6 +1994,23 @@ impl<'a> Infer<'a> {
                 }
             }
         }
+    }
+
+    /// The function that the first `@operator call(T): R` line of the class `name` makes of its
+    /// values, taking a `T` and returning an `R`, as lua-language-server reads it. An `@overload`
+    /// of the class comes first.
+    fn call_operator(&self, name: &str) -> Option<Arc<FunType>> {
+        let defs = self.index.class_defs(name);
+        let mut operators =
+            defs.iter().filter(|(_, def)| applies_on(def.side, self.side)).flat_map(|(_, def)| &def.operators);
+        let operator = operators.find(|operator| operator.name == "call")?;
+        let params =
+            operator.operand.iter().map(|ty| Param { name: "value".into(), ty: ty.clone(), ..Param::default() });
+        Some(Arc::new(FunType {
+            params: params.collect(),
+            returns: vec![operator.result.clone()],
+            ..FunType::default()
+        }))
     }
 
     fn call(&self, base: &Expr, method: Option<&Name>, args: &[Expr]) -> Vec<Type> {

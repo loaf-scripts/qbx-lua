@@ -48,6 +48,10 @@ Available features depend on the editor's LSP client.
   a table given a metatable by `setmetatable`, have the fields of its `__index` table at every
   level, as `Class.__index = Class` sets up, for completion, hover and navigation. A `---@class`
   keeps the fields it declares.
+- The `---@operator` lines of a class type what operations on its values give, as
+  `---@operator add(Vec): Vec` makes `a + b` a `Vec`, for an operand of the type the line names,
+  on either side. A class does not take the operators of its parents, as Lua looks a metamethod up
+  in the metatable itself, and `@operator call` types calling a value when no `@overload` does.
 - Exports typed by LuaLS definitions, as `---@type PhoneExports` above `exports.phone = {}`, or
   `---@class qbx_core` above `exports.qbx_core = {}` with `function exports.qbx_core:GetCid()`
   methods: `exports.phone` and `exports['phone']` take the members of the declared type before the

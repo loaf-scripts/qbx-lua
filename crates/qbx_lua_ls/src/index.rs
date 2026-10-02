@@ -10,7 +10,7 @@ use qbx_lua_analysis::summary::FileSummary;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
-use crate::luacats::{applies_on, DocIndexField, Visibility};
+use crate::luacats::{applies_on, DocIndexField, DocOperator, Visibility};
 use crate::types::{DescribedValue, FunType, Type};
 
 pub type FileId = u32;
@@ -29,6 +29,8 @@ pub enum Read {
     Table(SmolStr),
     /// The classes, aliases and enums of a name.
     Type(SmolStr),
+    /// The operators that classes declare with `@operator`, whichever classes they are.
+    Operators,
     /// The exports a resource registers, by its name as `exports_key` spells it, or the one of them
     /// that a name names.
     Exports(SmolStr, Option<SmolStr>),
@@ -85,7 +87,7 @@ fn same_class(a: &ClassDef, b: &ClassDef) -> bool {
     (a.generics == b.generics && a.parent_types == b.parent_types && a.side == b.side && a.strict == b.strict)
         && (fields(a) == fields(b) && a.field_sides == b.field_sides && a.field_visibility == b.field_visibility)
         && (indices(&a.indices) == indices(&b.indices) && indices(&a.literal_fields) == indices(&b.literal_fields))
-        && a.call == b.call
+        && (a.call == b.call && a.operators == b.operators)
 }
 
 /// Whether two declarations of an alias or enum tell the same about its values, wherever they are
@@ -196,6 +198,8 @@ pub struct ClassDef {
     /// literal, with their values, in declaration order.
     pub literal_fields: Vec<DocIndexField>,
     pub call: Option<Arc<FunType>>,
+    /// The `@operator` lines of the class, in declaration order.
+    pub operators: Vec<DocOperator>,
     pub doc: Option<Arc<str>>,
     pub range: Range,
     /// The side of `@class (server) Name`.
@@ -407,6 +411,9 @@ pub struct Index {
     /// The names of the fields and methods some class keeps from other code, built on first use
     /// after the files change.
     restricted_names: OnceLock<Arc<FxHashSet<SmolStr>>>,
+    /// The operators some class declares with `@operator`, built on first use after the files
+    /// change.
+    operator_names: OnceLock<Arc<FxHashSet<SmolStr>>>,
     /// What the lookups made while a file is indexed read, as `reads_while` collects it.
     reads: RefCell<Option<FxHashSet<Read>>>,
 }
@@ -528,6 +535,7 @@ impl Index {
     fn clear_slots(&mut self, id: FileId) -> Option<FileEntry> {
         self.declarations.take();
         self.restricted_names.take();
+        self.operator_names.take();
         let old = self.files.get_mut(id as usize).and_then(Option::take)?;
         remove_file_slots(&mut self.globals, old.index.globals.iter().map(|s| &s.name), id);
         remove_file_slots(&mut self.members, old.index.members.iter().map(|m| &m.owner), id);
@@ -663,6 +671,11 @@ impl Index {
             aliases.filter_map(|alias| Some((Read::Table(alias.table.as_ref()?.owner.clone()), alias)))
         };
         changed_groups(out, enums(before), enums(after), |a, b| same_alias(a, b));
+        let operators = |entry: Option<&'a FileEntry>| {
+            let classes = entry.into_iter().flat_map(|entry| &entry.index.classes);
+            classes.flat_map(|class| &class.operators).map(|operator| (Read::Operators, &operator.name))
+        };
+        changed_groups(out, operators(before), operators(after), |a, b| a == b);
         let exports = |entry: Option<&'a FileEntry>| {
             let resource = entry.and_then(|entry| self.resource(entry.resource?)).map(|r| exports_key(&r.name));
             let exports = entry.into_iter().flat_map(|entry| &entry.index.exports);
@@ -849,6 +862,17 @@ impl Index {
     /// The members of `owner` called `name` that code in `from` sees, with the file that sets each.
     pub fn members_named(&self, owner: &str, name: &str, from: FileId) -> Vec<(FileId, &Member)> {
         self.member_entries(owner, Some(name), from)
+    }
+
+    /// The operators, such as `add` or `concat`, that some class declares with `@operator`, so
+    /// that operations no class declares need no lookup.
+    pub fn operator_names(&self) -> Arc<FxHashSet<SmolStr>> {
+        self.note(|| Read::Operators);
+        let build = || {
+            let classes = self.files().flat_map(|(_, file)| &file.index.classes);
+            Arc::new(classes.flat_map(|class| &class.operators).map(|operator| operator.name.clone()).collect())
+        };
+        self.operator_names.get_or_init(build).clone()
     }
 
     /// The names of the fields and methods that some class declares `private`, `protected` or
