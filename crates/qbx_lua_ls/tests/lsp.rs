@@ -1318,6 +1318,32 @@ local numbered = findInput(1)
 }
 
 #[test]
+fn signature_help_shows_the_docs_of_the_function_a_local_holds() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local each = function(a, b) end
+each(1, 2)
+---Counts the values.
+---@param n integer
+local function count(n) end
+count(1)
+local GetEntityCoords = GetEntityCoords
+GetEntityCoords(1)
+";
+    client.open_with(CLIENT, text);
+    // The cursor goes after the `(` of each call.
+    let mut documentation = |call: &str| {
+        let (l, c) = pos(text, call, call.find('(').unwrap() as u32 + 1);
+        let result = client.request("textDocument/signatureHelp", client.position_params(CLIENT, l, c));
+        result["signatures"][0]["documentation"]["value"].as_str().map(str::to_string)
+    };
+    assert_eq!(documentation("each(1, 2)"), None, "not the docs of the global `each` the local hides");
+    assert_eq!(documentation("count(1)").as_deref(), Some("Counts the values."));
+    let native = documentation("GetEntityCoords(1)").unwrap_or_default();
+    assert!(native.contains("coordinates"), "a local holding a native keeps its docs: {native}");
+}
+
+#[test]
 fn side_scoped_annotations_follow_the_side_of_the_code() {
     const SHARED: &str = "myresource/shared/config.lua";
     let mut client = Client::start(fixture_root());

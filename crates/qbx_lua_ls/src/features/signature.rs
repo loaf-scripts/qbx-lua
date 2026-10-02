@@ -1,10 +1,13 @@
 use lsp_types::{Documentation, ParameterInformation, ParameterLabel, Position, SignatureHelp, SignatureInformation};
 use qbx_fivem_data::native_docs;
-use qbx_lua_syntax::ast::ExprKind;
+use qbx_lua_analysis::scope::Resolved;
+use qbx_lua_syntax::ast::{ExprKind, Name, StmtKind};
 
 use super::event_call::{event_call, wrapper_call};
 use super::{markdown, with_infer};
 use crate::document::Document;
+use crate::indexer::render_doc;
+use crate::infer::{Decl, Infer};
 use crate::locate::locate;
 use crate::types::FunType;
 use crate::workspace::Workspace;
@@ -38,13 +41,8 @@ pub fn signature_help(ws: &Workspace, doc: &Document, position: Position) -> Opt
 
         let mut documentation = member.and_then(|m| m.doc).map(|d| d.to_string());
         if documentation.is_none() {
-            if let ExprKind::Name(global) = &site.base.kind {
-                documentation = ws
-                    .index
-                    .globals_named(&global.text, doc.file)
-                    .into_iter()
-                    .find_map(|(_, s)| s.doc.as_ref().map(|d| d.to_string()))
-                    .or_else(|| native_docs(&global.text));
+            if let ExprKind::Name(name) = &site.base.kind {
+                documentation = name_doc(ws, doc, infer, name);
             }
         }
 
@@ -67,6 +65,41 @@ pub fn signature_help(ws: &Workspace, doc: &Document, position: Position) -> Opt
         let active_parameter = signatures[active_signature].active_parameter;
         Some(SignatureHelp { signatures, active_signature: Some(active_signature as u32), active_parameter })
     })
+}
+
+/// The docs of the function that `name` calls: those of the global or native it names, or the doc
+/// comment of the local it names. A local that takes a global, as `local GetEntityCoords =
+/// GetEntityCoords` does, and has no doc comment of its own shows the docs of that global.
+fn name_doc(ws: &Workspace, doc: &Document, infer: &Infer, name: &Name) -> Option<String> {
+    let global = match doc.resolution.resolve_at(name.span.start) {
+        Some(Resolved::Local(id)) => {
+            let (stmt, value) = match infer.ctx.decl(doc.resolution.local(id).decl.start)? {
+                Decl::LocalFunction { stmt, .. } => (stmt, None),
+                Decl::Local { stmt, index } => match &stmt.kind {
+                    StmtKind::Local { exprs, .. } => (stmt, exprs.get(*index)),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            if let Some(own) = render_doc(&infer.ctx.doc_at(stmt.span.start)) {
+                return Some(own.to_string());
+            }
+            match value.map(|value| &value.kind) {
+                Some(ExprKind::Name(global))
+                    if matches!(doc.resolution.resolve_at(global.span.start), Some(Resolved::Global(_))) =>
+                {
+                    global
+                }
+                _ => return None,
+            }
+        }
+        _ => name,
+    };
+    ws.index
+        .globals_named(&global.text, doc.file)
+        .into_iter()
+        .find_map(|(_, s)| s.doc.as_ref().map(|d| d.to_string()))
+        .or_else(|| native_docs(&global.text))
 }
 
 /// One signature of a call, with the parameter that the argument at index `argument` is passed to.
