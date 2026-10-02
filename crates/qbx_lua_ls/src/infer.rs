@@ -959,8 +959,8 @@ impl<'a> Infer<'a> {
         if let Some(class) = doc.declared_class() {
             return own_type(&class.name, &class.generics);
         }
-        if let Some(ty) = doc.type_at(index) {
-            return ty.clone();
+        if let Some(ty) = local_annotation(&doc, index) {
+            return ty;
         }
         if *in_unpack {
             let base = exprs.first().map(|e| self.expr(e)).unwrap_or_default();
@@ -1200,7 +1200,13 @@ impl<'a> Infer<'a> {
                 // `---@class Name` above a table declares the class rather than a value of it,
                 // unless a `---@type` follows it.
                 let doc = self.ctx.doc_at(stmt.span.start);
-                doc.type_at(index).filter(|_| doc.declared_class().is_none()).cloned()
+                if doc.declared_class().is_some() {
+                    return None;
+                }
+                match &stmt.kind {
+                    StmtKind::Local { .. } => local_annotation(&doc, index),
+                    _ => doc.type_at(index).cloned(),
+                }
             }
             Expected::Field { table, key } => {
                 let at = self.ctx.tables.get(&table.span.start)?;
@@ -3429,6 +3435,14 @@ fn field_start(source: &str, field: &TableField) -> u32 {
         }
         TableField::Positional(value) => value.span.start,
     }
+}
+
+/// The `---@type` that `doc` gives the name at `index` of the `local` statement below it. A local
+/// is no member of a class, so a `self` in the type stands for nothing and is unknown, as in
+/// lua-language-server.
+fn local_annotation(doc: &DocGroup, index: usize) -> Option<Type> {
+    let ty = doc.type_at(index)?;
+    Some(if ty.mentions_self() { ty.with_self(&Type::Unknown) } else { ty.clone() })
 }
 
 /// The functions a statement defines under its doc comment: `function f()`, `local function f()`,

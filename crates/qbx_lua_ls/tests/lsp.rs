@@ -6831,6 +6831,36 @@ local ran = run(function() return 1 end)
 }
 
 #[test]
+fn self_in_the_type_of_a_local_is_unknown() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type fun(): self
+local make
+local made = make()
+
+---@class Test.Maker
+local Maker = {}
+
+function Maker:build()
+    ---@type self
+    local me
+    return me
+end
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("make\n", "local function make(): unknown"),
+        ("made", "local made: unknown"),
+        // A local in a method is no member of the class either, as lua-language-server reads it.
+        ("me\n", "local me: unknown"),
+    ] {
+        let (l, c) = pos(text, &format!("local {needle}"), 6);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn functions_tagged_async_show_it_in_hover() {
     let mut client = Client::start(fixture_root());
     let text = "\
