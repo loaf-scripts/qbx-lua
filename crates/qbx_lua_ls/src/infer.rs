@@ -1027,8 +1027,9 @@ impl<'a> Infer<'a> {
     /// the generics of the callee bound from the types `declared` gives its other arguments: `resolve`
     /// of `fun(resolve: fun(value: T))` takes a `boolean` for `promise('boolean', ...)` whose first
     /// parameter is a `` `T` ``. A generic they leave unbound is unknown: the values the call passes
-    /// bind it otherwise, which tells nothing declared. `None` when a `@param` line types the
-    /// parameter.
+    /// bind it otherwise, which tells nothing declared. So is the parameter when the signatures that
+    /// the call fits equally well, such as two `@overload`s for the same action, type it differently.
+    /// `None` when a `@param` line types the parameter.
     pub fn declared_callback_param(&self, id: LocalId, declared: impl Fn(&Expr) -> Type) -> Option<Type> {
         let local = self.ctx.resolution.local(id);
         let Some(Decl::Param { func, index, doc_anchor, expected: Some(Expected::Arg { call, arg_index }) }) =
@@ -1043,13 +1044,31 @@ impl<'a> Infer<'a> {
         if (*index < 2 && self.on_cache_param(call).is_some()) || self.triggered_returns(call, *arg_index).is_some() {
             return None;
         }
-        let (callee, args, via_method) = self.call_parts(call)?;
-        let (skip_params, skip_args) = callee.call_offsets(via_method);
-        let callback = self.fun_of(&callee.params.get((arg_index + skip_params).checked_sub(skip_args)?)?.ty)?;
-        let param = callback.params.get(*index)?;
-        let args = CallArgs::typed(args.exprs, declared);
-        let ty = substitute(&param.ty, &self.bind_generics(&callee, &args, via_method, false));
-        Some(if param.optional { ty.optional() } else { ty })
+        let (base, method, exprs) = match &call.kind {
+            ExprKind::Call { callee, args, .. } => (callee, None, args),
+            ExprKind::MethodCall { base, method, args, .. } => (base, Some(method), args),
+            _ => return None,
+        };
+        let via_method = method.is_some();
+        let (fun, _) = self.callee_fun(base, method)?;
+        let signatures = self.signatures_at(&fun, call.span.start);
+        let inferred = CallArgs::new(exprs);
+        let fits: Vec<Fit> = signatures.iter().map(|signature| self.fit(signature, &inferred, via_method)).collect();
+        let best = fits.iter().max().copied()?;
+        let args = CallArgs::typed(exprs, declared);
+        let mut types = signatures.iter().zip(&fits).filter(|(_, fit)| **fit == best).map(|(callee, _)| {
+            let (skip_params, skip_args) = callee.call_offsets(via_method);
+            let callback = self.fun_of(&callee.params.get((arg_index + skip_params).checked_sub(skip_args)?)?.ty)?;
+            let param = callback.params.get(*index)?;
+            let ty = substitute(&param.ty, &self.bind_generics(callee, &args, via_method, false));
+            Some(if param.optional { ty.optional() } else { ty })
+        });
+        let first = types.next()?;
+        if types.all(|ty| ty == first) {
+            first
+        } else {
+            Some(Type::Unknown)
+        }
     }
 
     /// `TriggerCallback('name', function(response) end)` receives what the handler of `name`

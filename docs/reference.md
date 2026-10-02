@@ -359,9 +359,9 @@ change, so it passes for `"fast" | "slow"`, while `local count = 5` is still no 
 - Types inferred from assigned values, such as that of `Config.Value = ''`.
 - Parameters typed with a generic of the function called: the arguments of the call bind it, which
   declares nothing. A function that a callee passes to a callback, such as `resolve` of
-  `fun(resolve: fun(value: T))`, takes what the other arguments of that call declare for the
-  generic, as the `boolean` of `Promise:New('boolean', function(resolve) end)` for a `` `T` ``, and
-  any value for a generic they leave unbound. The values such a function returns are left out.
+  `fun(resolve: fun(value: T))`, takes and returns what the other arguments of that call declare
+  for the generic, as the `boolean` of `Promise:New('boolean', function(resolve) end)` for a
+  `` `T` ``, and any value for a generic they leave unbound.
 - Parameters typed with the name of a native handle such as `Vehicle`, which resources also declare
   as classes.
 - Calls through globals in an opaque resource, such as an escrowed one; see
@@ -649,6 +649,9 @@ if type(value) == "tabel" then end        -- Comparing `lua_type` with `"tabel"`
 
 A side has a type when something declares it: a literal, an operator such as `not` or `..`, a
 `@param`, `@type` or `@return`, a `@field` of a class, an alias or enum, a stub or a native. A
+parameter of a function passed to a call has the type the callee declares for it, with the generics
+that the other arguments declare: `value` is a `Player` in
+`onValue('Player', function(value) end)` for `---@param cb fun(value: T)` and a `` `T` ``. A
 local that is never assigned again has the type of the value it is declared with, so
 `local state = GetState()` is checked like the call, and inside a
 [type guard](../crates/qbx_lua_ls/README.md#type-guards) the type the guard narrows it to: the right
@@ -726,9 +729,10 @@ print(name:upper()) -- `name` may be nil: its type here is `string?`
 print(name:lower()) -- the read above raises the error first
 ```
 
-A local may hold `nil` when its declared type allows it: its `---@type` or `@param`, or the
-`@return` or `@field` of the function or class its value comes from, whoever declares them,
-stubs and other resources included. `false`, as in `false|string`, counts as well. The
+A local may hold `nil` when its declared type allows it: its `---@type` or `@param`, the
+`@return` or `@field` of the function or class its value comes from, or for a parameter of a
+function passed to a call, what the callee declares for it, whoever declares them, stubs and other
+resources included. `false`, as in `false|string`, counts as well. The
 [type guards](../crates/qbx_lua_ls/README.md#type-guards) and casts around the read narrow the
 type first, so `if not name then return end`, `if name then`, `name and name:upper()`,
 `assert(name)` and `---@cast name -?` all check it, as does a condition that reads from it, such as

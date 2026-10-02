@@ -14,8 +14,8 @@
 //! leave out the `?` of a parameter that code skips, and neither is `false`, which FiveM code passes
 //! to skip a parameter of exports and events, whose arguments are serialized. Parameters typed with a
 //! generic of the function called are left out, as the arguments of the call bind them. The function
-//! a callee passes to a callback, such as `resolve` of `fun(resolve: fun(value: T))`, takes what the
-//! other arguments of that call declare for its generics, as the `boolean` of
+//! a callee passes to a callback, such as `resolve` of `fun(resolve: fun(value: T))`, takes and
+//! returns what the other arguments of that call declare for its generics, as the `boolean` of
 //! `Promise:New('boolean', function(resolve) end)` for a `` `T` ``; a generic they leave unbound
 //! takes any value.
 
@@ -250,11 +250,14 @@ pub fn definitions(infer: &Infer, base: &Expr, method: Option<&Name>) -> Vec<Arc
                 globals.into_iter().filter_map(|(_, symbol)| symbol.ty.as_fun().cloned()).collect()
             }
             // A parameter whose function the callee of its own function gives takes what the callee
-            // declares, with the generics that the other arguments of that call declare.
+            // declares, with the generics that the other arguments of that call declare, and is not
+            // checked where the callee declares no single function for it.
             Some(Resolved::Local(id)) => {
                 let declared = Declared::new(infer);
-                let callback = infer.declared_callback_param(id, |arg| declared.of(arg));
-                callback.and_then(|ty| infer.fun_of(&ty)).map_or_else(held, |fun| vec![fun])
+                match infer.declared_callback_param(id, |arg| declared.of(arg)) {
+                    Some(callback) => infer.fun_of(&callback).into_iter().collect(),
+                    None => held(),
+                }
             }
             _ => held(),
         },

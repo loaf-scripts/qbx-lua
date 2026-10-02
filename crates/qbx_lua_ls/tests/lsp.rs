@@ -4718,9 +4718,62 @@ watch(Settings.Count, function(set) set(1) end)
         [
             finding("reject(5)", "Cannot assign `integer` to parameter `reason` of type `string`"),
             finding("set(1)\n", "Cannot assign `integer` to parameter `value` of type `boolean`"),
+            finding("needsNumber(get())", "Cannot assign `boolean` to parameter `n` of type `number`"),
         ],
-        "a function the callee passes takes what the other arguments declare for its generics; a generic \
-         bound from an inferred value takes any value, and what such a function returns passes"
+        "a function the callee passes takes and returns what the other arguments declare for its generics; \
+         a generic bound from an inferred value takes any value"
+    );
+}
+
+#[test]
+fn parameters_of_callbacks_have_the_types_their_callee_declares() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Player
+---@field name string
+---@param n number
+local function needsNumber(n) end
+---@generic T
+---@param kind `T`
+---@param cb fun(value: T)
+local function onValue(kind, cb) end
+---@param cb fun(value: string)
+local function onString(cb) end
+---@param action string
+---@param handler fun(...)
+---@overload fun(action: 'updated', handler: fun(player: Probe.Player))
+---@overload fun(action: 'updated', handler: fun(source: number, player: Probe.Player))
+local function onAction(action, handler) end
+Settings = { Kind = 'Probe.Player' }
+
+onValue('Probe.Player', function(value) needsNumber(value) end)
+onValue('boolean', function(value) needsNumber(value) end)
+onValue(Settings.Kind, function(value) needsNumber(value) end)
+onString(function(value) needsNumber(value) end)
+---@param value number
+onString(function(value) needsNumber(value) end)
+onString(function(value)
+    if value == 5 then print(value) end
+end)
+onAction('updated', function(source) needsNumber(source) end)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |code: &str, needle: &str, message: &str| (code.to_string(), line(needle), message.to_string());
+    let mismatch = |needle: &str, given: &str| {
+        let message = format!("Cannot assign `{given}` to parameter `n` of type `number`");
+        finding("param-type-mismatch", needle, &message)
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch", "impossible-comparison"]),
+        [
+            mismatch("onValue('Probe.Player'", "Probe.Player"),
+            mismatch("onValue('boolean'", "boolean"),
+            mismatch("onString(function(value) needs", "string"),
+            finding("impossible-comparison", "value == 5", "Comparing `string` with `5` is always false"),
+        ],
+        "a parameter takes what the callee declares for it, with the generics the other arguments declare, \
+         unless a `@param` line above the call types it or overloads that fit as well type it differently"
     );
 }
 

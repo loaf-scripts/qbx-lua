@@ -4,10 +4,11 @@
 //! `"active"|"busy"|"ready"`.
 //!
 //! A side only has a type that something declares: a literal, an operator, an annotation, a stub
-//! or a native. What inference reads from assigned values is left out, since `Config.Webhook = ''`
-//! tells what is stored today and not that `false` never is. Comparisons with `nil` are left alone
-//! as well: annotations often leave out the `?` of a value that may be missing, and the check for
-//! it is deliberate.
+//! or a native, also the callee of a call for the parameters of a function passed to it. What
+//! inference reads from assigned values is left out, since `Config.Webhook = ''` tells what is
+//! stored today and not that `false` never is. Comparisons with `nil` are left alone as well:
+//! annotations often leave out the `?` of a value that may be missing, and the check for it is
+//! deliberate.
 
 use std::cell::{OnceCell, RefCell};
 
@@ -20,7 +21,7 @@ use rustc_hash::FxHashMap;
 
 use super::class_tables::{Classes, Key};
 use super::unknown_types::has_param_line;
-use crate::infer::{Decl, Infer};
+use crate::infer::{Decl, Expected, Infer};
 use crate::luacats::CastEntry;
 use crate::types::Type;
 
@@ -174,10 +175,19 @@ impl<'a, 'b> Declared<'a, 'b> {
         match self.infer.ctx.decl(local.decl.start) {
             Some(Decl::Local { stmt, index }) => self.local_value(id, stmt, *index, depth),
             Some(Decl::Param { .. }) if has_param_line(self.infer, local) => self.infer.local_type(id),
+            Some(Decl::Param { expected: Some(Expected::Arg { .. }), .. }) => self.callback_param(id, depth),
             Some(Decl::LocalFunction { .. } | Decl::SelfParam { .. }) => self.infer.local_type(id),
             Some(Decl::NumericFor) => Type::Number,
             _ => Type::Unknown,
         }
+    }
+
+    /// What the callee of a call declares for the parameter `id` of a function passed to it, with the
+    /// generics bound from what the other arguments of the call declare: `value` of
+    /// `onValue('Player', function(value) end)` is a `Player` for `fun(value: T)` and a `` `T` ``.
+    fn callback_param(&self, id: LocalId, depth: u32) -> Type {
+        let declared = |arg: &Expr| self.declared(arg, depth + 1);
+        self.infer.declared_callback_param(id, declared).unwrap_or_default()
     }
 
     /// Whether a `---@type` above its declaration or a `@param` line types the local.
@@ -245,7 +255,7 @@ impl<'a, 'b> Declared<'a, 'b> {
     /// What `call` returns when its function declares it. A native documented as `boolean` can
     /// give scripts `1` instead of `true`, so code compares its result with either.
     fn returned(&self, call: &Expr) -> Option<Vec<Type>> {
-        let values = self.infer.declared_returns(call)?;
+        let values = self.infer.declared_returns(call).or_else(|| self.callback_returns(call))?;
         if !self.is_native_call(call) {
             return Some(values);
         }
@@ -254,6 +264,21 @@ impl<'a, 'b> Declared<'a, 'b> {
             other => other,
         };
         Some(values.into_iter().map(as_returned).collect())
+    }
+
+    /// What a call of a parameter returns when the callee of its function declares the function it
+    /// holds: `get()` gives a `boolean` for `get` of `fun(get: fun(): T)` with `T` bound to one. The
+    /// generics that the other arguments of that call declare bind values that are declared too.
+    fn callback_returns(&self, call: &Expr) -> Option<Vec<Type>> {
+        let ExprKind::Call { callee, args, .. } = &call.kind else { return None };
+        let ExprKind::Name(name) = &callee.unparen().kind else { return None };
+        let Some(Resolved::Local(id)) = self.infer.ctx.resolution.resolve_at(name.span.start) else { return None };
+        if !matches!(self.infer.ctx.decl(self.infer.ctx.resolution.local(id).decl.start), Some(Decl::Param { .. })) {
+            return None;
+        }
+        let fun = self.infer.fun_of(&self.declaration(id))?;
+        let fun = self.infer.call_signature(&fun, args, false, call.span.start);
+        fun.generics.is_empty().then(|| fun.returns.clone())
     }
 
     fn is_native_call(&self, call: &Expr) -> bool {
