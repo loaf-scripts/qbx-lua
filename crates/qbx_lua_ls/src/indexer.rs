@@ -331,11 +331,13 @@ impl<'a> Indexer<'a> {
     }
 
     /// Records a member set by the statement or table field whose doc comment starts at `doc_anchor`,
-    /// which may declare it `---@private`.
+    /// which may declare it `---@private` or give its type.
     fn push_member(&mut self, owner: SmolStr, symbol: Symbol, injected: bool, doc_anchor: Option<u32>) {
         if self.out.members.len() < MAX_MEMBERS_PER_FILE {
-            let visibility = doc_anchor.map(|anchor| self.ctx.doc_at(anchor).visibility).unwrap_or_default();
-            self.out.members.push(Member { owner, symbol, injected, visibility });
+            let doc = doc_anchor.map(|anchor| self.ctx.doc_at(anchor));
+            let visibility = doc.as_ref().map(|doc| doc.visibility).unwrap_or_default();
+            let typed = doc.is_some_and(|doc| doc.ty.is_some() || !doc.classes.is_empty());
+            self.out.members.push(Member { owner, symbol, injected, visibility, typed });
         }
     }
 

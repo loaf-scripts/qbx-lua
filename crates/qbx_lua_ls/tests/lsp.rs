@@ -5968,6 +5968,66 @@ local inferred = value:inferred()
 }
 
 #[test]
+fn fields_set_in_several_places_hold_each_value() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local Machine = {}
+Machine.state = 0
+function Machine:start()
+    self.state = 'running'
+end
+Machine.ratio = 1
+Machine.ratio = 1.5
+Machine.cleared = 1
+Machine.cleared = nil
+---@type string
+Machine.named = nil
+Machine.named = 5
+Machine.handler = nil
+Machine.handler = function() end
+Machine.reason = 'closed'
+function Machine.close(...) Machine.reason = ... end
+Machine.size = 1
+Machine.size = 2
+Machine.size = 3
+Machine.size = 4
+Machine.size = 5
+Machine.size = 6
+
+---@class Test.Holder
+local Holder = {}
+Holder.__index = Holder
+function Holder.new()
+    local self = setmetatable({}, Holder)
+    self.item = nil
+    return self
+end
+---@param item Test.Holder
+function Holder:set(item)
+    self.item = item
+end
+print(Machine.state, Machine.ratio, Machine.cleared, Machine.named, Machine.handler, Machine.reason, Holder.new().item, Machine.size)
+";
+    client.open_with(CLIENT, text);
+    let print = pos(text, "print(", 0).0;
+    let line = text.lines().nth(print as usize).unwrap();
+    for (needle, expected) in [
+        ("Machine.state", "state: integer|string = 0|'running'"),
+        ("Machine.size", "size: integer = 1|2|3|4|5|...\n"),
+        ("Machine.ratio", "ratio: number = 1|1.5"),
+        ("Machine.cleared", "cleared: integer = 1"),
+        ("Machine.named", "named: string"),
+        ("Machine.handler", "function handler()"),
+        ("Machine.reason", "reason: string"),
+        ("new().item", "item: Test.Holder"),
+    ] {
+        let column = (line.find(needle).unwrap() + needle.len() - 1) as u32;
+        let hover = client.hover_text(CLIENT, print, column);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn class_operators_type_the_operations_on_their_values() {
     let mut client = Client::start(fixture_root());
     let text = "\

@@ -23,6 +23,9 @@ const MAX_SHAPE_FIELDS: usize = 96;
 /// An undocumented function that returns more different sets of values than this keeps only what
 /// each position holds across them.
 const MAX_RETURN_SETS: usize = 4;
+/// How many of the literal values that several assignments store in a field a hover lists, as
+/// lua-language-server lists the first few: each entry of a large data table sets one.
+const MAX_MERGED_LITERALS: usize = 5;
 
 /// Bits for the kinds of Lua value a type allows, used to pick the `@overload` a call fits.
 mod kind {
@@ -495,6 +498,9 @@ pub struct MemberInfo {
     pub literal: Option<SmolStr>,
     pub kind: SymbolKind,
     pub location: Option<(FileId, Range)>,
+    /// The type is inferred from the value that an assignment without `---@type` stores, so other
+    /// assignments to the same field may store values of other types.
+    pub inferred: bool,
 }
 
 pub struct Infer<'a> {
@@ -2682,6 +2688,9 @@ impl<'a> Infer<'a> {
             if found.is_empty() {
                 return indexed_field(name, self.index_value(ty, &Type::StringLit(SmolStr::new(name)), 0));
             }
+            if let Some(merged) = merged_assignments(&found.iter().collect::<Vec<_>>()) {
+                return Some(merged);
+            }
             let best = (0..found.len()).max_by_key(|i| (found[*i].ty.specificity(), std::cmp::Reverse(*i)))?;
             Some(found.swap_remove(best))
         })
@@ -2714,11 +2723,23 @@ impl<'a> Infer<'a> {
         }
     }
 
+    /// The members of `ty`, one for each name: the first found, or the values that several
+    /// assignments store in it, as `member` gives them.
     pub fn members(&self, ty: &Type) -> Vec<MemberInfo> {
-        let mut members = self.guarded(|| self.members_matching(ty, None));
-        let mut seen = FxHashSet::default();
-        members.retain(|m| seen.insert(m.name.clone()));
-        members
+        let members = self.guarded(|| self.members_matching(ty, None));
+        let mut names: Vec<&SmolStr> = Vec::new();
+        let mut named: FxHashMap<&SmolStr, Vec<&MemberInfo>> = FxHashMap::default();
+        for member in &members {
+            named
+                .entry(&member.name)
+                .or_insert_with(|| {
+                    names.push(&member.name);
+                    Vec::new()
+                })
+                .push(member);
+        }
+        let first = |found: &[&MemberInfo]| merged_assignments(found).unwrap_or_else(|| found[0].clone());
+        names.into_iter().map(|name| first(&named[name])).collect()
     }
 
     fn members_matching(&self, ty: &Type, filter: Option<&str>) -> Vec<MemberInfo> {
@@ -2740,6 +2761,7 @@ impl<'a> Infer<'a> {
                         literal: None,
                         kind: SymbolKind::Field,
                         location: None,
+                        inferred: false,
                     });
                 }
             }
@@ -2767,6 +2789,7 @@ impl<'a> Infer<'a> {
                         literal: None,
                         kind: SymbolKind::Table,
                         location: None,
+                        inferred: false,
                     });
                 }
                 // Resources the workspace lacks, such as escrowed ones, may still have typed exports.
@@ -2790,6 +2813,7 @@ impl<'a> Infer<'a> {
                         literal: None,
                         kind: SymbolKind::Table,
                         location: None,
+                        inferred: false,
                     });
                 }
             }
@@ -2889,6 +2913,7 @@ impl<'a> Infer<'a> {
             let symbol = &entry.symbol;
             if filter.is_none_or(|f| f == symbol.name) {
                 let mut member = member_from_symbol(file, symbol);
+                member.inferred = !entry.typed && matches!(symbol.kind, SymbolKind::Field | SymbolKind::Variable);
                 if matches!(member.ty, Type::Table | Type::Unknown) {
                     let nested = format!("{owner}.{}", symbol.name);
                     if self.index.has_members(&nested) {
@@ -2909,6 +2934,7 @@ impl<'a> Infer<'a> {
                     literal: None,
                     kind: SymbolKind::Table,
                     location: None,
+                    inferred: false,
                 });
             }
         }
@@ -2984,6 +3010,44 @@ fn add_signature(fun: &mut Arc<FunType>, next: &Arc<FunType>) {
     fun.overloads.extend(next.overloads.iter().cloned());
 }
 
+/// A field that several assignments without a `---@type` set, as `T.state = 0` and
+/// `self.state = 'running'` do, which holds any of the values they store besides the `nil` that
+/// clears it, as lua-language-server reads it. `None` unless every one of `found` is such an
+/// assignment, and two or more of them store a value, none of them a function.
+fn merged_assignments(found: &[&MemberInfo]) -> Option<MemberInfo> {
+    if found.len() < 2 || !found.iter().all(|member| member.inferred) {
+        return None;
+    }
+    let stored: Vec<&MemberInfo> = found.iter().copied().filter(|member| member.ty != Type::Nil).collect();
+    if stored.len() < 2 || stored.iter().any(|member| member.ty.as_fun().is_some()) {
+        return None;
+    }
+    // `1` and `1.5` store numbers, not `integer|number`. A value that may be anything, like the
+    // `args[1]` of an untyped command handler, tells no more about the field than one of unknown
+    // type does.
+    let has_number = stored.iter().any(|member| matches!(member.ty.without_nil(), Type::Number));
+    let all_any = stored.iter().all(|member| member.ty == Type::Any);
+    let types = stored
+        .iter()
+        .map(|member| member.ty.clone())
+        .filter(|ty| !(has_number && *ty == Type::Integer) && (all_any || *ty != Type::Any));
+    let mut literals: Vec<SmolStr> = Vec::new();
+    for literal in stored.iter().map(|member| member.literal.clone()) {
+        match literal {
+            Some(literal) if !literals.contains(&literal) => literals.push(literal),
+            Some(_) => {}
+            None => {
+                literals.clear();
+                break;
+            }
+        }
+    }
+    let more = if literals.len() > MAX_MERGED_LITERALS { "|..." } else { "" };
+    literals.truncate(MAX_MERGED_LITERALS);
+    let literal = (!literals.is_empty()).then(|| SmolStr::new(format!("{}{more}", literals.join("|"))));
+    Some(MemberInfo { ty: Type::union(types), literal, ..stored[0].clone() })
+}
+
 /// The field `name` that an index gives the value `ty`, unless the value is unknown.
 fn indexed_field(name: &str, ty: Type) -> Option<MemberInfo> {
     (!ty.is_unknown()).then(|| MemberInfo {
@@ -2994,6 +3058,7 @@ fn indexed_field(name: &str, ty: Type) -> Option<MemberInfo> {
         literal: None,
         kind: SymbolKind::Field,
         location: None,
+        inferred: false,
     })
 }
 
@@ -3022,6 +3087,7 @@ fn member_from_symbol(file: FileId, symbol: &crate::index::Symbol) -> MemberInfo
         literal: symbol.literal.clone(),
         kind: symbol.kind,
         location: Some((file, symbol.range)),
+        inferred: false,
     }
 }
 

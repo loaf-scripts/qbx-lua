@@ -142,6 +142,9 @@ pub struct Member {
     pub injected: bool,
     /// The `---@private`, `---@protected` or `---@package` above the statement that sets it.
     pub visibility: Visibility,
+    /// A `---@type` or `---@class` above the statement or field that sets it declares its type, so
+    /// what other code stores in it does not change that type.
+    pub typed: bool,
 }
 
 /// The entries of a table constructor that have no name: its array part (`key` is `None`), or its
@@ -619,9 +622,9 @@ impl Index {
         changed_groups(out, globals(before), globals(after), |a, b| a == b);
         let members = |entry: Option<&'a FileEntry>| {
             entry.into_iter().flat_map(|entry| &entry.index.members).map(|member| {
-                let Member { owner, symbol, injected, visibility } = member;
+                let Member { owner, symbol, injected, visibility, typed } = member;
                 let read = Read::Members(owner.clone(), Some(symbol.name.clone()));
-                (read, (symbol.kind, &symbol.ty, *injected, *visibility))
+                (read, (symbol.kind, &symbol.ty, *injected, *visibility, *typed))
             })
         };
         let mut named = FxHashSet::default();
