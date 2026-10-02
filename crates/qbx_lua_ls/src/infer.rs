@@ -140,6 +140,9 @@ pub struct FileContext<'a> {
     call_anchors: FxHashMap<u32, u32>,
     /// Where each table constructor that a declared type may describe is written, by its start.
     tables: FxHashMap<u32, Expected<'a>>,
+    /// Where each function literal that a declared type may describe is written, by the start of
+    /// its parameter list.
+    functions: FxHashMap<u32, Expected<'a>>,
     /// The `table.__index = value` assignments of the file, by the table and the value.
     index_writes: Vec<(&'a Expr, &'a Expr)>,
     /// The metatables that `setmetatable(name, metatable)` calls give each local, with where each
@@ -157,6 +160,7 @@ impl<'a> FileContext<'a> {
             decls: FxHashMap::default(),
             call_anchors: FxHashMap::default(),
             tables: FxHashMap::default(),
+            functions: FxHashMap::default(),
             index_writes: Vec::new(),
             set_metatables: Vec::new(),
         };
@@ -175,6 +179,7 @@ impl<'a> FileContext<'a> {
             decls: collector.decls,
             call_anchors: collector.call_anchors,
             tables: collector.tables,
+            functions: collector.functions,
             index_writes: collector.index_writes,
             set_metatables,
             docs: RefCell::new(FxHashMap::default()),
@@ -286,6 +291,7 @@ struct DeclCollector<'a> {
     decls: FxHashMap<u32, Decl<'a>>,
     call_anchors: FxHashMap<u32, u32>,
     tables: FxHashMap<u32, Expected<'a>>,
+    functions: FxHashMap<u32, Expected<'a>>,
     index_writes: Vec<(&'a Expr, &'a Expr)>,
     set_metatables: Vec<(&'a Name, u32, &'a Expr)>,
 }
@@ -298,6 +304,9 @@ impl<'a> DeclCollector<'a> {
     }
 
     fn func(&mut self, func: &'a FuncBody, doc_anchor: Option<u32>, expected: Option<Expected<'a>>) {
+        if let Some(expected) = expected {
+            self.functions.insert(func.params_span.start, expected);
+        }
         for (index, param) in func.params.iter().enumerate() {
             self.decls.insert(param.span.start, Decl::Param { func, index, doc_anchor, expected });
         }
@@ -1068,6 +1077,92 @@ impl<'a> Infer<'a> {
             first
         } else {
             Some(Type::Unknown)
+        }
+    }
+
+    /// The function type that something declares the function literal `func` has to be: the
+    /// parameter of the call it is passed to, the `---@type` of the statement it is the value of,
+    /// or the field of a typed table it is written in. A value it returns whose type names a
+    /// generic of the callee or of the type itself is `any`, as only the arguments of a call bind
+    /// those, which declares nothing. `None` when nothing declares one, or when the call fits
+    /// several signatures, which may take different functions.
+    pub fn declared_fun_type(&self, func: &FuncBody) -> Option<Arc<FunType>> {
+        let expected = self.ctx.functions.get(&func.params_span.start)?;
+        let (ty, callee_generics) = match *expected {
+            Expected::Arg { call, arg_index } => {
+                let (base, method, args) = match &call.kind {
+                    ExprKind::Call { callee, args, .. } => (callee, None, args),
+                    ExprKind::MethodCall { base, method, args, .. } => (base, Some(method), args),
+                    _ => return None,
+                };
+                let via_method = method.is_some();
+                let (callee, _) = self.callee_fun(base, method)?;
+                let args = CallArgs::new(args);
+                let signatures = self.signatures_at(&callee, call.span.start);
+                let mut fitting =
+                    signatures.iter().filter(|signature| self.fit(signature, &args, via_method) != Fit::No);
+                let (Some(signature), None) = (fitting.next(), fitting.next()) else { return None };
+                let (skip_params, skip_args) = signature.call_offsets(via_method);
+                let param = signature.params.get((arg_index + skip_params).checked_sub(skip_args)?)?;
+                (param.ty.clone(), signature.generics.clone())
+            }
+            _ => (self.expected_type(expected)?, Vec::new()),
+        };
+        let fun = self.sole_fun(&ty)?;
+        let generics = FunType {
+            generics: callee_generics.into_iter().chain(fun.generics.iter().cloned()).collect(),
+            ..FunType::default()
+        };
+        let declared = |types: &[Type]| -> Vec<Type> {
+            types.iter().map(|ty| if self.names_generic(&generics, ty, 0) { Type::Any } else { ty.clone() }).collect()
+        };
+        Some(Arc::new(FunType {
+            returns: declared(&fun.returns),
+            return_sets: fun.return_sets.iter().map(|set| declared(set)).collect(),
+            overloads: Vec::new(),
+            ..(*fun).clone()
+        }))
+    }
+
+    /// The one function type that `ty` describes, through aliases and beside other kinds of value,
+    /// as in `fun()?` or `table|fun()`. `None` when it lists several, like the two signatures of a
+    /// searcher that returns `function` or `nil, string`, which a function may be either of.
+    fn sole_fun(&self, ty: &Type) -> Option<Arc<FunType>> {
+        match self.expand_aliases(ty, 0) {
+            Type::Fun(fun) => Some(fun),
+            Type::Union(parts) => {
+                let mut funs = parts.into_iter().filter_map(|part| match part {
+                    Type::Fun(fun) => Some(fun),
+                    _ => None,
+                });
+                match (funs.next(), funs.next()) {
+                    (Some(fun), None) => Some(fun),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `ty` names one of the generics of `fun`.
+    fn names_generic(&self, fun: &FunType, ty: &Type, depth: u32) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let names = |ty: &Type| self.names_generic(fun, ty, depth + 1);
+        match ty {
+            Type::Named(name, args) => (args.is_empty() && self.is_generic(fun, name)) || args.iter().any(names),
+            Type::NameOf(_) => true,
+            Type::Array(inner) | Type::Variadic(inner) => names(inner),
+            Type::Map(key, value) => names(key) || names(value),
+            Type::Tuple(types) | Type::Union(types) => types.iter().any(names),
+            Type::Fun(inner) => inner.returns.iter().any(names) || inner.params.iter().any(|param| names(&param.ty)),
+            Type::Shape(shape) => {
+                shape.fields.iter().any(|field| names(&field.ty))
+                    || shape.array.as_ref().is_some_and(names)
+                    || shape.indices.iter().any(|(key, value)| names(key) || names(value))
+            }
+            _ => false,
         }
     }
 

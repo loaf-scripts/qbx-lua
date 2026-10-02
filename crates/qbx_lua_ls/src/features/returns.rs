@@ -9,11 +9,18 @@
 //!
 //! A function that lists sets of values, as `@return false | (string, string)` does, has to return
 //! one of them: each `return` is compared with the set it comes closest to.
+//!
+//! A function literal without `@return` gets the same checks from the function type it is written
+//! as, as lua-language-server gives them: the `fun(n: integer): string` of the parameter it is
+//! passed for, of the `---@type` of the statement it is the value of, or of the field of a typed
+//! table it is written in.
 
 use qbx_lua_analysis::env::is_meta_file;
+use qbx_lua_analysis::scope::Resolved;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
+use rustc_hash::FxHashSet;
 
 use super::class_tables::Classes;
 use crate::infer::{always_exits, return_stmts, Infer};
@@ -71,6 +78,7 @@ pub fn missing_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
         if (required == 0 && sets.is_empty()) || (is_meta && func.body.stmts.is_empty()) {
             continue;
         }
+        let declarer = function.declarer();
         for (stmt, exprs) in return_stmts(&func.body) {
             // With several sets of values, the one this `return` comes closest to decides.
             let required = match sets.is_empty() {
@@ -82,14 +90,15 @@ pub fn missing_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
             };
             if is_short(exprs, required) {
                 let message =
-                    format!("`@return` requires {}, but this returns {}", values(required), values(exprs.len()));
+                    format!("{declarer} requires {}, but this returns {}", values(required), values(exprs.len()));
                 out.push((stmt.span, message));
             }
         }
         if required > 0 && !always_exits(&func.body) {
             let types: Vec<String> = returns[..required].iter().map(code).collect();
             let message = format!(
-                "The function can reach its end without returning, but `@return` requires {}",
+                "The function can reach its end without returning, but {} requires {}",
+                declarer.to_lowercase(),
                 types.join(", ")
             );
             out.push((func.end_span, message));
@@ -106,8 +115,9 @@ pub fn missing_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
 pub fn redundant_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let is_open = |types: &[Type]| matches!(types.last(), Some(Type::Variadic(_)));
     let mut out = Vec::new();
-    for Documented { func, returns, sets, overloads } in documented(infer, chunk) {
-        let declared: Vec<&Vec<Type>> = std::iter::once(&returns).chain(&sets).chain(&overloads).collect();
+    for function in documented(infer, chunk) {
+        let Documented { func, returns, sets, overloads, .. } = &function;
+        let declared: Vec<&Vec<Type>> = std::iter::once(returns).chain(sets).chain(overloads).collect();
         if declared.iter().any(|types| is_open(types)) {
             continue;
         }
@@ -120,7 +130,12 @@ pub fn redundant_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
                 continue;
             }
             let returned = if open_ended { format!("at least {}", values(written)) } else { values(written) };
-            let message = format!("`@return` allows at most {}, but this returns {returned}", values(most));
+            let message = match function.handler && most == 0 {
+                true => format!("Event handlers' return values are discarded, but this returns {returned}"),
+                false => {
+                    format!("{} allows at most {}, but this returns {returned}", function.declarer(), values(most))
+                }
+            };
             out.push((first.span.to(last.span), message));
         }
     }
@@ -155,7 +170,7 @@ fn expected_at(returns: &[Type], index: usize) -> Option<&Type> {
     }
 }
 
-/// A function documented with `@return`.
+/// A function documented with `@return`, or written as a value of a declared function type.
 struct Documented<'c> {
     func: &'c FuncBody,
     /// The type of each value it returns.
@@ -164,9 +179,23 @@ struct Documented<'c> {
     sets: Vec<Vec<Type>>,
     /// The values each `@overload` returns, or each set of them it lists.
     overloads: Vec<Vec<Type>>,
+    /// The values come from the function type the function is written as, not from `@return`.
+    typed: bool,
+    /// It is the handler passed to `AddEventHandler` or `RegisterNetEvent`, whose returned values
+    /// the event system discards.
+    handler: bool,
 }
 
 impl Documented<'_> {
+    /// What declares the values, as a message names it.
+    fn declarer(&self) -> &'static str {
+        if self.typed {
+            "Its function type"
+        } else {
+            "`@return`"
+        }
+    }
+
     /// The types a `return` passing `values` is compared with: `returns`, or of several sets the
     /// one that takes the most of the values, then one the `return` is not short for, then the one
     /// nearest in length.
@@ -179,9 +208,11 @@ impl Documented<'_> {
     }
 }
 
-/// The functions of `chunk` documented with `@return`.
+/// The functions of `chunk` documented with `@return`, and the function literals without it that a
+/// declared function type describes.
 fn documented<'c>(infer: &Infer, chunk: &'c Chunk) -> Vec<Documented<'c>> {
-    let mut finder = Finder { infer, out: Vec::new() };
+    let mut finder =
+        Finder { infer, out: Vec::new(), with_returns: FxHashSet::default(), handlers: FxHashSet::default() };
     finder.visit_block(&chunk.block);
     finder.out
 }
@@ -189,6 +220,20 @@ fn documented<'c>(infer: &Infer, chunk: &'c Chunk) -> Vec<Documented<'c>> {
 struct Finder<'a, 'b, 'c> {
     infer: &'a Infer<'b>,
     out: Vec<Documented<'c>>,
+    /// The functions documented with `@return`, by the start of their parameter list.
+    with_returns: FxHashSet<u32>,
+    /// The function literals passed as event handlers, by the start of their parameter list.
+    handlers: FxHashSet<u32>,
+}
+
+impl Finder<'_, '_, '_> {
+    /// Whether `callee` is the runtime's `AddEventHandler` or `RegisterNetEvent`, not a local of
+    /// that name.
+    fn registers_event(&self, callee: &Expr) -> bool {
+        let ExprKind::Name(name) = &callee.unparen().kind else { return false };
+        matches!(name.text.as_str(), "AddEventHandler" | "RegisterNetEvent")
+            && matches!(self.infer.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Global(_)))
+    }
 }
 
 impl<'c> Visitor<'c> for Finder<'_, '_, 'c> {
@@ -200,15 +245,38 @@ impl<'c> Visitor<'c> for Finder<'_, '_, 'c> {
                     .iter()
                     .flat_map(|overload| std::iter::once(&overload.returns).chain(&overload.return_sets).cloned())
                     .collect();
-                let documented = |func| {
+                let documented = |func: &'c FuncBody| {
                     let ty = |ty: &Type| self.infer.doc_type_for(stmt, func, ty);
                     let returns = doc.returns.iter().map(|r| ty(&r.ty)).collect();
                     let sets = doc.return_sets.iter().map(|set| set.iter().map(ty).collect()).collect();
-                    Documented { func, returns, sets, overloads: overloads.clone() }
+                    Documented { func, returns, sets, overloads: overloads.clone(), typed: false, handler: false }
                 };
+                self.with_returns.extend(functions.iter().map(|func| func.params_span.start));
                 self.out.extend(functions.into_iter().map(documented));
             }
         }
         visit::walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &'c Expr) {
+        if let ExprKind::Call { callee, args, .. } = &expr.kind {
+            if self.registers_event(callee) {
+                let handlers = args.iter().filter_map(|arg| match &arg.unparen().kind {
+                    ExprKind::Function(func) => Some(func.params_span.start),
+                    _ => None,
+                });
+                self.handlers.extend(handlers);
+            }
+        }
+        if let ExprKind::Function(func) = &expr.kind {
+            if !self.with_returns.contains(&func.params_span.start) {
+                if let Some(fun) = self.infer.declared_fun_type(func) {
+                    let (returns, sets) = (fun.returns.clone(), fun.return_sets.clone());
+                    let handler = self.handlers.contains(&func.params_span.start);
+                    self.out.push(Documented { func, returns, sets, overloads: Vec::new(), typed: true, handler });
+                }
+            }
+        }
+        visit::walk_expr(self, expr);
     }
 }

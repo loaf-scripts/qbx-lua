@@ -159,7 +159,7 @@ function select(index, ...) end
 ---@field __call? fun(t: table, ...: any): ...any
 ---@field __tostring? fun(t: table): string
 ---@field __len? fun(t: table): integer
----@field __pairs? fun(t: table): function, table, any
+---@field __pairs? fun(t: table): function, any, any
 ---@field __close? fun(t: table, err: any)
 ---@field __gc? fun(t: table)
 ---@field __unm? fun(a: table): any

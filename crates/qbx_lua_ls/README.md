@@ -64,7 +64,8 @@ Available features depend on the editor's LSP client.
   `---@type` or `@param`, `param-type-mismatch` for arguments of the wrong type, `undeclared-field`
   for fields and keys a `---@class (strict)` does not declare, `return-type-mismatch`,
   `missing-return` and `redundant-return-value` for functions, including callback handlers, that
-  do not return what their `@return` declares, and `discard-returns` for calls that drop the
+  do not return what their `@return`, or the function type they are passed as, declares, and
+  `discard-returns` for calls that drop the
   values of a `@nodiscard` function. `invisible` reports the use of fields and methods a class
   keeps `private`, `protected` or `package` from outside its class, subclasses or file, and
   completion leaves them out there.

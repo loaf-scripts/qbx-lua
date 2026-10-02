@@ -5634,6 +5634,116 @@ print(rest, scalars, described, name, both, escape, tail, more, quiet, plain)
 }
 
 #[test]
+fn functions_written_as_a_typed_function_return_its_values() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param cb fun(n: integer): string
+local function withCb(cb) return cb end
+withCb(function(n) return n end)
+withCb(function(n) return 'a', 2 end)
+withCb(function(n) end)
+withCb(function(n) return tostring(n) end)
+
+---@param cb (fun(): string)?
+local function optional(cb) end
+optional(function() return 1 end)
+
+---@param cb fun()
+local function none(cb) end
+none(function() return 1 end)
+
+---@generic T
+---@param cb fun(): T
+---@return T
+local function generic(cb) return cb() end
+generic(function() return 1 end)
+
+---@param cb fun(): string
+---@overload fun(cb: fun(): integer)
+local function overloaded(cb) end
+overloaded(function() return 1 end)
+
+---@alias Test.Searcher
+---| fun(name: string): function
+---| fun(name: string): nil, string
+---@param searcher Test.Searcher
+local function search(searcher) end
+search(function(name) return nil, name end)
+
+---@type fun(): string
+local typed = function() return 3 end
+
+---@class Test.Options
+---@field onDone fun(): boolean
+
+---@param options Test.Options
+local function open(options) end
+open({ onDone = function() return 'no' end })
+
+---@param cb fun(): string
+local function documented(cb) end
+---@return integer
+documented(function() return 1 end)
+
+---@param cb function
+local function untyped(cb) end
+untyped(function() return 1 end)
+
+AddEventHandler('test:local', function() return 5 end)
+RegisterNetEvent('test:net', function() return 'x', 1 end)
+print(typed)
+";
+    client.open_with(CLIENT, text);
+    let codes = ["return-type-mismatch", "missing-return", "redundant-return-value"];
+    let finding = |code: &str, needle: &str, message: &str| {
+        (code.to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    let mut found = findings(&mut client, CLIENT, &codes);
+    found.sort();
+    let mut expected = vec![
+        finding("return-type-mismatch", "return n end", "Cannot return `integer` as return value #1 of type `string`"),
+        finding(
+            "redundant-return-value",
+            "return 'a', 2",
+            "Its function type allows at most 1 value, but this returns 2 values",
+        ),
+        finding(
+            "missing-return",
+            "withCb(function(n) end)",
+            "The function can reach its end without returning, but its function type requires `string`",
+        ),
+        finding(
+            "return-type-mismatch",
+            "optional(function",
+            "Cannot return `integer` as return value #1 of type `string`",
+        ),
+        finding(
+            "redundant-return-value",
+            "none(function",
+            "Its function type allows at most no values, but this returns 1 value",
+        ),
+        finding("return-type-mismatch", "return 3 end", "Cannot return `integer` as return value #1 of type `string`"),
+        finding("return-type-mismatch", "return 'no'", "Cannot return `string` as return value #1 of type `boolean`"),
+        finding(
+            "redundant-return-value",
+            "return 5 end",
+            "Event handlers' return values are discarded, but this returns 1 value",
+        ),
+        finding(
+            "redundant-return-value",
+            "return 'x', 1",
+            "Event handlers' return values are discarded, but this returns 2 values",
+        ),
+    ];
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "the type of the parameter, `---@type` or field a function is written as declares its values, unless a \
+         generic, several fitting signatures, a union of function types or its own `@return` decides them"
+    );
+}
+
+#[test]
 fn hover_binds_generics_from_arguments_and_callbacks() {
     let mut client = Client::start(fixture_root());
     let text = "\

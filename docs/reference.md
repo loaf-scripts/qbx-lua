@@ -522,6 +522,21 @@ function written in a table, whose doc comment goes above its field. qbx-lua-ls 
   `return 1, print()` passes for `---@return integer`, and `return text:gsub(...)` for
   `---@return string` although `gsub` also returns a count.
 
+A function without `@return` gets the same checks from the function type it is written as, as in
+lua-language-server: the `fun(n: integer): string` of the parameter it is passed for, of the
+`---@type` above the statement it is the value of, or of the field of a typed table it is written
+in. A `fun()` that lists no values takes none, so `return true` in a handler passed for
+`fun(...: any)` is a `redundant-return-value`. A value whose type names a generic of the callee
+or of the function type is not checked, since only the arguments of a call bind it, and nothing
+is checked when the call fits several signatures or the type lists several function types.
+
+```lua
+---@param cb fun(n: integer): string
+local function withCallback(cb) end
+
+withCallback(function(n) return n end) -- Cannot return `integer` as return value #1 of type `string`
+```
+
 A body finishes without running past its end when it ends in `return`, `error(...)`, an
 `if`/`else` whose branches all finish, or a loop such as `while true do` that only a `return`
 leaves. An empty body runs past its end too, except in a definition file marked `---@meta`, whose
