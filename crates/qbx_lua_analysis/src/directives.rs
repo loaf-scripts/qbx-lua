@@ -40,10 +40,8 @@ fn parse_directive(text: &str, own_line: bool) -> Option<(Action, Vec<String>)> 
         .or_else(|| text.strip_prefix("qbxlint:"))
         .or_else(|| text.strip_prefix("@diagnostic"))?
         .trim();
-    let (action, codes) = match rest.find(|c: char| c == ':' || c.is_whitespace()) {
-        Some(i) => (&rest[..i], rest[i + 1..].trim_start_matches(':').trim()),
-        None => (rest, ""),
-    };
+    // Any whitespace separates, so a non-breaking space pasted in where a space was meant still works.
+    let (action, codes) = rest.split_once(|c: char| c == ':' || c.is_whitespace()).unwrap_or((rest, ""));
     let action = match action {
         "disable" => Action::Disable,
         "enable" => Action::Enable,
@@ -52,8 +50,8 @@ fn parse_directive(text: &str, own_line: bool) -> Option<(Action, Vec<String>)> 
         _ => return None,
     };
     let codes = codes
-        .split([',', ' '])
-        .map(str::trim)
+        .trim_start_matches(':')
+        .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|c| !c.is_empty())
         .take_while(|c| !c.starts_with("--"))
         .map(str::to_string)
@@ -138,5 +136,17 @@ function B() end",
         assert!(s.is_suppressed("undefined-global", 1));
         assert!(!s.is_suppressed("undefined-global", 3));
         assert!(s.is_suppressed("unused-local", 5));
+    }
+
+    #[test]
+    fn unicode_whitespace_separates() {
+        let s = suppressions("-- qbx-lint: disable-next-line\u{a0}undefined-global\u{3000}unused-local\nprint(foo)\nlocal a ---@diagnostic disable-line:\u{a0}empty-block,\u{a0}unused-local\n-- qbx-lint: disable\u{3000}lowercase-global\nx = 1");
+        assert!(s.is_suppressed("undefined-global", 1));
+        assert!(s.is_suppressed("unused-local", 1));
+        assert!(!s.is_suppressed("empty-block", 1));
+        assert!(s.is_suppressed("empty-block", 2));
+        assert!(s.is_suppressed("unused-local", 2));
+        assert!(s.is_suppressed("lowercase-global", 4));
+        assert!(!s.is_suppressed("undefined-global", 4));
     }
 }
