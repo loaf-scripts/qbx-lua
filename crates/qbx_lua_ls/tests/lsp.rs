@@ -4301,6 +4301,47 @@ for i = 1, 2 do print(tuple[i]) end
 }
 
 #[test]
+fn strict_classes_take_only_the_keys_a_literal_index_lists() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Keys 'a'|'b'
+
+---@class (exact) Test.Keyed
+---@field [Test.Keys] integer
+
+---@class (exact) Test.Listed
+---@field ['x'|'y'] string
+
+---@type Test.Keyed
+local keyed = { a = 1, c = 2 }
+keyed.b = 'no'
+keyed.d = 3
+print(keyed.a, keyed.e)
+
+---@type Test.Listed
+local listed = { x = 'a', z = 'b' }
+local name = 'y'
+print(listed[name])
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |code: &str, needle: &str, message: &str| (code.to_string(), line(needle), message.to_string());
+    let mismatch = "assign-type-mismatch";
+    let undeclared = "undeclared-field";
+    assert_eq!(
+        findings(&mut client, CLIENT, &[mismatch, undeclared]),
+        [
+            finding(undeclared, "c = 2", "Field `c` is not declared in strict class `Test.Keyed`"),
+            finding(mismatch, "keyed.b", "Cannot assign `string` to field `b` of type `integer`"),
+            finding(undeclared, "keyed.d", "Field `d` is not declared in strict class `Test.Keyed`"),
+            finding(undeclared, "keyed.e", "Field `e` is not declared in strict class `Test.Keyed`"),
+            finding(undeclared, "z = 'b'", "Field `z` is not declared in strict class `Test.Listed`"),
+        ],
+        "an index of string literals, written out or through an alias, takes only those names"
+    );
+}
+
+#[test]
 fn values_assigned_to_typed_variables_are_checked() {
     let mut client = Client::start(fixture_root());
     let text = "\

@@ -393,10 +393,11 @@ such as a `---@type` local, a parameter or `self`, and for fields that code read
 `abc.nope` or `abc:nope()`. A field counts as declared when an `@field` of the class or one of its
 parents names it, or when it is set on the table the `---@class` annotation declares, like `greet`
 above; fields set through values of the class do not count. A `[string]` index, such as
-`---@field [string] any`, takes any name. A table type named as a parent, like `{ id: integer }` or
-`table<string, any>`, declares its fields and indices for the class, so `Name : table<string, any>`
-takes any name too, while a parent that is neither a class nor such a table type, like a plain
-`table`, takes any key.
+`---@field [string] any`, takes any name, and an index of string literals, such as
+`---@field ['a'|'b'] integer` or an alias of them, takes those names. A table type named as a
+parent, like `{ id: integer }` or `table<string, any>`, declares its fields and indices for the
+class, so `Name : table<string, any>` takes any name too, while a parent that is neither a class
+nor such a table type, like a plain `table`, takes any key.
 
 A table that `setmetatable` gives a metatable whose `__index` is the class table, as
 `setmetatable(obj, Test)` does after `Test.__index = Test`, is a value of the class from the call

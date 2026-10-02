@@ -456,9 +456,25 @@ impl<'a, 'b> Classes<'a, 'b> {
         Some((value.clone(), from))
     }
 
-    /// Whether an index keyed by `index_key`, as `from` sees it, takes keys of type `key`.
+    /// Whether an index keyed by `index_key`, as `from` sees it, takes keys of type `key`: one of a
+    /// kind it takes, and when both are literals, the same. An index of `'a'|'b'`, or of an alias of
+    /// them, takes each of the two.
     fn takes(&self, index_key: &Type, from: FileId, key: &Type) -> bool {
-        match (self.kinds(index_key, from, 0), self.kinds(key, self.file(), 0)) {
+        self.takes_at(index_key, from, key, 0)
+    }
+
+    fn takes_at(&self, index_key: &Type, from: FileId, key: &Type, depth: u32) -> bool {
+        if depth > MAX_DEPTH {
+            return true;
+        }
+        let (index_key, key) = (self.resolve(index_key, from, depth), self.resolve(key, self.file(), depth));
+        if let Type::Union(parts) = &index_key {
+            return parts.iter().any(|part| self.takes_at(part, from, &key, depth + 1));
+        }
+        if index_key.is_literal() && key.is_literal() {
+            return index_key == key;
+        }
+        match (self.kinds(&index_key, from, 0), self.kinds(&key, self.file(), 0)) {
             (Some(wanted), Some(got)) => wanted & got != 0,
             _ => true,
         }
