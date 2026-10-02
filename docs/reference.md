@@ -652,14 +652,16 @@ A side has a type when something declares it: a literal, an operator such as `no
 local that is never assigned again has the type of the value it is declared with, so
 `local state = GetState()` is checked like the call, and inside a
 [type guard](../crates/qbx_lua_ls/README.md#type-guards) the type the guard narrows it to: the right
-side of `class ~= 13 or class ~= 14` only runs when `class` is `13`, so it is always true.
+side of `class ~= 13 or class ~= 14` only runs when `class` is `13`, so it is always true. A
+literal stored in such a local counts by its kind only: `local mode = 'dev'` is a setting to
+change, so `mode == 'prod'` passes, while `mode == false` is still reported as a `string` compared
+with `false`.
 
 Only clear cases count, and the rest is left alone:
 
 - Types that are inferred from assigned values. `Config.Webhook = ''` tells what the config holds
-  today, not that `Config.Webhook == false` cannot be true once someone edits it, and
-  `local mode = 'dev'` is a setting like it. The same goes for what an undocumented function
-  returns, and for the value of `a or b` and `a and b`.
+  today, not that `Config.Webhook == false` cannot be true once someone edits it. The same goes
+  for what an undocumented function returns, and for the value of `a or b` and `a and b`.
 - Comparisons with `nil`. Annotations often leave out the `?` of a value that may be missing, and
   the check for it is deliberate.
 - A local that is assigned again after its declaration, since its declared type may not be what
