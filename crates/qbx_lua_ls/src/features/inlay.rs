@@ -39,7 +39,9 @@ impl Hints<'_, '_> {
             .then(|| event_call(self.ws, self.doc, self.infer, base, args, native.as_deref()))
             .flatten()
             .or_else(|| wrapper_call(self.ws, self.infer, native.as_deref()?, method.is_some(), args, base.span.start));
-        let Some(fun) = event.map(|e| e.fun.into()).or(native) else { return };
+        // A call names the parameters of the `@overload` it picks, as hover and signature help show.
+        let picked = native.map(|fun| self.infer.call_signature(&fun, args, method.is_some(), base.span.start));
+        let Some(fun) = event.map(|e| e.fun.into()).or(picked) else { return };
         let (skip_params, skip_args) = fun.call_offsets(method.is_some());
         for (arg, param) in args.iter().skip(skip_args).zip(fun.params.iter().skip(skip_params)) {
             if !is_literal(arg) || param.name == "..." || param.name.is_empty() || !self.range.contains(arg.span.start)

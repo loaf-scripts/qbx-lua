@@ -1305,6 +1305,16 @@ local numbered = findInput(1)
     assert_eq!(result["signatures"][1]["activeParameter"], 2);
     // The declared signature passes the same argument to its `...`.
     assert_eq!(result["signatures"][0]["activeParameter"], 1);
+
+    // Inlay hints name the parameters of the signature the call picks.
+    let (first, _) = pos(text, "EmitInput('jobUpdated'", 0);
+    let (last, _) = pos(text, "local numbered", 0);
+    let hints = client.request(
+        "textDocument/inlayHint",
+        json!({ "textDocument": { "uri": client.uri(CLIENT) }, "range": { "start": { "line": first, "character": 0 }, "end": { "line": last + 1, "character": 0 } } }),
+    );
+    let labels: Vec<&str> = hints.as_array().unwrap().iter().map(|h| h["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, ["action:", "job:", "oldJob:", "label:", "name:", "id:"]);
 }
 
 #[test]
