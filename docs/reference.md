@@ -706,7 +706,7 @@ Only clear cases count, and the rest is left alone:
 `no-unknown` is off by default. Turned on, qbx-lua-ls reports each parameter, local and loop
 variable whose type is unknown: none is declared, and none can be inferred from its value, from
 the function a callback is passed to, from the declared type of the table field a function is
-written in, or from what a loop goes through.
+written in or defined for, or from what a loop goes through.
 
 ```toml
 [rules]
@@ -730,7 +730,10 @@ call, whether that is the call alone or `handlers[name] = RegisterNetEvent(name,
 A function written in a table takes the `---@param` lines above its field, and the parameter
 types of the field's `fun(...)` when the table has a declared type: the `---@type` above its
 `local`, the type of the parameter it is passed for, or `metatable` for the second argument of
-`setmetatable`. A local declared without a value needs a `---@type`, since
+`setmetatable`. A function defined for a `---@field name fun(...)` of a class, with
+`function Class:name()`, `function Class.name()` or `Class.name = function()`, takes the parameter
+types of that `fun(...)` when it has as many parameters, not counting the `self` of `:`. A local
+declared without a value needs a `---@type`, since
 later assignments are not followed. Names that start with `ignore_unused_prefix`, and `self`, are
 not reported. To check only your own resources, set the level in an `[[overrides]]` entry instead
 of `[rules]`.

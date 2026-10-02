@@ -115,8 +115,12 @@ pub enum Decl<'a> {
 pub enum Expected<'a> {
     /// Argument `arg_index` of a call, which has the type of the parameter it is passed for.
     Arg { call: &'a Expr, arg_index: usize },
-    /// Value `index` of a `local` statement or an assignment, typed by the `---@type` above it.
+    /// Value `index` of a `local` statement or an assignment, typed by the `---@type` above it, or
+    /// for a function assigned to a field of a class, by the `@field` it implements.
     Value { stmt: &'a Stmt, index: usize },
+    /// The function that `function a.b.c()` or `function a.b:c()` defines, typed by the `@field`
+    /// `c` of the class `a.b` is.
+    Member { stmt: &'a Stmt },
     /// The value of the field `key` of a table constructor, which has the type of that field of the
     /// table.
     Field { table: &'a Expr, key: FieldKey<'a> },
@@ -340,7 +344,7 @@ impl<'a> DeclCollector<'a> {
                 if name.method.is_some() {
                     self.decls.insert(func.params_span.start, Decl::SelfParam { name });
                 }
-                self.func(func, anchor, None);
+                self.func(func, anchor, Some(Expected::Member { stmt }));
             }
             StmtKind::Assign { targets, exprs } => {
                 targets.iter().for_each(|e| self.expr(e, None));
@@ -1205,15 +1209,62 @@ impl<'a> Infer<'a> {
                 }
                 match &stmt.kind {
                     StmtKind::Local { .. } => local_annotation(&doc, index),
+                    StmtKind::Assign { exprs, .. } => {
+                        doc.type_at(index).cloned().or_else(|| match &exprs.get(index)?.kind {
+                            ExprKind::Function(func) => self.field_signature(stmt, func),
+                            _ => None,
+                        })
+                    }
                     _ => doc.type_at(index).cloned(),
                 }
             }
+            Expected::Member { stmt } => match &stmt.kind {
+                StmtKind::Function { func, .. } => self.field_signature(stmt, func),
+                _ => None,
+            },
             Expected::Field { table, key } => {
                 let at = self.ctx.tables.get(&table.span.start)?;
                 let table = self.guarded(|| self.expected_type(at))?;
                 self.field_type(&table, key)
             }
         }
+    }
+
+    /// The `fun(...)` that `func`, which `stmt` puts in a field of a table, implements: the type the
+    /// class of the table declares for the field with `@field`. It counts when `func` takes as many
+    /// parameters as it lists, besides the `self` that a method declared with `:` takes itself.
+    fn field_signature(&self, stmt: &Stmt, func: &FuncBody) -> Option<Type> {
+        let (name, is_method) = match &stmt.kind {
+            StmtKind::Function { name, .. } => {
+                (&name.method.as_ref().or(name.path.last())?.text, name.method.is_some())
+            }
+            StmtKind::Assign { targets, exprs } => {
+                let defines = |expr: &Expr| matches!(&expr.kind, ExprKind::Function(f) if std::ptr::eq(&**f, func));
+                match &targets.get(exprs.iter().position(defines)?)?.kind {
+                    ExprKind::Field { name, .. } => (&name.text, false),
+                    ExprKind::Index { index, .. } => (index.as_string()?, false),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let fun = self.fun_of(&self.declared_field(&self.doc_self(stmt, func), name)?)?;
+        let skip = usize::from(is_method && fun.params.first().is_some_and(|param| param.name == "self"));
+        let takes = func.params.len() + usize::from(func.vararg.is_some());
+        (fun.params.len() == skip + takes)
+            .then(|| Type::Fun(Arc::new(FunType { params: fun.params[skip..].to_vec(), ..(*fun).clone() })))
+    }
+
+    /// The type of the `@field` called `name` that the class `owner` is, or a parent, declares,
+    /// leaving out what code sets on the tables of the class.
+    fn declared_field(&self, owner: &Type, name: &str) -> Option<Type> {
+        let declared = |member: &MemberInfo| {
+            member.location.is_some_and(|(file, range)| {
+                let classes = self.index.file(file).map(|entry| entry.index.classes.as_slice()).unwrap_or_default();
+                classes.iter().any(|class| class.fields.iter().any(|field| field.name == name && field.range == range))
+            })
+        };
+        self.members_named(owner, name).into_iter().find(declared).map(|member| member.ty)
     }
 
     /// The signature that `call` uses, with its arguments and whether it calls a method.

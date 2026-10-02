@@ -6016,6 +6016,51 @@ local counter = function(n) end
 }
 
 #[test]
+fn functions_defined_for_a_declared_field_take_its_parameter_types() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Timer
+---@field start fun(self: Test.Timer, async?: boolean)
+---@field getTimeLeft fun(self: Test.Timer, format?: 'ms'|'s'): number
+---@field onEnd fun(reason: string)
+---@field render fun(self: Test.Timer, alpha: number)
+---@field stale fun(self: Test.Timer, first: integer)
+local Timer = {}
+
+function Timer:start(async) end
+function Timer:getTimeLeft(format) return 0 end
+Timer.onEnd = function(reason) end
+function Timer.render(self, alpha) end
+---@param second string
+function Timer:stale(first, second) end
+function Timer:undeclared(value) end
+
+---@type Test.Timer
+local timer = Timer
+timer.onEnd = function(why) end
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        // A method declared with `:` takes the `self` of the field itself.
+        ("async)", "async: boolean?"),
+        ("format)", "format: \"ms\"|\"s\"|nil"),
+        ("reason)", "reason: string"),
+        ("alpha)", "alpha: number"),
+        ("why)", "why: string"),
+        // A function with more parameters than the field lists does not implement it.
+        ("first, second", "first: unknown"),
+        ("second)", "second: string"),
+        // Only a `@field` declares a field, not another function set on the class.
+        ("value)", "value: unknown"),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn functions_in_table_fields_return_what_the_return_above_their_field_says() {
     let mut client = Client::start(fixture_root());
     let text = "\
