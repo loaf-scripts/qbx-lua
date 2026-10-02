@@ -2828,11 +2828,7 @@ print(abc, make, nested, untyped)
         items
     };
     let field = |name: &str, ty: &str| (name.to_string(), ty.to_string());
-    assert_eq!(
-        fields(cursors[0]),
-        [field("count", "integer?"), field("inner", "Test.Inner"), field("test", "string")],
-        "your example"
-    );
+    assert_eq!(fields(cursors[0]), [field("count", "integer?"), field("inner", "Test.Inner"), field("test", "string")]);
     assert_eq!(fields(cursors[1]), [field("count", "integer?"), field("inner", "Test.Inner")], "`test` is set already");
     assert_eq!(fields(cursors[2]), [field("label", "string")], "a field typed as a class");
     assert!(fields(cursors[3]).is_empty(), "`extra` is no field of Test, so its table is not typed");
