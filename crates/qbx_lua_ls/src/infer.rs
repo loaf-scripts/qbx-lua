@@ -1976,28 +1976,12 @@ impl<'a> Infer<'a> {
         match method {
             Some(method) => {
                 let member = self.member(&self.expr(base), &method.text)?;
-                Some((self.fun_of(&member.ty)?, Some(member)))
+                let fun = self.fun_of(&member.ty).or_else(|| self.class_call(&member.ty))?;
+                Some((fun, Some(member)))
             }
             None => {
                 let ty = self.expr(base);
-                if let Some(fun) = self.fun_of(&ty) {
-                    return Some((fun, None));
-                }
-                match self.resolve_alias(&ty) {
-                    Type::Named(name, args) => {
-                        let call = self.index.class(&name, self.side).and_then(|(_, c)| c.call.clone());
-                        let call = match call.filter(|f| applies_on(f.side, self.side)) {
-                            Some(call) => call,
-                            None => self.call_operator(&name)?,
-                        };
-                        let bindings = self.class_bindings_of(&name, &args);
-                        match bindings.is_empty() {
-                            true => Some((call, None)),
-                            false => Some((Arc::new(substitute_fun(&call, &bindings)), None)),
-                        }
-                    }
-                    _ => None,
-                }
+                Some((self.fun_of(&ty).or_else(|| self.class_call(&ty))?, None))
             }
         }
     }
@@ -2017,6 +2001,22 @@ impl<'a> Infer<'a> {
             returns: vec![operator.result.clone()],
             ..FunType::default()
         }))
+    }
+
+    /// The `@overload` that a value of class `ty` is called with, as `lib.array:new()` calls the
+    /// `ArrayConstructor` its `new` field holds, or else the function its `@operator call` makes of it.
+    fn class_call(&self, ty: &Type) -> Option<Arc<FunType>> {
+        let Type::Named(name, args) = self.resolve_alias(ty) else { return None };
+        let call = self.index.class(&name, self.side).and_then(|(_, c)| c.call.clone());
+        let call = match call.filter(|f| applies_on(f.side, self.side)) {
+            Some(call) => call,
+            None => self.call_operator(&name)?,
+        };
+        let bindings = self.class_bindings_of(&name, &args);
+        match bindings.is_empty() {
+            true => Some(call),
+            false => Some(Arc::new(substitute_fun(&call, &bindings))),
+        }
     }
 
     fn call(&self, base: &Expr, method: Option<&Name>, args: &[Expr]) -> Vec<Type> {

@@ -1127,6 +1127,29 @@ onShop('closed', function(closedShop) end)
 }
 
 #[test]
+fn methods_holding_a_class_call_its_overload() {
+    let mut client = Client::start(fixture_root());
+    // ox_lib's `lib.array:new()` calls the `ArrayConstructor` that its `new` field holds.
+    let text = "\
+---@class Test.Array : { [number]: integer }
+---@field private new Test.ArrayConstructor
+local Array = {}
+
+---@class Test.ArrayConstructor
+---@overload fun(self: Test.Array, ...: integer): Test.Array
+
+local list = Array:new(1, 2)
+local same = Array.new(Array, 1, 2)
+";
+    client.open_with(CLIENT, text);
+    for name in ["list", "same"] {
+        let (l, c) = pos(text, &format!("local {name}"), 6);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(&format!("local {name}: Test.Array")), "{hover}");
+    }
+}
+
+#[test]
 fn hover_reads_docs_past_other_comments() {
     let mut client = Client::start(fixture_root());
     let text = "\
