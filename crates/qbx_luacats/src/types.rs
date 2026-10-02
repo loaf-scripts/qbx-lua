@@ -23,7 +23,7 @@ pub enum Type {
     IntLit(i64),
     /// A native handle such as `Vehicle` or `Hash`: an integer that keeps its name for display.
     Handle(SmolStr),
-    Named(SmolStr, Vec<Type>),
+    Named(TypeName, Vec<Type>),
     Array(Box<Type>),
     Map(Box<Type>, Box<Type>),
     Tuple(Vec<Type>),
@@ -40,6 +40,141 @@ pub enum Type {
     /// `` `T` ``: the generic `T`, bound to the class or alias that the string passed for it names,
     /// as `new("Player")` binds `Player`.
     NameOf(SmolStr),
+}
+
+/// The name of a class or alias as a type writes it, with the file whose doc comment wrote it once
+/// the language server's index holds the type: resources may declare classes of the same name
+/// differently, and the file tells which resource's declarations the name stands for. Names compare,
+/// order and print as their text alone.
+#[derive(Clone, Debug, Default)]
+pub struct TypeName {
+    pub text: SmolStr,
+    /// The file that wrote the name, as the language server numbers its files.
+    pub origin: Option<u32>,
+}
+
+impl TypeName {
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::ops::Deref for TypeName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl AsRef<str> for TypeName {
+    fn as_ref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::borrow::Borrow<str> for TypeName {
+    fn borrow(&self) -> &str {
+        &self.text
+    }
+}
+
+impl PartialEq for TypeName {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+    }
+}
+
+impl Eq for TypeName {}
+
+impl std::hash::Hash for TypeName {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.text.hash(state);
+    }
+}
+
+impl PartialOrd for TypeName {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TypeName {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.text.cmp(&other.text)
+    }
+}
+
+impl PartialEq<str> for TypeName {
+    fn eq(&self, other: &str) -> bool {
+        self.text == other
+    }
+}
+
+impl PartialEq<&str> for TypeName {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
+}
+
+impl PartialEq<SmolStr> for TypeName {
+    fn eq(&self, other: &SmolStr) -> bool {
+        self.text == *other
+    }
+}
+
+impl PartialEq<TypeName> for SmolStr {
+    fn eq(&self, other: &TypeName) -> bool {
+        *self == other.text
+    }
+}
+
+impl PartialEq<TypeName> for str {
+    fn eq(&self, other: &TypeName) -> bool {
+        self == other.text
+    }
+}
+
+impl PartialEq<TypeName> for &str {
+    fn eq(&self, other: &TypeName) -> bool {
+        *self == other.text
+    }
+}
+
+impl fmt::Display for TypeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl From<SmolStr> for TypeName {
+    fn from(text: SmolStr) -> Self {
+        Self { text, origin: None }
+    }
+}
+
+impl From<&str> for TypeName {
+    fn from(text: &str) -> Self {
+        Self { text: SmolStr::new(text), origin: None }
+    }
+}
+
+impl From<&SmolStr> for TypeName {
+    fn from(text: &SmolStr) -> Self {
+        Self { text: text.clone(), origin: None }
+    }
+}
+
+impl From<TypeName> for SmolStr {
+    fn from(name: TypeName) -> Self {
+        name.text
+    }
+}
+
+impl From<&TypeName> for SmolStr {
+    fn from(name: &TypeName) -> Self {
+        name.text.clone()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -140,6 +275,70 @@ pub struct Shape {
     pub indices: Vec<(Type, Type)>,
 }
 
+impl Shape {
+    fn set_origin(&mut self, origin: u32) {
+        self.fields.iter_mut().for_each(|field| field.ty.set_origin(origin));
+        self.array.iter_mut().for_each(|ty| ty.set_origin(origin));
+        for (key, value) in &mut self.indices {
+            key.set_origin(origin);
+            value.set_origin(origin);
+        }
+    }
+
+    fn lacks_origin(&self) -> bool {
+        self.fields.iter().any(|field| field.ty.lacks_origin())
+            || self.array.as_ref().is_some_and(Type::lacks_origin)
+            || self.indices.iter().any(|(key, value)| key.lacks_origin() || value.lacks_origin())
+    }
+
+    fn origins(&self, out: &mut Vec<Option<u32>>) {
+        self.fields.iter().for_each(|field| field.ty.origins(out));
+        self.array.iter().for_each(|ty| ty.origins(out));
+        for (key, value) in &self.indices {
+            key.origins(out);
+            value.origins(out);
+        }
+    }
+}
+
+impl FunType {
+    /// Gives the class and alias names in the signature that have no origin the file `origin`, as
+    /// `Type::set_origin` does.
+    pub fn set_origin(&mut self, origin: u32) {
+        self.params.iter_mut().for_each(|param| param.ty.set_origin(origin));
+        self.returns.iter_mut().for_each(|ty| ty.set_origin(origin));
+        self.return_sets.iter_mut().flatten().for_each(|ty| ty.set_origin(origin));
+        for overload in &mut self.overloads {
+            if overload.lacks_origin() {
+                Arc::make_mut(overload).set_origin(origin);
+            }
+        }
+    }
+
+    fn lacks_origin(&self) -> bool {
+        self.params.iter().any(|param| param.ty.lacks_origin())
+            || self.returns.iter().any(Type::lacks_origin)
+            || self.return_sets.iter().flatten().any(Type::lacks_origin)
+            || self.overloads.iter().any(|overload| overload.lacks_origin())
+    }
+
+    /// Whether `other`, a signature equal to this one, names its classes and aliases after the same
+    /// files, which `==` leaves out.
+    pub fn same_origins(&self, other: &FunType) -> bool {
+        let (mut ours, mut theirs) = (Vec::new(), Vec::new());
+        self.origins(&mut ours);
+        other.origins(&mut theirs);
+        ours == theirs
+    }
+
+    fn origins(&self, out: &mut Vec<Option<u32>>) {
+        self.params.iter().for_each(|param| param.ty.origins(out));
+        self.returns.iter().for_each(|ty| ty.origins(out));
+        self.return_sets.iter().flatten().for_each(|ty| ty.origins(out));
+        self.overloads.iter().for_each(|overload| overload.origins(out));
+    }
+}
+
 impl Type {
     pub fn named(name: &str) -> Type {
         match name {
@@ -156,7 +355,69 @@ impl Type {
             "true" => Type::BooleanLit(true),
             "false" => Type::BooleanLit(false),
             "unknown" => Type::Unknown,
-            _ => Type::Named(SmolStr::new(name), Vec::new()),
+            _ => Type::Named(name.into(), Vec::new()),
+        }
+    }
+
+    /// Gives the class and alias names in the type that have no origin the file `origin`, as the
+    /// language server does for the types that the index entry of that file holds.
+    pub fn set_origin(&mut self, origin: u32) {
+        match self {
+            Type::Named(name, args) => {
+                name.origin.get_or_insert(origin);
+                args.iter_mut().for_each(|arg| arg.set_origin(origin));
+            }
+            Type::Array(inner) | Type::Variadic(inner) => inner.set_origin(origin),
+            Type::Map(key, value) => {
+                key.set_origin(origin);
+                value.set_origin(origin);
+            }
+            Type::Tuple(types) | Type::Union(types) => types.iter_mut().for_each(|ty| ty.set_origin(origin)),
+            // What other types share is only copied when it has a name to give the origin.
+            Type::Fun(fun) if fun.lacks_origin() => Arc::make_mut(fun).set_origin(origin),
+            Type::Shape(shape) if shape.lacks_origin() => Arc::make_mut(shape).set_origin(origin),
+            _ => {}
+        }
+    }
+
+    /// Whether some class or alias name in the type has no origin.
+    fn lacks_origin(&self) -> bool {
+        match self {
+            Type::Named(name, args) => name.origin.is_none() || args.iter().any(Type::lacks_origin),
+            Type::Array(inner) | Type::Variadic(inner) => inner.lacks_origin(),
+            Type::Map(key, value) => key.lacks_origin() || value.lacks_origin(),
+            Type::Tuple(types) | Type::Union(types) => types.iter().any(Type::lacks_origin),
+            Type::Fun(fun) => fun.lacks_origin(),
+            Type::Shape(shape) => shape.lacks_origin(),
+            _ => false,
+        }
+    }
+
+    /// Whether `other`, a type equal to this one, names its classes and aliases after the same
+    /// files, which `==` leaves out.
+    pub fn same_origins(&self, other: &Type) -> bool {
+        let (mut ours, mut theirs) = (Vec::new(), Vec::new());
+        self.origins(&mut ours);
+        other.origins(&mut theirs);
+        ours == theirs
+    }
+
+    /// The files that the class and alias names in the type were written in, in order.
+    fn origins(&self, out: &mut Vec<Option<u32>>) {
+        match self {
+            Type::Named(name, args) => {
+                out.push(name.origin);
+                args.iter().for_each(|arg| arg.origins(out));
+            }
+            Type::Array(inner) | Type::Variadic(inner) => inner.origins(out),
+            Type::Map(key, value) => {
+                key.origins(out);
+                value.origins(out);
+            }
+            Type::Tuple(types) | Type::Union(types) => types.iter().for_each(|ty| ty.origins(out)),
+            Type::Fun(fun) => fun.origins(out),
+            Type::Shape(shape) => shape.origins(out),
+            _ => {}
         }
     }
 
@@ -782,7 +1043,7 @@ impl<'a> TypeParser<'a> {
                 Type::Map(Box::new(key), Box::new(value))
             }
             ("table", 1) => Type::Array(Box::new(args.pop().unwrap_or_default())),
-            _ => Type::Named(SmolStr::new(name), args),
+            _ => Type::Named(name.into(), args),
         }
     }
 

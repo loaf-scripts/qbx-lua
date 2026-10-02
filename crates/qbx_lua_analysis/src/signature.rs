@@ -267,7 +267,7 @@ mod tests {
         let names: Vec<&str> = aliases.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["Maybe", "Mode", "Wrapped"]);
         let alias = |name: &str| aliases.iter().find(|(n, _)| n == name).map(|(_, ty)| ty);
-        let named = |name: &str| Type::Named(SmolStr::new(name), Vec::new());
+        let named = |name: &str| Type::Named(name.into(), Vec::new());
         assert!(may_be_nil(&named("Maybe"), &alias));
         assert!(may_be_nil(&named("Wrapped"), &alias));
         assert!(!may_be_nil(&named("Mode"), &alias));
@@ -280,7 +280,7 @@ mod tests {
         let chunk = parse(source);
         let aliases = doc_aliases(source, &chunk.comments);
         let alias = |name: &str| aliases.iter().find(|(n, _)| n == name).map(|(_, ty)| ty);
-        let named = |name: &str| Type::Named(SmolStr::new(name), Vec::new());
+        let named = |name: &str| Type::Named(name.into(), Vec::new());
         assert!(!may_be_nil(&named("Mode"), &alias), "a plain comment keeps the values");
         assert!(!may_be_nil(&named("Wide"), &alias), "a block comment keeps the values");
         assert!(!may_be_nil(&named("Strict"), &alias), "a blank line ends the alias");

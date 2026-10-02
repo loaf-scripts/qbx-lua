@@ -3525,6 +3525,88 @@ end
 }
 
 #[test]
+fn class_members_come_from_the_declarations_of_their_resource() {
+    let mut client = Client::start(fixture_root());
+    let shop = "---@class Test.Shape\n---@field other integer\n\n---@class Test.Box\n---@field depth integer\n";
+    client.open_with("shop/shared.lua", shop);
+    let marked = "\
+---@class Test.Shape
+---@field width integer
+local Shape = {}
+
+---@type Test.Shape
+local shape
+print(shape.other, shape.|)
+";
+    let (line, column) = pos(marked, "|", 0);
+    let text = marked.replace('|', "");
+    client.open_with(CLIENT, &text);
+    assert_eq!(client.completion_labels(CLIENT, line, column), ["width"], "not the field of `shop`'s class");
+    let (l, c) = pos(&text, "other", 0);
+    assert!(!client.hover_text(CLIENT, l, c).contains("integer"));
+    // A client script does not describe what the server scripts of its resource see, but a module
+    // that it loads through `files` or `require` does, as a `---@meta` file does.
+    let marked = "---@type Test.Shape\nlocal shape\nprint(shape.|)\n";
+    let (line, column) = pos(marked, "|", 0);
+    client.open_with(SERVER, &marked.replace('|', ""));
+    let mut labels = client.completion_labels(SERVER, line, column);
+    labels.sort();
+    assert_eq!(labels, ["other", "width"]);
+    let marked = "---@type Test.Box\nlocal box\nprint(box.|)\n";
+    let (line, column) = pos(marked, "|", 0);
+    client.open_with(SERVER, &marked.replace('|', ""));
+    let module = "---@class Test.Box\n---@field size integer\n";
+    client.open_with("myresource/modules/box.lua", module);
+    assert_eq!(client.completion_labels(SERVER, line, column), ["size"]);
+    client.change("myresource/modules/box.lua", 2, &format!("---@meta\n{module}"));
+    assert_eq!(client.completion_labels(SERVER, line, column), ["size"]);
+
+    // A resource that does not describe the class reads all declarations, also when it names the
+    // class itself or imports one of them: a value of the class may come from another resource,
+    // as through its exports.
+    let marked = "---@class Test.Shape object from elsewhere\n\n---@type Test.Shape\nlocal shape\nprint(shape.|)\n";
+    let (line, column) = pos(marked, "|", 0);
+    client.open_with("late/server.lua", &marked.replace('|', ""));
+    let mut labels = client.completion_labels("late/server.lua", line, column);
+    labels.sort();
+    assert_eq!(labels, ["other", "width"]);
+    let mylib = client.open("[core]/mylib/init.lua");
+    client.change("[core]/mylib/init.lua", 2, &format!("{mylib}\n---@class Test.Player\n---@field handle integer\n"));
+    client.open_with("shop/server.lua", "---@class Test.Player\n---@field PlayerData table\n");
+    let marked = "---@type Test.Player\nlocal player\nprint(player.|)\n";
+    let (line, column) = pos(marked, "|", 0);
+    client.open_with(SERVER, &marked.replace('|', ""));
+    let mut labels = client.completion_labels(SERVER, line, column);
+    labels.sort();
+    assert_eq!(labels, ["PlayerData", "handle"]);
+}
+
+#[test]
+fn class_values_from_another_resource_keep_its_declarations() {
+    let mut client = Client::start(fixture_root());
+    client.open_with("shop/shared.lua", "---@class Test.Crate\n---@field label string\n");
+    client.open_with(
+        "shop/server.lua",
+        "---@return Test.Crate\nlocal function newCrate() end\nexports('NewCrate', newCrate)\n",
+    );
+    // This resource declares a class of the same name differently, which its own values have.
+    let text = "\
+---@class Test.Crate
+---@field weight integer
+
+local crate = exports.shop:NewCrate()
+---@type Test.Crate
+local own
+print(crate., own.)
+";
+    client.open_with(SERVER, text);
+    let (line, column) = pos(text, "crate.,", 6);
+    assert_eq!(client.completion_labels(SERVER, line, column), ["label"], "the crate comes from shop");
+    let (line, column) = pos(text, "own.)", 4);
+    assert_eq!(client.completion_labels(SERVER, line, column), ["weight"]);
+}
+
+#[test]
 fn private_members_complete_in_a_method_that_is_not_closed_yet() {
     let mut client = Client::start(fixture_root());
     let text = "\

@@ -16,7 +16,7 @@ use crate::index::{instance_class, instance_owner, ClassDef, FileId, Index, Symb
 use crate::locate::statement_at;
 use crate::luacats::{applies_on, own_type, parse_doc_lines, CastEntry, DocGroup, DocOperator};
 use crate::narrow::{Casts, Guards};
-use crate::types::{CallbackRole, FunType, Param, Shape, ShapeField, Type, TypeParser};
+use crate::types::{CallbackRole, FunType, Param, Shape, ShapeField, Type, TypeName, TypeParser};
 
 const MAX_DEPTH: u32 = 24;
 const MAX_SHAPE_FIELDS: usize = 96;
@@ -2190,9 +2190,9 @@ impl<'a> Infer<'a> {
         if depth > 8 || arg.is_unknown() {
             return;
         }
-        let mut bind = |name: &SmolStr, ty: Type| {
+        let mut bind = |name: &str, ty: Type| {
             if !bound.iter().any(|(n, _)| n == name) {
-                bound.push((name.clone(), ty));
+                bound.push((SmolStr::new(name), ty));
             }
         };
         match param {
@@ -2940,6 +2940,25 @@ impl<'a> Infer<'a> {
         }
     }
 
+    /// The file whose view of the class name `name`, read in `from`, decides which declarations it
+    /// stands for: the file that wrote it, when the type comes from the index entry of a file of
+    /// another resource that `from` does not import, or else `from`. Definition files and stubs
+    /// outside resources describe their classes for every resource, and an imported file runs as
+    /// part of the resource that imports it, so the names they write decide nothing.
+    pub fn view_of(&self, name: &TypeName, from: FileId) -> FileId {
+        let resource = |file: FileId| self.index.file(file).and_then(|entry| entry.resource);
+        match name.origin {
+            Some(origin)
+                if resource(origin).is_some()
+                    && resource(origin) != resource(from)
+                    && !self.index.is_visible(from, origin) =>
+            {
+                origin
+            }
+            _ => from,
+        }
+    }
+
     /// The members of the class or alias `name` given the type arguments `args`, with those of its
     /// parents: the fields of a class, those set on the table its `---@class` declares, and the
     /// fields of a table type it names as a parent, like `{ name: string }`. A class that several
@@ -2947,14 +2966,14 @@ impl<'a> Infer<'a> {
     /// arguments, as `---@class Tree<T> : Tree<T[]>` does.
     fn class_members(
         &self,
-        name: &str,
+        name: &TypeName,
         args: &[Type],
         filter: Option<&str>,
         out: &mut Vec<MemberInfo>,
         visited: &mut FxHashSet<SmolStr>,
         depth: u32,
     ) {
-        if depth > 8 || !visited.insert(SmolStr::new(name)) {
+        if depth > 8 || !visited.insert(name.text.clone()) {
             return;
         }
         let mut defs = self.index.class_defs(name);
@@ -2965,6 +2984,34 @@ impl<'a> Infer<'a> {
                 out.extend(self.guarded(|| self.members_matching(&ty, filter)));
             }
             return;
+        }
+        // Resources may declare classes of the same name differently. When the resource of the file
+        // whose view decides, as `view_of` finds it, describes the class in its `---@meta` files, its
+        // scripts for the side of that file or the modules it loads through `files` or `require`,
+        // those declarations give the members, and otherwise all of them do: the `Player` that
+        // `exports.qbx_core:GetPlayer()` gives is qbx_core's. A declaration that only names the
+        // class, as `---@class Player` above code that uses those players does, describes nothing.
+        let view = self.view_of(name, self.ctx.file);
+        let entry = |file: FileId| self.index.file(file);
+        let (resource, side) = entry(view).map_or((None, None), |entry| (entry.resource, entry.side));
+        let own = |file: FileId| {
+            file == view
+                || entry(file).is_some_and(|other| {
+                    resource.is_some()
+                        && other.resource == resource
+                        && (other.index.meta
+                            || other.side.is_none_or(|theirs| side.is_none_or(|ours| theirs.is_available_on(ours))))
+                })
+        };
+        let describes = |class: &ClassDef| {
+            !class.fields.is_empty()
+                || !class.indices.is_empty()
+                || !class.literal_fields.is_empty()
+                || !class.parent_types.is_empty()
+                || class.call.is_some()
+        };
+        if defs.iter().any(|(file, class)| own(*file) && describes(class)) {
+            defs.retain(|(file, _)| own(*file));
         }
         let own = out.len();
         for (file, class) in &defs {
@@ -3145,9 +3192,8 @@ pub(crate) fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
     if generics.is_empty() {
         return ty.clone();
     }
-    let bound = |name: &SmolStr| {
-        generics.iter().find(|(n, _)| n == name).map_or_else(|| ty.clone(), |(_, bound)| bound.clone())
-    };
+    let bound =
+        |name: &str| generics.iter().find(|(n, _)| n == name).map_or_else(|| ty.clone(), |(_, bound)| bound.clone());
     match ty {
         Type::Named(name, args) if args.is_empty() => bound(name),
         // A returned `` `T` `` is the class that the string passed for it names.

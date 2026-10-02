@@ -91,11 +91,12 @@ impl<'a, 'b> Scope<'a, 'b> {
             Type::Union(types) => types.iter().for_each(|part| self.classes_of(part, from, out, depth + 1)),
             Type::Named(name, _) => {
                 let classes = Classes::new(self.infer);
+                let from = self.infer.view_of(name, from);
                 if classes.class_defs(name, from).is_empty() {
                     let aliases = classes.alias_defs(name, from);
                     aliases.iter().for_each(|(file, alias)| self.classes_of(&alias.ty, *file, out, depth + 1));
                 } else if !out.iter().any(|(known, _)| known == name) {
-                    out.push((name.clone(), from));
+                    out.push((name.text.clone(), from));
                 }
             }
             _ => {}
@@ -211,7 +212,7 @@ impl<'a, 'b> Scope<'a, 'b> {
             _ => false,
         };
         match self.infer.expr(expr).without_nil() {
-            Type::Named(class, _) if is_table => Some(class),
+            Type::Named(class, _) if is_table => Some(class.text),
             _ => None,
         }
     }
@@ -228,7 +229,7 @@ impl<'a, 'b> Scope<'a, 'b> {
         let Some((last, parents)) = path.split_last() else {
             let owner = self.infer.func_name_owner_type(&func_name(&[]));
             let class = match owner.without_nil() {
-                Type::Named(class, _) if self.infer.is_class_table(&name.base) => Some(class),
+                Type::Named(class, _) if self.infer.is_class_table(&name.base) => Some(class.text),
                 _ => None,
             };
             return (owner, class);
@@ -236,7 +237,7 @@ impl<'a, 'b> Scope<'a, 'b> {
         let parent = self.infer.func_name_owner_type(&func_name(parents));
         let Some(member) = self.infer.member(&parent, &last.text) else { return (Type::Unknown, None) };
         let class = match &member.ty {
-            Type::Named(class, _) if member.kind == SymbolKind::Table => Some(class.clone()),
+            Type::Named(class, _) if member.kind == SymbolKind::Table => Some(class.text.clone()),
             _ => None,
         };
         (member.ty, class)

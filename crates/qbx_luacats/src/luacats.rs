@@ -610,7 +610,7 @@ fn class_parents(text: &str) -> Vec<Type> {
 /// as `{ [number]: T }` or `table<string, any>`, is named by its type.
 fn parent_name(parent: &Type) -> SmolStr {
     match parent {
-        Type::Named(name, _) => name.clone(),
+        Type::Named(name, _) => name.text.clone(),
         other => SmolStr::new(other.to_string()),
     }
 }
@@ -636,7 +636,7 @@ fn in_class(class: &DocClass, ty: Type) -> Type {
 /// methods: `List<T>`, which keeps the type parameters of the class, as a class named without
 /// type arguments elsewhere does.
 pub fn own_type(name: &SmolStr, generics: &[SmolStr]) -> Type {
-    Type::Named(name.clone(), generics.iter().map(|param| Type::Named(param.clone(), Vec::new())).collect())
+    Type::Named(name.into(), generics.iter().map(|param| Type::Named(param.into(), Vec::new())).collect())
 }
 
 /// Reads a `@field` into the latest class of `group`. True when it adds a field of its own, the

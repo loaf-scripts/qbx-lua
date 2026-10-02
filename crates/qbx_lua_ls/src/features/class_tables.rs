@@ -194,28 +194,33 @@ impl<'a, 'b> Classes<'a, 'b> {
         self.declarations(name, from).1
     }
 
-    /// `ty`, or the type of the one alias it names as `from` sees it, with the type arguments of a
-    /// generic alias in place of its parameters.
+    /// `ty`, or the type of the one alias it names as `from` sees it, or the file that wrote the
+    /// name as `Infer::view_of` finds it, with the type arguments of a generic alias in place of its
+    /// parameters.
     fn resolve(&self, ty: &Type, from: FileId, depth: u32) -> Type {
-        match ty {
-            Type::Named(name, args) if depth < MAX_DEPTH && self.class_defs(name, from).is_empty() => {
-                match self.alias_defs(name, from).as_slice() {
-                    [(file, alias)] => {
-                        let ty = substitute(&alias.ty, &expanded_bindings(&alias.generics, args));
-                        self.resolve(&ty, *file, depth + 1)
-                    }
-                    _ => ty.clone(),
-                }
+        let Type::Named(name, args) = ty else { return ty.clone() };
+        let from = self.infer.view_of(name, from);
+        if depth >= MAX_DEPTH || !self.class_defs(name, from).is_empty() {
+            return ty.clone();
+        }
+        match self.alias_defs(name, from).as_slice() {
+            [(file, alias)] => {
+                let ty = substitute(&alias.ty, &expanded_bindings(&alias.generics, args));
+                self.resolve(&ty, *file, depth + 1)
             }
             _ => ty.clone(),
         }
     }
 
-    /// The class a value of type `ty` must be, with the type arguments it is given, as `from` sees
-    /// the names, looking through `?` and aliases.
-    pub fn class_of(&self, ty: &Type, from: FileId) -> Option<(SmolStr, Vec<Type>)> {
+    /// The class a value of type `ty` must be, with the type arguments it is given, looking through
+    /// `?` and aliases, and the file whose view of the names decides its declarations: `from`, or
+    /// the file that wrote the name, as `Infer::view_of` finds it.
+    pub fn class_of(&self, ty: &Type, from: FileId) -> Option<(SmolStr, Vec<Type>, FileId)> {
         match self.resolve(&ty.without_nil(), from, 0).without_nil() {
-            Type::Named(name, args) if !self.class_defs(&name, from).is_empty() => Some((name, args)),
+            Type::Named(name, args) => {
+                let view = self.infer.view_of(&name, from);
+                (!self.class_defs(&name, view).is_empty()).then_some((name.text, args, view))
+            }
             _ => None,
         }
     }
@@ -315,8 +320,8 @@ impl<'a, 'b> Classes<'a, 'b> {
         }
         for (file, def) in self.class_defs(class, from) {
             for parent in &def.parent_types {
-                let Some((parent, _)) = self.class_of(parent, file) else { continue };
-                if self.extends_at(&parent, file, ancestor, visited, depth + 1) {
+                let Some((parent, _, view)) = self.class_of(parent, file) else { continue };
+                if self.extends_at(&parent, view, ancestor, visited, depth + 1) {
                     return true;
                 }
             }
@@ -890,8 +895,10 @@ pub fn mismatched_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     }
     for access in accesses(infer, chunk, false) {
         // `value.field = nil` clears a field only when its type allows `nil`, as `string?` does.
-        if let (Some(value), Some((class, args))) = (access.value, classes.class_of(&access.owner, classes.file())) {
-            check(classes.field_type(&class, &args, classes.file(), &access.key), &access.key, value);
+        if let (Some(value), Some((class, args, view))) =
+            (access.value, classes.class_of(&access.owner, classes.file()))
+        {
+            check(classes.field_type(&class, &args, view, &access.key), &access.key, value);
         }
     }
     out
@@ -917,7 +924,7 @@ impl<'c> Finder<'_, '_, 'c> {
     fn table(&mut self, expected: &Type, expr: &'c Expr, from: FileId, depth: u32) {
         let table = expr.unparen();
         let ExprKind::Table(fields) = &table.kind else { return };
-        if let Some((class, args)) = self.classes.class_of(expected, from) {
+        if let Some((class, args, from)) = self.classes.class_of(expected, from) {
             self.out.push(ClassTable { class: class.clone(), args: args.clone(), table, from });
             if depth < MAX_DEPTH {
                 for (key, _, value) in entries(self.classes.infer, fields) {

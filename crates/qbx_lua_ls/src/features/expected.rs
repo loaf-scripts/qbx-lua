@@ -154,7 +154,7 @@ impl Finder<'_, '_> {
         let classes = Classes::new(self.infer);
         let from = classes.file();
         match classes.class_of(&self.infer.expr(base), from) {
-            Some((class, args)) => field_values(&classes, &class, &args, from, name),
+            Some((class, args, view)) => field_values(&classes, &class, &args, view, name),
             None => Vec::new(),
         }
     }

@@ -62,9 +62,9 @@ fn takes_class(classes: &Classes, declared: &Type, cast: &Type) -> bool {
     classes.flatten(declared, file, &mut parts, 0);
     parts.retain(|part| *part != Type::Nil);
     casts.iter().all(|cast| {
-        let Some((class, _)) = classes.class_of(cast, file) else { return true };
+        let Some((class, _, view)) = classes.class_of(cast, file) else { return true };
         parts.iter().any(|part| match classes.class_of(part, file) {
-            Some((declared, _)) => classes.extends(&class, file, &declared),
+            Some((declared, ..)) => classes.extends(&class, view, &declared),
             None => !classes.rejects(part, file, cast),
         })
     })

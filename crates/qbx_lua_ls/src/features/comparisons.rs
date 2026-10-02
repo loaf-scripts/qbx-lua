@@ -248,7 +248,7 @@ impl<'a, 'b> Declared<'a, 'b> {
     fn field(&self, base: &Expr, name: &str, depth: u32) -> Type {
         let base = self.declared(base, depth + 1);
         let from = self.classes.file();
-        let Some((class, args)) = self.classes.class_of(&base, from) else { return Type::Unknown };
+        let Some((class, args, from)) = self.classes.class_of(&base, from) else { return Type::Unknown };
         self.classes.field_type(&class, &args, from, &Key::Name(name)).map(|(ty, _)| ty).unwrap_or_default()
     }
 

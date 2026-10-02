@@ -137,7 +137,7 @@ pub fn type_definition(ws: &Workspace, doc: &Document, position: Position) -> Op
             Target::Local(id, _) => infer.local_type_at(*id, offset),
             Target::Global(name, _) => infer.global_type(name),
             Target::Member { info, .. } => info.ty.clone(),
-            Target::Type(name, _) => Type::Named(name.clone(), Vec::new()),
+            Target::Type(name, _) => Type::Named(name.clone().into(), Vec::new()),
         };
         let mut named = Vec::new();
         named_types(infer, &ty, &mut named, 0);
@@ -228,7 +228,7 @@ fn named_types(infer: &Infer, ty: &Type, out: &mut Vec<Named>, depth: u32) {
     match ty {
         Type::Named(name, args) => {
             if !out.iter().any(|known| matches!(known, Named::Type(known) if known == name)) {
-                out.push(Named::Type(name.clone()));
+                out.push(Named::Type(name.text.clone()));
                 aliased_types(infer, name, args, out, depth);
             }
             args.iter().for_each(|arg| named_types(infer, arg, out, depth + 1));

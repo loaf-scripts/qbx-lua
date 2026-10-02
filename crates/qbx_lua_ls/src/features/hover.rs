@@ -190,7 +190,7 @@ fn alias_expansions<'a>(infer: &Infer<'a>, ty: &Type) -> Vec<(SmolStr, &'a Alias
         let Some((_, alias)) = infer.index.alias(name, infer.side()) else { continue };
         // `Result<string>` of `---@alias Result<T> T|nil` stands for `string?`, which is no table.
         if table_part(infer, part, 0).is_unknown() {
-            out.push((name.clone(), alias));
+            out.push((name.text.clone(), alias));
         }
     }
     out

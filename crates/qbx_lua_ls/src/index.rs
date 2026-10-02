@@ -84,21 +84,36 @@ fn same_class(a: &ClassDef, b: &ClassDef) -> bool {
     fn indices(fields: &[DocIndexField]) -> Vec<(&Type, &Type, Option<Side>)> {
         fields.iter().map(|field| (&field.key, &field.ty, field.side)).collect()
     }
+    fn types(class: &ClassDef) -> impl Iterator<Item = &Type> {
+        let indices = class.indices.iter().chain(&class.literal_fields).flat_map(|field| [&field.key, &field.ty]);
+        let operators = class.operators.iter().flat_map(|operator| operator.operand.iter().chain([&operator.result]));
+        class.fields.iter().map(|field| &field.ty).chain(&class.parent_types).chain(indices).chain(operators)
+    }
     (a.generics == b.generics && a.parent_types == b.parent_types && a.side == b.side && a.strict == b.strict)
         && (fields(a) == fields(b) && a.field_sides == b.field_sides && a.field_visibility == b.field_visibility)
         && (indices(&a.indices) == indices(&b.indices) && indices(&a.literal_fields) == indices(&b.literal_fields))
         && (a.call == b.call && a.operators == b.operators)
+        && (same_origins(types(a), types(b)) && a.call.iter().zip(&b.call).all(|(x, y)| x.same_origins(y)))
 }
 
 /// Whether two declarations of an alias or enum tell the same about its values, wherever they are
 /// written and whatever their docs say.
 fn same_alias(a: &AliasDef, b: &AliasDef) -> bool {
+    fn members(table: &EnumTable) -> impl Iterator<Item = &Type> {
+        table.members.iter().flat_map(|(key, value)| [key, value])
+    }
     let (table_a, table_b) = (a.table.as_deref(), b.table.as_deref());
     let same_table = match (table_a, table_b) {
-        (Some(x), Some(y)) => x.owner == y.owner && x.members == y.members,
+        (Some(x), Some(y)) => x.owner == y.owner && x.members == y.members && same_origins(members(x), members(y)),
         (x, y) => x.is_none() && y.is_none(),
     };
-    a.generics == b.generics && a.ty == b.ty && a.side == b.side && same_table
+    a.generics == b.generics && a.ty == b.ty && a.ty.same_origins(&b.ty) && a.side == b.side && same_table
+}
+
+/// Whether types that are equal one by one name their classes and aliases after the same files, so
+/// that the declarations of the same resource stand for them: `==` leaves that out.
+fn same_origins<'t>(a: impl IntoIterator<Item = &'t Type>, b: impl IntoIterator<Item = &'t Type>) -> bool {
+    a.into_iter().zip(b).all(|(a, b)| a.same_origins(b))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,7 +267,7 @@ pub struct AliasDef {
 }
 
 /// The table an `---@enum` annotation declares.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct EnumTable {
     /// The owner its fields are indexed under, which the type of a name that holds it names.
     pub owner: SmolStr,
@@ -325,6 +340,50 @@ pub struct FileIndex {
     /// What indexing the file looked up in the index, sorted. Its types and members may come from
     /// it, so it is indexed again when those declarations change.
     pub reads: Vec<Read>,
+}
+
+impl FileIndex {
+    /// Gives the class and alias names in the types the entry holds that have no origin the file
+    /// `file`, which wrote them. Those it took from the entries of other files keep theirs.
+    pub fn set_origin(&mut self, file: FileId) {
+        let fun = |fun: &mut Arc<FunType>| {
+            let mut ty = Type::Fun(fun.clone());
+            ty.set_origin(file);
+            if let Type::Fun(tagged) = ty {
+                *fun = tagged;
+            }
+        };
+        let symbols =
+            self.globals.iter_mut().chain(&mut self.exports).chain(self.members.iter_mut().map(|m| &mut m.symbol));
+        symbols.for_each(|symbol| symbol.ty.set_origin(file));
+        for element in &mut self.elements {
+            element.key.iter_mut().for_each(|key| key.set_origin(file));
+            element.value.set_origin(file);
+        }
+        self.metatables.iter_mut().for_each(|metatable| metatable.metatable.set_origin(file));
+        for class in &mut self.classes {
+            class.fields.iter_mut().for_each(|field| field.ty.set_origin(file));
+            class.parent_types.iter_mut().for_each(|parent| parent.set_origin(file));
+            for field in class.indices.iter_mut().chain(&mut class.literal_fields) {
+                field.key.set_origin(file);
+                field.ty.set_origin(file);
+            }
+            class.call.iter_mut().for_each(fun);
+            for operator in &mut class.operators {
+                operator.operand.iter_mut().for_each(|operand| operand.set_origin(file));
+                operator.result.set_origin(file);
+            }
+        }
+        for alias in &mut self.aliases {
+            alias.ty.set_origin(file);
+            if let Some(table) = &mut alias.table {
+                let members = &mut Arc::make_mut(table).members;
+                members.iter_mut().flat_map(|(key, value)| [key, value]).for_each(|ty| ty.set_origin(file));
+            }
+        }
+        self.events.iter_mut().filter_map(|event| event.handler.as_mut()).for_each(fun);
+        self.module_return.iter_mut().for_each(|ty| ty.set_origin(file));
+    }
 }
 
 /// The scripts a definition file outside any resource is written for.
@@ -619,7 +678,7 @@ impl Index {
             let globals = entry.into_iter().flat_map(|entry| &entry.index.globals);
             globals.map(|symbol| (Read::Global(symbol.name.clone()), &symbol.ty))
         };
-        changed_groups(out, globals(before), globals(after), |a, b| a == b);
+        changed_groups(out, globals(before), globals(after), |a, b| a == b && a.same_origins(b));
         let members = |entry: Option<&'a FileEntry>| {
             entry.into_iter().flat_map(|entry| &entry.index.members).map(|member| {
                 let Member { owner, symbol, injected, visibility, typed } = member;
@@ -628,7 +687,7 @@ impl Index {
             })
         };
         let mut named = FxHashSet::default();
-        changed_groups(&mut named, members(before), members(after), |a, b| a == b);
+        changed_groups(&mut named, members(before), members(after), |a, b| a == b && a.1.same_origins(b.1));
         // Whoever reads every member of the tables reads each of them.
         let every = named.iter().filter_map(|read| match read {
             Read::Members(owner, _) => Some(Read::Members(owner.clone(), None)),
@@ -652,12 +711,14 @@ impl Index {
             let elements = entry.into_iter().flat_map(|entry| &entry.index.elements);
             elements.map(|element| (Read::Table(element.owner.clone()), (&element.key, &element.value)))
         };
-        changed_groups(out, elements(before), elements(after), |a, b| a == b);
+        changed_groups(out, elements(before), elements(after), |a, b| {
+            a == b && same_origins(a.0.iter().chain([a.1]), b.0.iter().chain([b.1]))
+        });
         let metatables = |entry: Option<&'a FileEntry>| {
             let metatables = entry.into_iter().flat_map(|entry| &entry.index.metatables);
             metatables.map(|metatable| (Read::Table(metatable.owner.clone()), &metatable.metatable))
         };
-        changed_groups(out, metatables(before), metatables(after), |a, b| a == b);
+        changed_groups(out, metatables(before), metatables(after), |a, b| a == b && a.same_origins(b));
         let classes = |entry: Option<&'a FileEntry>| {
             let classes = entry.into_iter().flat_map(|entry| &entry.index.classes);
             classes.map(|class| (Read::Type(class.name.clone()), class))
@@ -687,7 +748,7 @@ impl Index {
             })
         };
         let mut exported = FxHashSet::default();
-        changed_groups(&mut exported, exports(before), exports(after), |a, b| a == b);
+        changed_groups(&mut exported, exports(before), exports(after), |a, b| a == b && a.same_origins(b));
         // Whoever reads every export of the resource reads each of them.
         let every = exported.iter().filter_map(|read| match read {
             Read::Exports(resource, _) => Some(Read::Exports(resource.clone(), None)),
@@ -700,12 +761,14 @@ impl Index {
             let callbacks = events.filter(|event| event.kind == EventKind::Callback);
             callbacks.map(|event| (Read::Callback(event.name.clone()), (&event.family, event.side, &event.handler)))
         };
-        changed_groups(out, callbacks(before), callbacks(after), |a, b| a == b);
+        changed_groups(out, callbacks(before), callbacks(after), |a, b| {
+            a == b && a.2.iter().zip(b.2).all(|(x, y)| x.same_origins(y))
+        });
         let module = |entry: Option<&'a FileEntry>| {
             let returned = entry.and_then(|entry| Some((entry, entry.index.module_return.as_ref()?)));
             returned.map(|(entry, ty)| (Read::Module(normalize_path(&entry.path)), ty)).into_iter()
         };
-        changed_groups(out, module(before), module(after), |a, b| a == b);
+        changed_groups(out, module(before), module(after), |a, b| a == b && a.same_origins(b));
     }
 
     /// The files that read what a file in `changed` declares differently and see that file, the file
@@ -1149,5 +1212,35 @@ mod tests {
         });
         assert!(std::panic::catch_unwind(indexing).is_err());
         assert!(index.reads.borrow().is_none());
+    }
+
+    #[test]
+    fn a_class_name_written_in_another_file_is_declared_differently() {
+        // `Mid = Base`, with the `Item` of `Base` written in the file `origin`.
+        let entry = |origin: u32| {
+            let mut ty = Type::named("Item");
+            ty.set_origin(origin);
+            let mid = Symbol {
+                name: "Mid".into(),
+                kind: SymbolKind::Variable,
+                ty,
+                doc: None,
+                deprecated: false,
+                literal: None,
+                range: Range::default(),
+            };
+            FileEntry {
+                path: PathBuf::from("mid.lua"),
+                uri: Url::parse("file:///mid.lua").unwrap(),
+                origin: FileOrigin::Workspace,
+                resource: None,
+                side: None,
+                index: FileIndex { globals: vec![mid], ..FileIndex::default() },
+            }
+        };
+        let index = Index::default();
+        assert!(index.changes(Some(&entry(1)), Some(&entry(1))).is_empty());
+        let changed = index.changes(Some(&entry(1)), Some(&entry(2)));
+        assert_eq!(changed, FxHashSet::from_iter([Read::Global("Mid".into())]));
     }
 }

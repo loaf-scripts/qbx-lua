@@ -116,6 +116,9 @@ pub fn index_file(
     out.reads.extend(global_reads(resolution).into_iter().map(Read::Global));
     out.reads.sort_unstable();
     out.reads.dedup();
+    // The class names this file wrote stand for the declarations it sees, also where other resources
+    // read its types.
+    out.set_origin(file);
     out
 }
 
@@ -262,7 +265,7 @@ impl<'a> Indexer<'a> {
 
     fn owner_of(&self, ty: &Type) -> Option<SmolStr> {
         match ty {
-            Type::Named(name, _) => Some(name.clone()),
+            Type::Named(name, _) => Some(name.text.clone()),
             Type::GlobalTable(owner) => Some(owner.clone()),
             Type::Union(types) => {
                 let owners: Vec<SmolStr> = types.iter().filter_map(|t| self.owner_of(t)).collect();
@@ -277,7 +280,7 @@ impl<'a> Indexer<'a> {
     fn global_class(&self, name: &str) -> Option<SmolStr> {
         let own = self.out.globals.iter().rev().find(|s| s.name == name).map(|s| s.ty.clone());
         match own.unwrap_or_else(|| self.infer.global_type(name)) {
-            Type::Named(class, _) => Some(class),
+            Type::Named(class, _) => Some(class.text),
             _ => None,
         }
     }
@@ -696,7 +699,7 @@ impl<'a> Indexer<'a> {
             }
         };
         match &symbol.ty {
-            Type::Named(class, _) if symbol.is_class_table() => Some(class.clone()),
+            Type::Named(class, _) if symbol.is_class_table() => Some(class.text.clone()),
             _ => None,
         }
     }
@@ -734,8 +737,11 @@ impl<'a> Indexer<'a> {
                     ExprKind::Name(root) => self.global_class(&root.text),
                     _ => None,
                 };
-                match own_class.map(|class| Type::Named(class, Vec::new())).unwrap_or_else(|| self.infer.expr(base)) {
-                    Type::Named(class, _) => (class, true),
+                match own_class
+                    .map(|class| Type::Named(class.into(), Vec::new()))
+                    .unwrap_or_else(|| self.infer.expr(base))
+                {
+                    Type::Named(class, _) => (class.text, true),
                     _ => (SmolStr::new(path), false),
                 }
             }

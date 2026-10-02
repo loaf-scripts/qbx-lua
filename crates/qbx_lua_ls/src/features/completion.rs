@@ -1393,7 +1393,7 @@ fn expected_field_items(infer: &Infer, doc: &Document, offset: u32) -> Vec<Compl
     if let Some(found) = class_table_at(infer, &doc.chunk, offset) {
         let ExprKind::Table(existing) = &found.table.kind else { return Vec::new() };
         let present: FxHashSet<&str> = existing.iter().filter_map(named_field).map(|(name, _)| name).collect();
-        let class = Type::Named(found.class.clone(), Vec::new());
+        let class = Type::Named(found.class.clone().into(), Vec::new());
         return Classes::new(infer)
             .fields(&found.class, &found.args, found.from)
             .into_iter()
