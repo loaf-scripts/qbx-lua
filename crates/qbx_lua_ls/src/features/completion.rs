@@ -418,8 +418,8 @@ fn is_name(text: &str) -> bool {
 }
 
 fn identifier_prefix(before: &str) -> &str {
-    let start = before.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).map_or(0, |i| i + 1);
-    &before[start..]
+    let head = before.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+    &before[head.len()..]
 }
 
 /// `reopen_suggestions`: the client runs `editor.action.triggerSuggest` when a completion asks it to.
@@ -1372,8 +1372,8 @@ fn member_items(
 
 /// Fallback for member completion when the parser could not attach the trailing `.` to an expression.
 fn type_of_path(infer: &Infer, text: &str, offset: u32) -> Type {
-    let start = text.rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))).map_or(0, |i| i + 1);
-    let mut segments = text[start..].split(['.', ':']).filter(|s| !s.is_empty());
+    let head = text.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'));
+    let mut segments = text[head.len()..].split(['.', ':']).filter(|s| !s.is_empty());
     let Some(root) = segments.next() else { return Type::Unknown };
     let mut ty = match infer.ctx.resolution.lookup_local_at(root, offset) {
         Some(id) => infer.local_type_at(id, offset),

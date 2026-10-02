@@ -7780,6 +7780,30 @@ fn completes_members_globals_natives_and_events() {
 }
 
 #[test]
+fn completes_right_after_multibyte_characters() {
+    let mut client = Client::start(fixture_root());
+    let text = client.open(CLIENT);
+    let line = text.lines().count() as u32;
+    for (version, (extra, expected)) in [
+        ("é", None),
+        ("local a = →", None),
+        ("local a = …pri", Some("print")),
+        ("local a = 🚗GetEntityCo", Some("GetEntityCoords")),
+        ("local a = “MyLib.", Some("round")),
+        ("local a = ’.", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        client.change(CLIENT, version as i32 + 2, &format!("{text}{extra}"));
+        let labels = client.completion_labels(CLIENT, line, extra.encode_utf16().count() as u32);
+        if let Some(expected) = expected {
+            assert!(labels.contains(&expected.to_string()), "{extra}: {labels:?}");
+        }
+    }
+}
+
+#[test]
 fn server_side_completion_hides_client_natives() {
     let mut client = Client::start(fixture_root());
     let text = client.open(SERVER);
