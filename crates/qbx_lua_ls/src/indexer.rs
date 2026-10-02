@@ -17,7 +17,7 @@ use crate::index::{
 };
 use crate::infer::{metatable_args, table_elements, table_fields, FileContext, Infer};
 use crate::luacats::{own_type, parse_doc_lines, DocGroup};
-use crate::types::{CallbackRole, DescribedValue, FunType, Type};
+use crate::types::{CallbackRole, DescribedValue, FunType, Param, Type};
 
 const MAX_TABLE_DEPTH: u32 = 4;
 const MAX_TABLE_FIELDS: usize = 400;
@@ -126,6 +126,19 @@ pub fn index_file(
 fn global_reads(resolution: &Resolution) -> Vec<SmolStr> {
     let reads = resolution.globals.iter().filter(|global| !global.is_definition()).map(|global| global.name.clone());
     reads.filter(|name| qbx_fivem_data::native(name).is_none()).collect()
+}
+
+/// `fun`, declared with `:`, as the function value it is outside a `:` call: one that takes the
+/// receiver, of type `receiver`, as its first parameter, `self`.
+fn with_receiver(fun: &FunType, receiver: &Type) -> Arc<FunType> {
+    let this = Param { name: SmolStr::new("self"), ty: receiver.clone(), ..Param::default() };
+    let params = std::iter::once(this).chain(fun.params.iter().cloned()).collect();
+    let overloads = fun
+        .overloads
+        .iter()
+        .map(|overload| if overload.is_method { with_receiver(overload, receiver) } else { overload.clone() })
+        .collect();
+    Arc::new(FunType { params, is_method: false, lists_receiver: true, overloads, ..fun.clone() })
 }
 
 struct Indexer<'a> {
@@ -815,6 +828,18 @@ impl<'a> Indexer<'a> {
                 own.unwrap_or_else(|| self.infer.expr(value))
             }
             _ => self.infer.expr(value),
+        };
+        // A method declared with `:` receives the first value of a call as `self`, so the export
+        // of `Obj.Fn` passes `self` what its callers pass first. What `exports.other.Fn` holds is
+        // called through the exports proxy already.
+        let ty = match (&value.kind, ty) {
+            (ExprKind::Field { base, .. } | ExprKind::Index { base, .. }, Type::Fun(fun)) if fun.is_method => {
+                match self.infer.expr(base) {
+                    Type::Exports(_) => Type::Fun(fun),
+                    receiver => Type::Fun(with_receiver(&fun, &receiver)),
+                }
+            }
+            (_, ty) => ty,
         };
         let mut symbol_doc = render_doc(&doc);
         if symbol_doc.is_none() {

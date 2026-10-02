@@ -8272,6 +8272,38 @@ print(cid, rang)
 }
 
 #[test]
+fn exports_of_methods_pass_the_first_value_to_self() {
+    const MYLIB: &str = "[core]/mylib/server.lua";
+    let mut client = Client::start(fixture_root());
+    let mylib = client.open(MYLIB);
+    let registered = "
+---@class Test.Garage
+local Garage = {}
+
+---@param plate string
+---@return boolean
+function Garage:Park(plate) return plate ~= '' end
+exports('Park', Garage.Park)
+";
+    client.change(MYLIB, 2, &format!("{mylib}{registered}"));
+    // `Garage.Park` takes the garage as `self` before the plate, and the proxy passes it the first
+    // value of the call.
+    let text = "local parked = exports.mylib:Park({}, 'ABC')\nprint(parked)\n";
+    client.open_with(SERVER, text);
+    let (l, c) = pos(text, "'ABC'", 0);
+    let result = client.request("textDocument/signatureHelp", client.position_params(SERVER, l, c));
+    assert_eq!(result["signatures"][0]["label"], "Park(self: Test.Garage, plate: string): boolean");
+    assert_eq!(result["activeParameter"], 1);
+    let hints = client.request(
+        "textDocument/inlayHint",
+        json!({ "textDocument": { "uri": client.uri(SERVER) }, "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 2, "character": 0 } } }),
+    );
+    let labels: Vec<&str> = hints.as_array().unwrap().iter().map(|h| h["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, ["self:", "plate:"]);
+    assert!(findings(&mut client, SERVER, &["fivem/export-argument-count"]).is_empty());
+}
+
+#[test]
 fn publishes_lint_diagnostics_with_resource_context() {
     let mut client = Client::start(fixture_root());
     client.open(CLIENT);
