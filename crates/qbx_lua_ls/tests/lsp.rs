@@ -4342,6 +4342,77 @@ print(listed[name])
 }
 
 #[test]
+fn tables_typed_as_table_types_check_their_fields() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Box<T> { value: T }
+---@class Test.Named
+---@field name string
+
+---@type { value: string, count?: integer }
+local shape = { value = 1, count = 'x', extra = true }
+---@type Test.Box<string>
+local box = { value = 1 }
+---@type Test.Box
+local open = { value = 1 }
+---@type { inner: { n: integer }, named: Test.Named }
+local nested = { inner = { n = 'x' }, named = { name = 1 } }
+---@type string[]
+local list = { 'a', 2 }
+---@type table<string, integer>
+local map = { a = 'x', [1] = 'y' }
+---@type { [1]: string, [2]: integer }
+local pair = { 1, 'x' }
+---@type { mode: 'a'|'b' }?
+local mode = { mode = 'c' }
+---@type { value: string }|{ value: integer }
+local either = { value = true }
+
+---@param options { id: integer }
+local function use(options) end
+use({ id = 'x' })
+
+---@return { id: integer }
+local function make() return { id = 'x' } end
+
+---@type { value: string }
+local later
+later = { value = 1 }
+local inferred = { value = 1 }
+inferred = { value = 'x' }
+print(shape, box, open, nested, list, map, pair, mode, either, make, later, inferred)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("assign-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    let mut found = findings(&mut client, CLIENT, &["assign-type-mismatch"]);
+    found.sort();
+    let mut expected = vec![
+        finding("value = 1, count", "Cannot assign `integer` to field `value` of type `string`"),
+        finding("count = 'x'", "Cannot assign `string` to field `count` of type `integer?`"),
+        finding("local box = { value = 1 }", "Cannot assign `integer` to field `value` of type `string`"),
+        finding("n = 'x'", "Cannot assign `string` to field `n` of type `integer`"),
+        finding("name = 1", "Cannot assign `integer` to field `name` of type `string`"),
+        finding("'a', 2", "Cannot assign `integer` to field `[2]` of type `string`"),
+        finding("a = 'x'", "Cannot assign `string` to field `a` of type `integer`"),
+        finding("1, 'x'", "Cannot assign `integer` to field `[1]` of type `string`"),
+        finding("1, 'x'", "Cannot assign `string` to field `[2]` of type `integer`"),
+        finding("mode = 'c'", "Cannot assign `\"c\"` to field `mode` of type `\"a\"|\"b\"`"),
+        finding("use({ id", "Cannot assign `string` to field `id` of type `integer`"),
+        finding("make() return { id", "Cannot assign `string` to field `id` of type `integer`"),
+        finding("later = {", "Cannot assign `integer` to field `value` of type `string`"),
+    ];
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "shapes, aliases of them, arrays and `table<K, V>` check what their tables hold, and the class tables \
+         they hold; an alias without its type argument, a union of table types and a table that only replaces \
+         an inferred one are not checked"
+    );
+}
+
+#[test]
 fn values_assigned_to_typed_variables_are_checked() {
     let mut client = Client::start(fixture_root());
     let text = "\

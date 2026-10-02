@@ -605,6 +605,16 @@ it to `T` as in lua-language-server, which silences a check that the code knows 
 `local count = GetValue() --[[@as integer]]` stores an `integer`. On a call, the cast types its
 first value.
 
+A table constructor typed as a table type rather than a class is checked like a class table, by
+the type of each entry: a shape such as `{ value: string, count?: integer }`, an alias of one,
+generic ones such as `Box<string>` for `---@alias Box<T> { value: T }` included, an array such as
+`string[]`, or a `table<K, V>`. That holds wherever a class table is checked: under a `---@type`,
+as an argument, as a returned value, and in the fields of another typed table, also for the class
+tables a shape holds. An assignment without a `---@type` checks a table against the type its
+target is declared with, not one inferred from what the target held before. As in
+lua-language-server, such a table may leave fields out and set fields its type does not name, and
+a union of table types is not checked.
+
 ## Casts
 
 A `---@cast` line changes the type of a local from its line on: `---@cast name T` makes it a `T`,

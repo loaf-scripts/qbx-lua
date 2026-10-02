@@ -2,8 +2,10 @@
 //! and assignments, arguments to class-typed parameters, `return` in a function documented with
 //! `@return`, and the tables such fields hold. With the fields that code sets on and reads from
 //! values of a class, they drive `missing-fields`, `assign-type-mismatch`, `undeclared-field` and
-//! the completion of field names. Only the language server knows the classes, so qbx-lint
-//! registers the rules and this module reports them.
+//! the completion of field names. Table constructors typed as a table type, like a shape
+//! `{ value: string }`, `string[]` or `table<string, integer>`, are found in the same places for
+//! `assign-type-mismatch`. Only the language server knows the classes, so qbx-lint registers the
+//! rules and this module reports them.
 //!
 //! Type names are global, and resources may declare the same one differently: ox_fuel's
 //! `@class State` is not qbx_vehicles' `@enum State`. A name is looked up the way the file that
@@ -17,6 +19,7 @@ use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::{NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::comparisons::Declared;
 use crate::index::{AliasDef, ClassDef, FileId, ResourceId};
 use crate::infer::{bound_parents, class_bindings, expanded_bindings, substitute, Infer};
 use crate::luacats::applies_on;
@@ -215,6 +218,29 @@ impl<'a, 'b> Classes<'a, 'b> {
             Type::Named(name, args) if !self.class_defs(&name, from).is_empty() => Some((name, args)),
             _ => None,
         }
+    }
+
+    /// The table type a value of type `ty` must be, as `from` sees the names, looking through `?`
+    /// and aliases: a shape like `{ value: string }`, an array like `string[]`, or a
+    /// `table<K, V>`.
+    pub fn table_type_of(&self, ty: &Type, from: FileId) -> Option<Type> {
+        match self.resolve(&ty.without_nil(), from, 0).without_nil() {
+            ty @ (Type::Shape(_) | Type::Array(_) | Type::Map(..)) => Some(ty),
+            _ => None,
+        }
+    }
+
+    /// The type that `key` of a table of the table type `ty`, as `from` sees it, holds: the field
+    /// of a shape that a name names, or else the value of its array part or of an index that takes
+    /// the key.
+    pub fn table_field_type(&self, ty: &Type, from: FileId, key: &Key) -> Option<(Type, FileId)> {
+        if let (Type::Shape(shape), Key::Name(name)) = (ty, key) {
+            if let Some(field) = shape.fields.iter().find(|field| field.name == *name) {
+                let ty = if field.optional { field.ty.clone().optional() } else { field.ty.clone() };
+                return Some((ty, from));
+            }
+        }
+        self.table_index_for(ty, from, &key.ty())
     }
 
     /// The `@field`s of `class`, given the type arguments `args`, and of its parents, with the fields
@@ -642,9 +668,34 @@ pub fn class_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> Vec<ClassTable<'c>> 
         function_returns: Vec::new(),
         documented: FxHashMap::default(),
         out: Vec::new(),
+        table_types: None,
     };
     finder.visit_block(&chunk.block);
     finder.out
+}
+
+/// A table constructor typed as a table type rather than a class: a shape like `{ value: string }`,
+/// an array like `string[]`, or a `table<K, V>`, also through an alias such as `Box<string>`.
+pub struct TypedTable<'c> {
+    /// The table type, with the aliases that name it resolved.
+    pub ty: Type,
+    pub table: &'c Expr,
+    /// The file whose view of the type names decided the type.
+    pub from: FileId,
+}
+
+/// The table constructors of `chunk` typed as a class, as `class_tables` finds them, together with
+/// those typed as a table type, and the class-typed ones that tables of such types hold.
+fn typed_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> (Vec<ClassTable<'c>>, Vec<TypedTable<'c>>) {
+    let mut finder = Finder {
+        classes: Classes::new(infer),
+        function_returns: Vec::new(),
+        documented: FxHashMap::default(),
+        out: Vec::new(),
+        table_types: Some((Declared::keeping_annotations(infer), Vec::new())),
+    };
+    finder.visit_block(&chunk.block);
+    (finder.out, finder.table_types.map(|(_, typed)| typed).unwrap_or_default())
 }
 
 /// A field set or read outside a table constructor.
@@ -800,15 +851,16 @@ pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
         .collect()
 }
 
-/// Each value that a class-typed table constructor or an assignment stores in a field of a class
-/// that does not take it, such as `test = 1` for `---@field test string` or `other = true` for
-/// `---@field [string] number`, with the message naming both types. Only clear cases count: a
-/// different kind of value, or a literal the field does not list.
+/// Each value that a typed table constructor or an assignment stores in a field that does not take
+/// it, such as `test = 1` for `---@field test string` or `other = true` for `---@field [string]
+/// number`, with the message naming both types. Tables typed as a shape, an array or a
+/// `table<K, V>` are checked the same way, but only classes are checked in assignments. Only clear
+/// cases count: a different kind of value, or a literal the field does not list.
 pub fn mismatched_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
     let mut out = Vec::new();
-    let mut check = |class: &str, args: &[Type], from: FileId, key: &Key, value: &Expr| {
-        let Some((ty, file)) = classes.field_type(class, args, from, key) else { return };
+    let mut check = |field: Option<(Type, FileId)>, key: &Key, value: &Expr| {
+        let Some((ty, file)) = field else { return };
         let given = classes.value_type(value);
         if classes.rejects(&ty, file, &given) {
             let shown = if classes.literal_mismatch(&ty, file, &given) { given } else { given.widen() };
@@ -819,18 +871,27 @@ pub fn mismatched_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
             out.push((value.span, format!("Cannot assign `{shown}` to {target} of type `{ty}`")));
         }
     };
-    for found in class_tables(infer, chunk) {
+    let (class_tables, typed_tables) = typed_tables(infer, chunk);
+    for found in class_tables {
         let ExprKind::Table(fields) = &found.table.kind else { continue };
         for (key, _, value) in entries(infer, fields) {
             if let Some(value) = value {
-                check(&found.class, &found.args, found.from, &key, value);
+                check(classes.field_type(&found.class, &found.args, found.from, &key), &key, value);
+            }
+        }
+    }
+    for found in typed_tables {
+        let ExprKind::Table(fields) = &found.table.kind else { continue };
+        for (key, _, value) in entries(infer, fields) {
+            if let Some(value) = value {
+                check(classes.table_field_type(&found.ty, found.from, &key), &key, value);
             }
         }
     }
     for access in accesses(infer, chunk, false) {
         // `value.field = nil` clears a field only when its type allows `nil`, as `string?` does.
         if let (Some(value), Some((class, args))) = (access.value, classes.class_of(&access.owner, classes.file())) {
-            check(&class, &args, classes.file(), &access.key, value);
+            check(classes.field_type(&class, &args, classes.file(), &access.key), &access.key, value);
         }
     }
     out
@@ -844,29 +905,64 @@ struct Finder<'a, 'b, 'c> {
     /// parameter list.
     documented: FxHashMap<u32, Vec<Type>>,
     out: Vec<ClassTable<'c>>,
+    /// When tables typed as table types are looked for too, the reader of declared types that
+    /// assignments without a `---@type` are typed by, and the tables found.
+    table_types: Option<(Declared<'a, 'b>, Vec<TypedTable<'c>>)>,
 }
 
 impl<'c> Finder<'_, '_, 'c> {
     /// Records `expr` when it is a table constructor and `expected`, named as `from` sees it, is a
-    /// class, then the constructors it holds for fields that are classes too.
+    /// class, or a table type when those are looked for, then the constructors it holds for fields
+    /// of such types.
     fn table(&mut self, expected: &Type, expr: &'c Expr, from: FileId, depth: u32) {
         let table = expr.unparen();
         let ExprKind::Table(fields) = &table.kind else { return };
-        let Some((class, args)) = self.classes.class_of(expected, from) else { return };
-        self.out.push(ClassTable { class: class.clone(), args: args.clone(), table, from });
+        if let Some((class, args)) = self.classes.class_of(expected, from) {
+            self.out.push(ClassTable { class: class.clone(), args: args.clone(), table, from });
+            if depth < MAX_DEPTH {
+                for (key, _, value) in entries(self.classes.infer, fields) {
+                    let Some(value) = value.filter(|value| is_table(value)) else { continue };
+                    if let Some((ty, file)) = self.classes.field_type(&class, &args, from, &key) {
+                        self.table(&ty, value, file, depth + 1);
+                    }
+                }
+            }
+            return;
+        }
+        if self.table_types.is_none() {
+            return;
+        }
+        let Some(ty) = self.classes.table_type_of(expected, from) else { return };
         if depth < MAX_DEPTH {
             for (key, _, value) in entries(self.classes.infer, fields) {
                 let Some(value) = value.filter(|value| is_table(value)) else { continue };
-                if let Some((ty, file)) = self.classes.field_type(&class, &args, from, &key) {
-                    self.table(&ty, value, file, depth + 1);
+                if let Some((field, file)) = self.classes.table_field_type(&ty, from, &key) {
+                    self.table(&field, value, file, depth + 1);
                 }
             }
+        }
+        if let Some((_, typed)) = &mut self.table_types {
+            typed.push(TypedTable { ty, table, from });
         }
     }
 
     /// A table this file's code builds, typed by a name this file sees.
     fn top_table(&mut self, expected: &Type, expr: &'c Expr) {
         self.table(expected, expr, self.classes.file(), 0);
+    }
+
+    /// The type that an assignment to `target` without a `---@type` gives a table: that of a
+    /// class the target holds, or else the table type it is declared with, as its own `---@type`
+    /// or `@param` declares it. What the target was assigned before only tells what it held then.
+    fn assigned_type(&self, target: &Expr) -> Type {
+        let ty = self.classes.infer.expr(target);
+        if self.classes.class_of(&ty, self.classes.file()).is_some() {
+            return ty;
+        }
+        match &self.table_types {
+            Some((declared, _)) => declared.of(target),
+            None => ty,
+        }
     }
 }
 
@@ -896,7 +992,7 @@ impl<'c> Visitor<'c> for Finder<'_, '_, 'c> {
                     let values = targets.iter().zip(exprs).enumerate();
                     for (index, (target, expr)) in values.filter(|(_, (_, expr))| is_table(expr)) {
                         let declared = doc.type_at(index).cloned();
-                        let expected = declared.unwrap_or_else(|| self.classes.infer.expr(target));
+                        let expected = declared.unwrap_or_else(|| self.assigned_type(target));
                         self.top_table(&expected, expr);
                     }
                 }
