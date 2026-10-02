@@ -253,8 +253,8 @@ fn local_hover(infer: &Infer, id: LocalId, offset: u32, called: Option<Type>) ->
     out
 }
 
-fn native_hover(name: &str) -> Option<String> {
-    let native = native(name)?;
+fn native_hover(name: &str, side: Option<Side>) -> Option<String> {
+    let native = native(name)?.on(side);
     let mut out = lua_block(&native.signature());
     let canonical = native.alias_of.map(|target| format!(" · alias of `{target}`")).unwrap_or_default();
     out.push_str(&format!(
@@ -276,7 +276,7 @@ fn global_hover(ws: &Workspace, infer: &Infer, name: &str, called: Option<Type>)
         .iter()
         .max_by_key(|(_, s)| (matches!(s.ty, Type::GlobalTable(_) | Type::Named(..)), s.ty.specificity()));
     let Some((file, symbol)) = preferred else {
-        if let Some(hover) = native_hover(name) {
+        if let Some(hover) = native_hover(name, infer.side()) {
             return Some(hover);
         }
         let ty = infer.global_type(name);

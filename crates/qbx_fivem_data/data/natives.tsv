@@ -527,13 +527,13 @@ CreateNewScriptedConversation	c	AUDIO	0xD2C91A0B572AAE56
 CreateNmMessage	c	PED	0x418EF2A1BCE56685		startImmediately:boolean,messageId:integer	
 CreateNonNetworkedAmbientPickup	c	OBJECT	0x9C93764223E29C50	any	pickupHash:any,posX:number,posY:number,posZ:number,flags:integer,value:integer,modelHash:any,p7:boolean,p8:boolean	
 CreateNonNetworkedPortablePickup	c	OBJECT	0x125494B98A21AAF7	Object	pickupHash:Hash,x:number,y:number,z:number,placeOnGround:boolean,modelHash:Hash	
-CreateObject	b	OBJECT	0x509D5878EB39E842	Object	modelHash:Hash,x:number,y:number,z:number,isNetwork:boolean,netMissionEntity:boolean,doorFlag:boolean	
-CreateObjectNoOffset	b	OBJECT	0x9A294B2138ABB884	Object	modelHash:Hash,x:number,y:number,z:number,isNetwork:boolean,netMissionEntity:boolean,doorFlag:boolean	
+CreateObject	b	OBJECT	0x509D5878EB39E842	Object	modelHash:Hash,x:number,y:number,z:number,isNetwork:boolean,netMissionEntity:boolean,doorFlag:boolean		0x2F7AA05C	Entity	modelHash:Hash,x:number,y:number,z:number,isNetwork:boolean,netMissionEntity:boolean,doorFlag:boolean
+CreateObjectNoOffset	b	OBJECT	0x9A294B2138ABB884	Object	modelHash:Hash,x:number,y:number,z:number,isNetwork:boolean,netMissionEntity:boolean,doorFlag:boolean		0x58040420	Entity	modelHash:Hash,x:number,y:number,z:number,isNetwork:boolean,netMissionEntity:boolean,doorFlag:boolean
 CreateParachuteBagObject	c	PED	0x8C4F3BF23B6237DB	Object	ped:Ped,p1:boolean,p2:boolean	
 CreateParachuteObject	c	PED	0x8C4F3BF23B6237DB	Object	ped:Ped,p1:boolean,p2:boolean	CreateParachuteBagObject
 CreatePatrolRoute	c	TASK	0xAF8A443CCC8018DC			
-CreatePed	b	PED	0xD49F9B0955C367DE	Ped	pedType:integer,modelHash:Hash,x:number,y:number,z:number,heading:number,isNetwork:boolean,bScriptHostPed:boolean	
-CreatePedInsideVehicle	b	PED	0x7DD959874C1FD534	Ped	vehicle:Vehicle,pedType:integer,modelHash:Hash,seat:integer,isNetwork:boolean,bScriptHostPed:boolean	
+CreatePed	b	PED	0xD49F9B0955C367DE	Ped	pedType:integer,modelHash:Hash,x:number,y:number,z:number,heading:number,isNetwork:boolean,bScriptHostPed:boolean		0x389EF71	Entity	pedType:integer,modelHash:Hash,x:number,y:number,z:number,heading:number,isNetwork:boolean,bScriptHostPed:boolean
+CreatePedInsideVehicle	b	PED	0x7DD959874C1FD534	Ped	vehicle:Vehicle,pedType:integer,modelHash:Hash,seat:integer,isNetwork:boolean,bScriptHostPed:boolean		0x3000F092	Entity	vehicle:Vehicle,pedType:integer,modelHash:Hash,seat:integer,isNetwork:boolean,bScriptHostPed:boolean
 CreatePickUpRopeForCargobob	c	VEHICLE	0x7BEB0C7A235F6F3B		cargobob:Vehicle,state:integer	
 CreatePickup	c	OBJECT	0xFBA08C503DD5FA58	Pickup	pickupHash:Hash,posX:number,posY:number,posZ:number,p4:integer,value:integer,p6:boolean,modelHash:Hash	
 CreatePickupRotate	c	OBJECT	0x891804727E0A98B7	Pickup	pickupHash:Hash,posX:number,posY:number,posZ:number,rotX:number,rotY:number,rotZ:number,flag:integer,amount:integer,p9:any,p10:boolean,modelHash:Hash	
@@ -550,7 +550,7 @@ CreateSynchronizedScene	c	PED	0x8C18E0F9080ADD73	integer	x:number,y:number,z:num
 CreateSynchronizedScene_2	c	PED	0x62EC273D00187DCA	integer	x:number,y:number,z:number,radius:number,object:Hash	
 CreateTimecycleModifier	c	CFX	0x70FA2AFA	integer	modifierName:string	
 CreateTrackedPoint	c	GRAPHICS	0xE2C9439ED45DEA60	integer		
-CreateVehicle	b	VEHICLE	0xAF35D0D2583051B0	Vehicle	modelHash:Hash,x:number,y:number,z:number,heading:number,isNetwork:boolean,netMissionEntity:boolean	
+CreateVehicle	b	VEHICLE	0xAF35D0D2583051B0	Vehicle	modelHash:Hash,x:number,y:number,z:number,heading:number,isNetwork:boolean,netMissionEntity:boolean		0xDD75460A	Entity	modelHash:Hash,x:number,y:number,z:number,heading:number,isNetwork:boolean,netMissionEntity:boolean
 CreateVehicleServerSetter	s	CFX	0x6AE51D4B	Vehicle	modelHash:Hash,type:string,x:number,y:number,z:number,heading:number	
 CreateWeaponObject	c	WEAPON	0x9541D3CF0D398F36	Object	weaponHash:Hash,ammoCount:integer,x:number,y:number,z:number,bCreateDefaultComponents:boolean,scale:number,customModelHash:integer	
 CustomMenuCoordinates	c	CAM	0x487A82C650EB7799		p0:number	
@@ -739,7 +739,7 @@ DoesCutsceneEntityExist	c	CUTSCENE	0x499EF20C5DB25C59	boolean	cutsceneEntName:st
 DoesDesObjectExist	c	OBJECT	0x52AF537A0C5B8AAD	boolean	object:Object	DoesRayfireMapObjectExist
 DoesDoorExist	c	OBJECT	0xC153C43EA202C8C1	boolean	doorHash:Hash	IsDoorRegisteredWithSystem
 DoesEntityBelongToThisScript	c	ENTITY	0xDDE6DF5AE89981D2	boolean	entity:Entity,p2:boolean	
-DoesEntityExist	b	ENTITY	0x7239B21A38F536BA	boolean	entity:Entity	
+DoesEntityExist	b	ENTITY	0x7239B21A38F536BA	boolean	entity:Entity		0x3AC90869	boolean	entity:Object
 DoesEntityHaveAnimDirector	c	ENTITY	0x2158E81A6AF65EA9	boolean	entity:Entity	
 DoesEntityHaveDrawable	c	ENTITY	0x060D6E96F8B8E48D	boolean	entity:Entity	
 DoesEntityHaveFragInst	c	PHYSICS	0x0C112765300C7E1E	boolean	object:Object	GetHasObjectFragInst
@@ -1063,7 +1063,7 @@ GetAllPeds	s	CFX	0xB8584FEF	table
 GetAllRopes	c	CFX	0x760A2D67	table		
 GetAllTrackJunctions	c	CFX	0x81A08523	table		
 GetAllVehicleModels	c	CFX	0xD7531645	table		
-GetAllVehicles	b	VEHICLE	0x9B8E1BF04B51F2E8	integer,integer		
+GetAllVehicles	b	VEHICLE	0x9B8E1BF04B51F2E8	integer,integer			0x332169F5	table	
 GetAllocatedStackSize	c	MISC	0x8B3CA62B1EF19B62	integer		
 GetAllowMovementWhileZoomed	c	PAD	0xFC859E2374407556	boolean		
 GetAmbientPedRangeMultiplier	c	CFX	0xB550232D	number		
@@ -1185,7 +1185,7 @@ GetCurrentNotification	c	HUD	0x82352748437638CA	integer		ThefeedGetFirstVisibleD
 GetCurrentNumberOfCloudPhotos	c	GRAPHICS	0x473151EBC762C6DA	integer		
 GetCurrentNumberOfPhotos	c	GRAPHICS	0x473151EBC762C6DA	integer		GetCurrentNumberOfCloudPhotos
 GetCurrentPedVehicleWeapon	c	WEAPON	0x1017582BCD3832DC	boolean,Hash	ped:Ped	
-GetCurrentPedWeapon	b	WEAPON	0x3A87E44BB9A01D54	boolean,Hash	ped:Ped,p2:boolean	
+GetCurrentPedWeapon	b	WEAPON	0x3A87E44BB9A01D54	boolean,Hash	ped:Ped,p2:boolean		0xB0237302	Hash	ped:Ped
 GetCurrentPedWeaponEntityIndex	c	WEAPON	0x3B390A939AF0B5FC	Entity	ped:Ped	
 GetCurrentPlaybackForVehicle	c	VEHICLE	0x42BC05C27A946054	integer	vehicle:Vehicle	
 GetCurrentRadioStationHash	c	AUDIO	0x3E65CDE5215832C1	integer	radioStationName:string	GetCurrentRadioTrackPlaybackTime
@@ -1244,7 +1244,7 @@ GetEntityBoneRotationLocal	c	ENTITY	0xBD8D32550E5CEBFE	vector3	entity:Entity,bon
 GetEntityCanBeDamaged	c	ENTITY	0xD95CC5D2AB15A09F	boolean	entity:Entity	
 GetEntityCollisionDisabled	b	ENTITY	0xCCF1E97BEFDAE480	boolean	entity:Entity	
 GetEntityCollisonDisabled	c	ENTITY	0xCCF1E97BEFDAE480	boolean	entity:Entity	GetEntityCollisionDisabled
-GetEntityCoords	b	ENTITY	0x3FEF770D40960D5A	vector3	entity:Entity,alive:boolean	
+GetEntityCoords	b	ENTITY	0x3FEF770D40960D5A	vector3	entity:Entity,alive:boolean		0x1647F1CB	vector3	entity:Entity
 GetEntityForwardVector	c	ENTITY	0x0A794A5A57F8DF91	vector3	entity:Entity	
 GetEntityForwardX	c	ENTITY	0x8BB4EF4214E0E6D5	number	entity:Entity	
 GetEntityForwardY	c	ENTITY	0x866A4A5FAE349510	number	entity:Entity	
@@ -1274,10 +1274,10 @@ GetEntityProofs	c	ENTITY	0xBE8CD9BE829BBEBF	boolean,boolean,boolean,boolean,bool
 GetEntityQuaternion	c	ENTITY	0x7B3703D2D32DFA18	number,number,number,number	entity:Entity	
 GetEntityRemoteSyncedScenesAllowed	s	CFX	0x91B38FB6	boolean	entity:Entity	
 GetEntityRoll	c	ENTITY	0x831E0242595560DF	number	entity:Entity	
-GetEntityRotation	b	ENTITY	0xAFBD61CC738D9EB9	vector3	entity:Entity,rotationOrder:integer	
+GetEntityRotation	b	ENTITY	0xAFBD61CC738D9EB9	vector3	entity:Entity,rotationOrder:integer		0x8FF45B04	vector3	entity:Entity
 GetEntityRotationVelocity	b	ENTITY	0x213B91045D09B983	vector3	entity:Entity	
 GetEntityRoutingBucket	s	CFX	0xED4B0486	integer	entity:Entity	
-GetEntityScript	b	ENTITY	0xA6E9C38DB51D7748	string,ScrHandle	entity:Entity	
+GetEntityScript	b	ENTITY	0xA6E9C38DB51D7748	string,ScrHandle	entity:Entity		0xB7F70784	string	entity:Entity
 GetEntitySpeed	b	ENTITY	0xD5037BA82E12416F	number	entity:Entity	
 GetEntitySpeedVector	c	ENTITY	0x9A8D700A51CB7B0D	vector3	entity:Entity,relative:boolean	
 GetEntitySubmergedLevel	c	ENTITY	0xE81AFC1BC4CC41CE	number	entity:Entity	
@@ -1466,7 +1466,7 @@ GetLandingGearState	b	VEHICLE	0x9B0F3DCA3DB0F4CD	integer	vehicle:Vehicle
 GetLastDrivenVehicle	c	VEHICLE	0xB2D06FAEDE65B577	Vehicle		
 GetLastInputMethod	c	PAD	0xA571D46727E2B718	boolean	padIndex:integer	IsUsingKeyboard
 GetLastMaterialHitByEntity	c	ENTITY	0x5C3D0A935F535C4C	Hash	entity:Entity	
-GetLastPedInVehicleSeat	b	VEHICLE	0x83F969AA1EE2A664	Ped	vehicle:Vehicle,seatIndex:integer	
+GetLastPedInVehicleSeat	b	VEHICLE	0x83F969AA1EE2A664	Ped	vehicle:Vehicle,seatIndex:integer		0xF7C6792D	Entity	vehicle:Vehicle,seatIndex:integer
 GetLastRammedVehicle	c	VEHICLE	0x04F2FA6E234162F7	Vehicle	vehicle:Vehicle	
 GetLengthOfLiteralString	c	HUD	0xF030907CCBB8A9FD	integer	string:string	
 GetLengthOfLiteralStringInBytes	c	HUD	0x43E4111189E54F0E	integer	string:string	
@@ -1682,7 +1682,7 @@ GetPedHeadOverlayValue	c	PED	0xA60EF3B6461A4D43	integer	ped:Ped,overlayID:intege
 GetPedHelmetStoredHatPropIndex	c	PED	0x451294E859ECC018	integer	ped:Ped	
 GetPedHelmetStoredHatTexIndex	c	PED	0x9D728C1E12BF5518	integer	ped:Ped	
 GetPedIlluminatedClothingGlowIntensity	c	PED	0x1461B28A06717D68	number	ped:Ped	GetPedEmissiveIntensity
-GetPedInVehicleSeat	b	VEHICLE	0xBB40DD2270B65366	Ped	vehicle:Vehicle,seatIndex:integer	
+GetPedInVehicleSeat	b	VEHICLE	0xBB40DD2270B65366	Ped	vehicle:Vehicle,seatIndex:integer		0x388FDE9A	Entity	vehicle:Vehicle,seatIndex:integer
 GetPedIndexFromEntityIndex	c	ENTITY	0x04A2A40C73395041	Ped	entity:Entity	
 GetPedInsideExplosionArea	c	FIRE	0x14BA4BA137AF6CEC	Entity	explosionType:integer,x1:number,y1:number,z1:number,x2:number,y2:number,z2:number,radius:number	GetEntityInsideExplosionArea
 GetPedKiller	c	PED	0x93C8B64DEB84728C	Entity	ped:Ped	GetPedSourceOfDeath
@@ -1742,7 +1742,7 @@ GetPlayerAdvancedModifierPrivileges	c	NETWORK	0xCD67AD041A394C9C	string	p0:integ
 GetPlayerCameraRotation	s	CFX	0x433C765D	vector3	playerSrc:string	
 GetPlayerCurrentStealthNoise	c	PLAYER	0x2F395D61F3A1F877	number	player:Player	
 GetPlayerEndpoint	s	CFX	0xFEE404F9	string	playerSrc:string	
-GetPlayerFakeWantedLevel	b	PLAYER	0x56105E599CAB0EFA	integer	player:Player	
+GetPlayerFakeWantedLevel	b	PLAYER	0x56105E599CAB0EFA	integer	player:Player		0x98D244	integer	playerSrc:string
 GetPlayerFocusPos	s	CFX	0x586F80FF	vector3	playerSrc:string	
 GetPlayerFromIndex	s	CFX	0xC8A9CE08	string	index:integer	
 GetPlayerFromServerId	c	CFX	0x344EA166	Player	serverId:integer	
@@ -1755,21 +1755,21 @@ GetPlayerHealthRechargeLimit	c	PLAYER	0x8BC515BAE4AAF8FF	number	player:Player
 GetPlayerIdentifier	s	CFX	0x7302DBCF	string	playerSrc:string,identiferIndex:integer	
 GetPlayerIdentifierByType	s	CFX	0xA61C8FC6	string	playerSrc:string,identifierType:string	
 GetPlayerIndex	c	PLAYER	0xA5EDC40EF369B48D	Player		
-GetPlayerInvincible	b	PLAYER	0xB721981B2B939E07	boolean	player:Player	
+GetPlayerInvincible	b	PLAYER	0xB721981B2B939E07	boolean	player:Player		0x680C90EE	boolean	playerSrc:string
 GetPlayerInvincible_2	c	CFX	0xF2E3912B	boolean	player:Player	
 GetPlayerKillFallHeight	c	CFX	0xBFB2990C	number		
 GetPlayerLastMsg	s	CFX	0x427E8E6A	integer	playerSrc:string	
-GetPlayerMaxArmour	b	PLAYER	0x92659B4CE1863CB3	integer	player:Player	
+GetPlayerMaxArmour	b	PLAYER	0x92659B4CE1863CB3	integer	player:Player		0x2A50657	integer	playerSrc:string
 GetPlayerMaxHealth	s	CFX	0x8154E470	integer	playerSrc:string	
 GetPlayerMaxStamina	c	CFX	0xD014AB79	number	playerId:Player	
 GetPlayerMeleeWeaponDamageModifier	b	CFX	0x8689A825	number	playerId:Player	
 GetPlayerMeleeWeaponDefenseModifier	c	CFX	0x27E94EF8	number	playerId:Player	
-GetPlayerName	b	PLAYER	0x6D0DE6A7B5DA71F8	string	player:Player	
+GetPlayerName	b	PLAYER	0x6D0DE6A7B5DA71F8	string	player:Player		0x406B4B20	string	playerSrc:string
 GetPlayerParachuteModelOverride	c	PLAYER	0xC219887CA3E65C41	Hash	player:Player	
 GetPlayerParachutePackTintIndex	c	PLAYER	0x6E9C742F340CE5A2	integer	player:Player	
 GetPlayerParachuteSmokeTrailColor	c	PLAYER	0xEF56DBABD3CD4887	integer,integer,integer	player:Player	
 GetPlayerParachuteTintIndex	c	PLAYER	0x75D3F7A1B0D9B145	integer	player:Player	
-GetPlayerPed	b	PLAYER	0x43A66C31C68491C0	Ped	playerId:Player	
+GetPlayerPed	b	PLAYER	0x43A66C31C68491C0	Ped	playerId:Player		0x6E31E993	Entity	playerSrc:string
 GetPlayerPedIsFollowing	c	PED	0x6A3975DEA89F9A17	Player	ped:Ped	
 GetPlayerPedScriptIndex	c	PLAYER	0x50FAC3A3E030A6E1	Ped	player:Player	
 GetPlayerPeerStatistics	s	CFX	0x9A928294	integer	playerSrc:string,peerStatistic:integer	
@@ -1792,15 +1792,15 @@ GetPlayerSwitchJumpCutIndex	c	STREAMING	0x78C0D93253149435	integer
 GetPlayerSwitchState	c	STREAMING	0x470555300D10B2A5	integer		
 GetPlayerSwitchType	c	STREAMING	0xB3C94A90D9FC9E62	integer		
 GetPlayerTargetEntity	c	PLAYER	0x13EDE1A5DBF797C9	boolean,Entity	player:Player	
-GetPlayerTeam	b	PLAYER	0x37039302F4E0A008	integer	player:Player	
+GetPlayerTeam	b	PLAYER	0x37039302F4E0A008	integer	player:Player		0x9873E404	integer	playerSrc:string
 GetPlayerTimeInPursuit	s	CFX	0x7ADE63E1	integer	playerSrc:string,lastPursuit:boolean	
 GetPlayerTimeOnline	s	CFX	0x67D2E605	integer	playerSrc:string	
 GetPlayerToken	s	CFX	0x54C06897	string	playerSrc:string,index:integer	
 GetPlayerUnderwaterTimeRemaining	c	PLAYER	0xA1FCF8E6AF40B731	number	player:Player	
 GetPlayerVehicleDamageModifier	c	CFX	0x78F27B1F	number	playerId:Player	
 GetPlayerVehicleDefenseModifier	c	CFX	0x8326E7CD	number	playerId:Player	
-GetPlayerWantedCentrePosition	b	PLAYER	0x0C92BA89F1AF26F8	vector3	player:Player	
-GetPlayerWantedLevel	b	PLAYER	0xE28E54788CE8F12D	integer	player:Player	
+GetPlayerWantedCentrePosition	b	PLAYER	0x0C92BA89F1AF26F8	vector3	player:Player		0x821F2D2C	vector3	playerSrc:string
+GetPlayerWantedLevel	b	PLAYER	0xE28E54788CE8F12D	integer	player:Player		0xBDCDD163	integer	playerSrc:string
 GetPlayerWeaponDamageModifier	b	CFX	0x2A3D7CDA	number	playerId:Player	
 GetPlayerWeaponDefenseModifier	b	CFX	0xF1543251	number	playerId:Player	
 GetPlayerWeaponDefenseModifier_2	b	CFX	0x986B65FF	number	playerId:Player	
@@ -2076,7 +2076,7 @@ GetVehicleDoorAngleRatio	c	VEHICLE	0xFE3F9C29F7B32BD5	number	vehicle:Vehicle,doo
 GetVehicleDoorDestroyType	c	VEHICLE	0xCA4AC3EAAE46EC7B	integer	vehicle:Vehicle,doorIndex:integer	GetVehicleIndividualDoorLockStatus
 GetVehicleDoorLockStatus	b	VEHICLE	0x25BC98A59C2EA962	integer	vehicle:Vehicle	
 GetVehicleDoorStatus	s	CFX	0x6E35C49C	integer	vehicle:Vehicle,doorIndex:integer	
-GetVehicleDoorsLockedForPlayer	b	VEHICLE	0xF6AF6CB341349015	boolean	vehicle:Vehicle,player:Player	
+GetVehicleDoorsLockedForPlayer	b	VEHICLE	0xF6AF6CB341349015	boolean	vehicle:Vehicle,player:Player		0x1DC50247	integer	vehicle:Vehicle
 GetVehicleDrawnWheelAngleMult	c	CFX	0x21C1DA8E	number	vehicle:Vehicle	
 GetVehicleDrivetrainType	c	VEHICLE	0x1423725069EE1D14	integer	vehicleModel:Hash	
 GetVehicleEngineHealth	b	VEHICLE	0xC45D23BAF168AAB8	number	vehicle:Vehicle	
@@ -2116,7 +2116,7 @@ GetVehicleLightMultiplier	c	CFX	0x7E6E219C	number	vehicle:Vehicle
 GetVehicleLightsState	b	VEHICLE	0xB91B4C20085BD12F	boolean,boolean,boolean	vehicle:Vehicle	
 GetVehicleLivery	b	VEHICLE	0x2BB9230590DA5E8A	integer	vehicle:Vehicle	
 GetVehicleLiveryCount	c	VEHICLE	0x87B63E25A529D526	integer	vehicle:Vehicle	
-GetVehicleLockOnTarget	b	VEHICLE	0x8F5EBAB1F260CFCE	boolean,Entity	vehicle:Vehicle	
+GetVehicleLockOnTarget	b	VEHICLE	0x8F5EBAB1F260CFCE	boolean,Entity	vehicle:Vehicle		0x4A557117	Vehicle	vehicle:Vehicle
 GetVehicleMaxBraking	c	VEHICLE	0xAD7E85FC227197C4	number	vehicle:Vehicle	
 GetVehicleMaxNumberOfPassengers	c	VEHICLE	0xA7C4F2C6E744A550	integer	vehicle:Vehicle	
 GetVehicleMaxSpeed	c	VEHICLE	0x53AF99BAA671CA47	number	vehicle:Vehicle	GetVehicleEstimatedMaxSpeed
@@ -2743,7 +2743,7 @@ IsPedInAnyPoliceVehicle	c	PED	0x0BD04E29640C9C12	boolean	ped:Ped
 IsPedInAnySub	c	PED	0xFBFC01CCFB35D99E	boolean	ped:Ped	
 IsPedInAnyTaxi	c	PED	0x6E575D6A898AB852	boolean	ped:Ped	
 IsPedInAnyTrain	c	PED	0x6F972C1AB75A1ED0	boolean	ped:Ped	
-IsPedInAnyVehicle	b	PED	0x997ABD671D25CA0B	boolean	ped:Ped,atGetIn:boolean	
+IsPedInAnyVehicle	b	PED	0x997ABD671D25CA0B	boolean	ped:Ped,atGetIn:boolean		0x3B0171EE	boolean	ped:Ped
 IsPedInCombat	c	PED	0x4859F1FC66A6278E	boolean	ped:Ped,target:Ped	
 IsPedInCover	c	PED	0x60DFD0691A170B88	boolean	ped:Ped,exceptUseWeapon:boolean	
 IsPedInCoverFacingLeft	c	PED	0x845333B3150583AB	boolean	ped:Ped	
@@ -2754,7 +2754,7 @@ IsPedInHighCover	c	PED	0x6A03BF943D767C93	boolean	ped:Ped
 IsPedInMeleeCombat	c	PED	0x4E209B2C1EAD5159	boolean	ped:Ped	
 IsPedInModel	c	PED	0x796D90EFB19AA332	boolean	ped:Ped,modelHash:Hash	
 IsPedInParachuteFreeFall	c	PED	0x7DCE8BDA0F1C1200	boolean	ped:Ped	
-IsPedInVehicle	b	PED	0xA3EE4A07279BB9DB	boolean	ped:Ped,vehicle:Vehicle,atGetIn:boolean	
+IsPedInVehicle	b	PED	0xA3EE4A07279BB9DB	boolean	ped:Ped,vehicle:Vehicle,atGetIn:boolean		0x7DA6BC83	boolean	ped:Ped,vehicle:Vehicle
 IsPedInWrithe	c	TASK	0xDEB6D52126E7D640	boolean	ped:Ped	
 IsPedInjured	c	PED	0x84A2DD9AC37C35C1	boolean	ped:Ped	
 IsPedJacking	c	PED	0x4AE4FF911DFB61DA	boolean	ped:Ped	
@@ -8640,8 +8640,8 @@ SetPedTargetLossResponse	c	PED	0x0703B9079823DA4A		ped:Ped,responseType:integer
 SetPedTargettableVehicleDestroy	c	VEHICLE	0xBE70724027F85BCD		vehicle:Vehicle,doorIndex:integer,doorLockStatus:integer	SetVehicleIndividualDoorsLocked
 SetPedToInformRespectedFriends	c	PED	0x112942C6E708F70B		ped:Ped,radius:number,maxFriends:integer	
 SetPedToLoadCover	c	PED	0x332B562EEDA62399		ped:Ped,toggle:boolean	
-SetPedToRagdoll	b	PED	0xAE99FB955581844A	boolean	ped:Ped,time1:integer,time2:integer,ragdollType:integer,p4:boolean,p5:boolean,p6:boolean	
-SetPedToRagdollWithFall	b	PED	0xD76632D99E4966C8	boolean	ped:Ped,time:integer,p2:integer,ragdollType:integer,x:number,y:number,z:number,p7:number,p8:number,p9:number,p10:number,p11:number,p12:number,p13:number	
+SetPedToRagdoll	b	PED	0xAE99FB955581844A	boolean	ped:Ped,time1:integer,time2:integer,ragdollType:integer,p4:boolean,p5:boolean,p6:boolean		0x83CB5052		ped:Ped,minTime:integer,maxTime:integer,ragdollType:integer,bAbortIfInjured:boolean,bAbortIfDead:boolean,bForceScriptControl:boolean
+SetPedToRagdollWithFall	b	PED	0xD76632D99E4966C8	boolean	ped:Ped,time:integer,p2:integer,ragdollType:integer,x:number,y:number,z:number,p7:number,p8:number,p9:number,p10:number,p11:number,p12:number,p13:number		0xFA12E286		ped:Ped,minTime:integer,maxTime:integer,nFallType:integer,dirX:number,dirY:number,dirZ:number,fGroundHeight:number,grab1X:number,grab1Y:number,grab1Z:number,grab2X:number,grab2Y:number,grab2Z:number
 SetPedTurningThresholds	c	CFX	0xB300F03		min:number,max:number	
 SetPedUsingActionMode	c	PED	0xD75ACCF5E0FB5367		ped:Ped,p1:boolean,p2:integer,action:string	
 SetPedVehicleForcedSeatUsage	c	PED	0x952F06BEECD775CC		ped:Ped,vehicle:Vehicle,seatIndex:integer,flags:integer	

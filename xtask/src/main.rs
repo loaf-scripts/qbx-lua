@@ -17,6 +17,15 @@ struct Native {
     params: Vec<(String, String)>,
     alias_of: Option<String>,
     docs: String,
+    /// The signature of a server native that shares the name of a client one but differs from it,
+    /// as `GetAllVehicles` returns a table on the server and a count on the client.
+    server: Option<ServerSignature>,
+}
+
+struct ServerSignature {
+    hash: String,
+    returns: Vec<String>,
+    params: Vec<(String, String)>,
 }
 
 fn main() {
@@ -51,19 +60,26 @@ fn generate_natives() {
 
     let mut signatures = String::new();
     let mut docs = String::new();
+    let param_list = |params: &[(String, String)]| -> String {
+        params.iter().map(|(n, t)| format!("{n}:{t}")).collect::<Vec<_>>().join(",")
+    };
     for (name, native) in &natives {
-        let params: Vec<String> = native.params.iter().map(|(n, t)| format!("{n}:{t}")).collect();
-        writeln!(
+        write!(
             signatures,
             "{name}\t{}\t{}\t{}\t{}\t{}\t{}",
             native.side,
             native.ns,
             native.hash,
             native.returns.join(","),
-            params.join(","),
+            param_list(&native.params),
             native.alias_of.as_deref().unwrap_or("")
         )
         .unwrap();
+        if let Some(server) = &native.server {
+            write!(signatures, "\t{}\t{}\t{}", server.hash, server.returns.join(","), param_list(&server.params))
+                .unwrap();
+        }
+        signatures.push('\n');
         if native.alias_of.is_none() && !native.docs.is_empty() {
             writeln!(docs, "{name}\t{}", escape(&native.docs)).unwrap();
         }
@@ -173,14 +189,30 @@ fn add_native(natives: &mut BTreeMap<String, Native>, ns: &str, hash: &str, nati
                 params: params.clone(),
                 alias_of: Some(name.clone()),
                 docs: String::new(),
+                server: None,
             });
         }
     }
 
-    let entry = Native { side, ns: ns.to_string(), hash: hash.to_string(), returns, params, alias_of: None, docs };
+    let entry = Native {
+        side,
+        ns: ns.to_string(),
+        hash: hash.to_string(),
+        returns,
+        params,
+        alias_of: None,
+        docs,
+        server: None,
+    };
     match natives.get(&name) {
         Some(existing) if existing.alias_of.is_none() && existing.side != side => {
-            natives.get_mut(&name).unwrap().side = 'b';
+            let existing = natives.get_mut(&name).unwrap();
+            // A server native named like a client one keeps its own signature for server code.
+            if existing.side == 'c' && !same_signature(existing, &entry) {
+                let Native { hash, returns, params, .. } = entry;
+                existing.server = Some(ServerSignature { hash, returns, params });
+            }
+            existing.side = 'b';
         }
         Some(existing) if existing.alias_of.is_none() => {}
         Some(existing) => {
@@ -191,6 +223,13 @@ fn add_native(natives: &mut BTreeMap<String, Native>, ns: &str, hash: &str, nati
             natives.insert(name, entry);
         }
     }
+}
+
+/// Whether two declarations of a native take and return values of the same types, whatever their
+/// parameters are named.
+fn same_signature(a: &Native, b: &Native) -> bool {
+    let types = |native: &Native| native.params.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>();
+    a.returns == b.returns && types(a) == types(b)
 }
 
 /// Mirrors the name mangling of the official FiveM Lua native codegen.

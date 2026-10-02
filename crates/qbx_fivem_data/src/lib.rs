@@ -42,6 +42,9 @@ pub struct Native {
     returns: &'static str,
     params: &'static str,
     pub alias_of: Option<&'static str>,
+    /// The hash, returned values and parameters of the server native of the same name, when they
+    /// differ from those of the client one: `GetAllVehicles` returns a table on the server.
+    server: Option<(&'static str, &'static str, &'static str)>,
 }
 
 impl Native {
@@ -58,7 +61,22 @@ impl Native {
         let returns = cols.next()?;
         let params = cols.next()?;
         let alias_of = cols.next().filter(|a| !a.is_empty());
-        Some(Self { name, side, namespace, hash, returns, params, alias_of })
+        let server = match (cols.next(), cols.next(), cols.next()) {
+            (Some(hash), Some(returns), Some(params)) => Some((hash, returns, params)),
+            _ => None,
+        };
+        Some(Self { name, side, namespace, hash, returns, params, alias_of, server })
+    }
+
+    /// The native that code on `side` calls: on the server, the server native of the same name
+    /// when its signature differs from the client one.
+    pub fn on(self, side: Option<Side>) -> Self {
+        match (side, self.server) {
+            (Some(Side::Server), Some((hash, returns, params))) => {
+                Self { side: Side::Server, namespace: "CFX", hash, returns, params, server: None, ..self }
+            }
+            _ => self,
+        }
     }
 
     pub fn returns(&self) -> impl Iterator<Item = &'static str> {
@@ -230,6 +248,21 @@ mod tests {
         assert_eq!(super::native("GetPlayerIdentifier").unwrap().side, Side::Server);
         assert!(super::native("NotARealNative").is_none());
         assert!(native_count() > 6000);
+    }
+
+    #[test]
+    fn server_natives_keep_their_own_signature() {
+        let vehicles = native("GetAllVehicles").unwrap();
+        assert_eq!(vehicles.on(Some(Side::Client)).returns().collect::<Vec<_>>(), ["integer", "integer"]);
+        assert_eq!(vehicles.on(None).returns().collect::<Vec<_>>(), ["integer", "integer"]);
+        let server = vehicles.on(Some(Side::Server));
+        assert_eq!(server.returns().collect::<Vec<_>>(), ["table"]);
+        assert_eq!((server.side, server.namespace, server.hash), (Side::Server, "CFX", "0x332169F5"));
+        let weapon = native("GetCurrentPedWeapon").unwrap().on(Some(Side::Server));
+        assert_eq!(weapon.signature(), "function GetCurrentPedWeapon(ped: Ped): Hash");
+        // A native without a server signature of its own is the same everywhere.
+        let health = native("GetEntityHealth").unwrap();
+        assert_eq!(health.on(Some(Side::Server)).hash, health.hash);
     }
 
     #[test]

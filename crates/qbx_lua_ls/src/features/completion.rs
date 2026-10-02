@@ -1522,9 +1522,10 @@ fn scope_items(
                 break;
             }
             count += 1;
+            let native = native.on(Some(side));
             let mut out = item(native.name, CompletionItemKind::FUNCTION, 5);
             out.detail = Some(native.signature());
-            out.data = Some(json!({ "native": native.name }));
+            out.data = Some(json!({ "native": native.name, "server": side == Side::Server }));
             if native.alias_of.is_some() {
                 out.tags = Some(vec![CompletionItemTag::DEPRECATED]);
             }
@@ -1539,7 +1540,9 @@ fn scope_items(
 
 pub fn resolve(mut item: CompletionItem) -> CompletionItem {
     let name = item.data.as_ref().and_then(|d| d.get("native")).and_then(|n| n.as_str()).map(str::to_string);
-    if let Some(native) = name.as_deref().and_then(native) {
+    let server = item.data.as_ref().and_then(|d| d.get("server")).and_then(|s| s.as_bool()).unwrap_or(false);
+    let side = server.then_some(Side::Server);
+    if let Some(native) = name.as_deref().and_then(native).map(|native| native.on(side)) {
         let mut text = lua_block(&native.signature());
         text.push_str(&format!("\n\n*{} native* · `{}`", native.side.label(), native.namespace));
         if let Some(docs) = native_docs(native.name) {

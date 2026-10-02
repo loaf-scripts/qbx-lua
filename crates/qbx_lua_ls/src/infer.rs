@@ -895,7 +895,7 @@ impl<'a> Infer<'a> {
             return Type::GlobalTable(SmolStr::new(name));
         }
         match native(name) {
-            Some(native) => Type::Fun(Arc::new(native_fun_type(&native))),
+            Some(native) => Type::Fun(Arc::new(native_fun_type(&native.on(self.side)))),
             None => Type::Unknown,
         }
     }

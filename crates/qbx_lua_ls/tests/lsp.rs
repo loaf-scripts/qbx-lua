@@ -488,6 +488,25 @@ fn hover_shows_types_docs_and_natives() {
 }
 
 #[test]
+fn server_code_calls_the_server_native_of_a_shared_name() {
+    let mut client = Client::start(fixture_root());
+    let text = "local vehicles = GetAllVehicles()\nlocal weapon = GetCurrentPedWeapon(1)\nprint(vehicles, weapon)\n";
+    for (file, vehicles, weapon) in
+        [(SERVER, "vehicles: table", "weapon: Hash"), (CLIENT, "vehicles: integer", "weapon: boolean")]
+    {
+        client.open_with(file, text);
+        for expected in [vehicles, weapon] {
+            let (l, c) = pos(text, &format!("local {}", &expected[..expected.find(':').unwrap()]), 6);
+            let hover = client.hover_text(file, l, c);
+            assert!(hover.contains(expected), "{file}: expected {expected:?} in {hover}");
+        }
+    }
+    let (l, c) = pos(text, "GetAllVehicles", 0);
+    let hover = client.hover_text(SERVER, l, c);
+    assert!(hover.contains("function GetAllVehicles(): table") && hover.contains("*server native* · `CFX`"), "{hover}");
+}
+
+#[test]
 fn native_argument_hovers_show_defaults_flags_and_exact_ranges() {
     // Numeric hovers also work for clients that advertise no optional hover capabilities.
     for capabilities in [json!({}), json!({ "textDocument": { "hover": { "contentFormat": ["markdown"] } } })] {
