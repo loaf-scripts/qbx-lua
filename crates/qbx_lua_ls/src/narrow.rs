@@ -464,11 +464,14 @@ impl<'ast> Visitor<'ast> for Finder<'_> {
                 let else_start = else_block.as_ref().map(|block| block.span.start.min(stmt.span.end));
                 let mut failed = Facts::new();
                 for (index, branch) in branches.iter().enumerate() {
-                    let mut facts = failed.clone();
-                    self.facts(&branch.cond, true, &mut facts);
                     // Measured between the keywords so half-typed code inside the branch still counts.
                     let next = branches.get(index + 1).map(|b| b.keyword_span.start);
                     let end = next.or(else_start).unwrap_or(stmt.span.end);
+                    // The conditions before it failed for the condition of an `elseif` too.
+                    let start = branch.keyword_span.end;
+                    self.record(Span { start, end: end.max(start) }, failed.clone());
+                    let mut facts = Facts::new();
+                    self.facts(&branch.cond, true, &mut facts);
                     self.record(Span { start: branch.cond.span.end, end: end.max(branch.cond.span.end) }, facts);
                     self.facts(&branch.cond, false, &mut failed);
                 }

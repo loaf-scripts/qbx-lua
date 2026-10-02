@@ -2158,6 +2158,57 @@ read()
 }
 
 #[test]
+fn elseif_conditions_see_what_the_conditions_before_them_ruled_out() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param items? table
+---@param weight number
+local function create(items, weight)
+    if not items then
+        print('none')
+    elseif weight == 0 and next(items) then -- second
+        print(items) -- body
+    elseif items.x then -- third
+        print(1)
+    end
+end
+
+---@param items? table
+---@param weight number
+local function other(items, weight)
+    if weight == 0 then
+        print('none')
+    elseif items.x then -- nothing ruled out
+        print(1)
+    end
+end
+create()
+other()
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("items) then -- second", "items: table\n"),
+        ("items) -- body", "items: table\n"),
+        ("items.x then -- third", "items: table\n"),
+        ("items.x then -- nothing ruled out", "items: table?\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "need-check-nil": "warning" } } } } }),
+    );
+    let (line, _) = pos(text, "items.x then -- nothing ruled out", 0);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [("need-check-nil".to_string(), line as u64, "`items` may be nil: its type here is `table?`".to_string())],
+        "an `elseif` after `if not items` reads a value"
+    );
+}
+
+#[test]
 fn guards_pick_the_set_of_values_a_call_returned() {
     let mut client = Client::start(fixture_root());
     let text = "\
@@ -9653,9 +9704,10 @@ function SetMode(mode) end
     assert_eq!(values(&format!("{handle}if state == | then\n\tend\nend"), Some(" ")), quoted(&states, ""));
     assert_eq!(values(&format!("{handle}if state ~=| then\n\tend\nend"), None), quoted(&states, " "));
     assert_eq!(values(&format!("{handle}return state == |\nend"), None), quoted(&states, ""));
+    // An `elseif` leaves out what the conditions before it ruled out.
     assert_eq!(
         values(&format!("{handle}if state == 'busy' then\n\telseif state == | then\n\tend\nend"), None),
-        quoted(&states, "")
+        quoted(&["working", "ready"], "")
     );
     assert_eq!(values(&format!("{machine}if machine.state == |"), Some(" ")), quoted(&states, ""));
     assert_eq!(values(&format!("{state}if ready and state == |"), None), quoted(&states, ""));

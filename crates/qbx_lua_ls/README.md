@@ -144,11 +144,12 @@ Guards are `name`, comparisons with `nil`, `true`, `false`, a string or an integ
 and `math.type(name)` compared with a name they give, reads from the local, and those joined by
 `and`, `or` and `not`. A read such as `name.job`, `name?.job`, `name[key]` or `name:get()` is only
 true when `name` holds a value, and so are `name?.job == "police"` and `name?.job ~= nil`.
-They apply to the branches of an `if` or `elseif`, to the code after an `if` whose other branches
-all end in `return`, `error(...)`, `break` or `goto`, to the body of a `while`, to the right side of
-`and` and `or`, and to the code after `assert(name)`. A local that is assigned again after its
-declaration is only narrowed by the guards after a [`---@cast`](#casts) of it, since a guard says
-nothing about the new value, and globals and fields are not narrowed.
+They apply to the branches of an `if` or `elseif`, failed ones to the conditions of the `elseif`s
+after them, to the code after an `if` whose other branches all end in `return`, `error(...)`,
+`break` or `goto`, to the body of a `while`, to the right side of `and` and `or`, and to the code
+after `assert(name)`. A local that is assigned again after its declaration is only narrowed by the
+guards after a [`---@cast`](#casts) of it, since a guard says nothing about the new value, and
+globals and fields are not narrowed.
 
 A comparison with a literal narrows the local to that literal: inside `if state == "busy" then`, a
 `"active"|"busy"|nil` and a `string` are both `"busy"`, and in the `else` branch the first is
