@@ -3,12 +3,13 @@ use std::sync::Arc;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::{SmolStr, Span};
-use qbx_luacats::luacats::applies_on;
-use qbx_luacats::types::FunType;
+use qbx_luacats::luacats::{applies_on, parse_doc_lines};
+use qbx_luacats::types::{FunType, Type};
 use rustc_hash::FxHashMap;
 
 use super::crossfile::{passed_count, plural};
 use super::{FileInput, Sink};
+use crate::env::leading_doc_lines;
 use crate::project::ResourceEnv;
 use crate::rules;
 use crate::scope::{LocalId, LocalKind, Resolved};
@@ -17,6 +18,12 @@ use crate::signature::{defined, global_key, member_path, most_arguments, undocum
 
 /// Every value assigned to a local or to a field of a local table, by local and dotted field path.
 type LocalDefs = FxHashMap<(LocalId, SmolStr), Vec<Option<Arc<FunType>>>>;
+
+/// The function type that a `---@type` gives a local or a field of a local table, by local and
+/// dotted field path. It holds whatever value is assigned, as in LuaLS.
+type DeclaredDefs = FxHashMap<(LocalId, SmolStr), Arc<FunType>>;
+
+const MAX_ALIAS_DEPTH: u8 = 8;
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     if sink.enabled(rules::MISSING_PARAMETER).is_none() && sink.enabled(rules::REDUNDANT_PARAMETER).is_none() {
@@ -32,16 +39,24 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
             &own_env
         }
     };
-    let mut collector = LocalCollector { input, defs: LocalDefs::default() };
+    let mut collector = LocalCollector { input, env, defs: LocalDefs::default(), declared: DeclaredDefs::default() };
     collector.visit_block(&input.chunk.block);
-    let mut calls =
-        Calls { input, env, locals: collector.defs, regions: SideRegions::of(input.source, input.chunk), sink };
+    let mut calls = Calls {
+        input,
+        env,
+        locals: collector.defs,
+        declared: collector.declared,
+        regions: SideRegions::of(input.source, input.chunk),
+        sink,
+    };
     calls.visit_block(&input.chunk.block);
 }
 
 struct LocalCollector<'i, 'a> {
     input: &'i FileInput<'a>,
+    env: &'i ResourceEnv,
     defs: LocalDefs,
+    declared: DeclaredDefs,
 }
 
 impl LocalCollector<'_, '_> {
@@ -54,6 +69,20 @@ impl LocalCollector<'_, '_> {
 
     fn add(&mut self, id: LocalId, fields: &[&str], signature: Option<Arc<FunType>>) {
         self.defs.entry((id, SmolStr::new(fields.join(".")))).or_default().push(signature);
+    }
+
+    /// Records the function type that the `---@type` above `stmt` gives its name at `index`, when
+    /// it gives one.
+    fn declare(&mut self, stmt: &Stmt, index: usize, id: LocalId, fields: &[&str]) {
+        let lines = leading_doc_lines(self.input.source, &self.input.chunk.comments, stmt.span.start);
+        if !lines.iter().any(|line| line.contains("@type")) {
+            return;
+        }
+        let doc = parse_doc_lines(&lines);
+        let alias = |name: &str| self.env.alias(name);
+        if let Some(fun) = doc.type_at(index).and_then(|ty| function_type(ty, &alias, 0)) {
+            self.declared.insert((id, SmolStr::new(fields.join("."))), fun);
+        }
     }
 
     /// The signature of a function `value`, and `None` for other values, which may be any function.
@@ -82,6 +111,7 @@ impl<'ast> Visitor<'ast> for LocalCollector<'_, '_> {
             StmtKind::Local { names, exprs, .. } => {
                 for (index, name) in names.iter().enumerate() {
                     let Some(id) = self.local(&name.name) else { continue };
+                    self.declare(stmt, index, id, &[]);
                     // `local f` holds nil until it is assigned, which the assignment records.
                     if index >= exprs.len() && !exprs.last().is_some_and(Expr::is_multi_value) {
                         continue;
@@ -107,6 +137,7 @@ impl<'ast> Visitor<'ast> for LocalCollector<'_, '_> {
                 for (index, target) in targets.iter().enumerate() {
                     let Some((root, fields)) = member_path(target) else { continue };
                     if let Some(id) = self.local(root) {
+                        self.declare(stmt, index, id, &fields);
                         let signature = self.signature(stmt, exprs.get(index), targets.len() == 1);
                         self.add(id, &fields, signature);
                     }
@@ -129,6 +160,7 @@ struct Calls<'i, 'a, 's> {
     input: &'i FileInput<'a>,
     env: &'i ResourceEnv,
     locals: LocalDefs,
+    declared: DeclaredDefs,
     regions: SideRegions,
     sink: &'i mut Sink<'s>,
 }
@@ -178,9 +210,11 @@ impl Calls<'_, '_, '_> {
                 if !matches!(kind, LocalKind::Local | LocalKind::LocalFunction) {
                     return;
                 }
-                match self.locals.get(&(id, SmolStr::new(fields.join(".")))) {
-                    Some(defs) => defs.clone(),
-                    None => return,
+                let key = (id, SmolStr::new(fields.join(".")));
+                match (self.declared.get(&key), self.locals.get(&key)) {
+                    (Some(declared), _) => vec![Some(declared.clone())],
+                    (None, Some(defs)) => defs.clone(),
+                    (None, None) => return,
                 }
             }
             // An encrypted script of the resource may define the global differently.
@@ -252,5 +286,21 @@ impl Calls<'_, '_, '_> {
             first.span.to(last.span),
             format!("'{display}' is called with {} argument{}, but {takes}", args.len(), plural(args.len())),
         );
+    }
+}
+
+/// The function type `ty` names, through aliases and the `nil` of `fun()?`. A union of several
+/// function types names none.
+fn function_type<'t>(ty: &Type, alias: &impl Fn(&str) -> Option<&'t Type>, depth: u8) -> Option<Arc<FunType>> {
+    match ty {
+        Type::Fun(fun) => Some(fun.clone()),
+        Type::Union(types) => match types.iter().filter(|t| !matches!(t, Type::Nil)).collect::<Vec<_>>()[..] {
+            [only] => function_type(only, alias, depth),
+            _ => None,
+        },
+        Type::Named(name, args) if args.is_empty() && depth < MAX_ALIAS_DEPTH => {
+            function_type(alias(name)?, alias, depth + 1)
+        }
+        _ => None,
     }
 }

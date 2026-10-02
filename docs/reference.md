@@ -289,6 +289,8 @@ functions are kept as they are.
 Calls are checked when the function is:
 
 - a local function, or a local that is only ever assigned functions;
+- a local, or a field of a local table, that a `---@type fun(...)` above its declaration or an
+  assignment types, also through an `@alias` or with `?`, whatever value it is given;
 - a global function defined by a script on the caller's side, or by one of its imports;
 - a field of a global table, or of a local table in the same file, that a `function Utils.round(x)`
   or `function Utils:round(x)` statement or an assignment defines.

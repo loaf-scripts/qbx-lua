@@ -597,6 +597,39 @@ fn documented_parameters_need_an_argument() {
 }
 
 #[test]
+fn locals_typed_as_functions_need_their_arguments() {
+    let missing = |source: &str| missing_parameters(source, None, &[]);
+    let handler = "---@alias Handler fun(a: integer, b: integer)\n";
+    let needs_b = "is called with 1 argument, but needs 2; 'b' (integer) will be nil";
+    for (source, called) in [
+        ("---@type fun(a: integer, b: integer)\nlocal f = SomeGlobal\nf(1)", "f"),
+        (&format!("{handler}---@type Handler\nlocal f = function(a, b) end\nf(1)"), "f"),
+        (&format!("{handler}---@type Handler?\nlocal f\nf(1)"), "f"),
+        (&format!("{handler}---@type Handler|nil\nlocal f\nf = SomeGlobal\nf(1)"), "f"),
+        ("local M = {}\n---@type fun(a: integer, b: integer)\nM.cb = nil\nM.cb(1)", "M.cb"),
+    ] {
+        assert_eq!(missing(source), [format!("'{called}' {needs_b}")], "{source}");
+    }
+    assert_eq!(
+        missing("---@type fun(a: integer, b?: integer)\nlocal f\nf()"),
+        ["'f' is called with 0 arguments, but needs 1; 'a' (integer) will be nil"]
+    );
+    for source in [
+        "---@type fun(a?: integer)\nlocal f\nf()",
+        "---@type fun(a: integer)|fun()\nlocal f\nf()",
+        "---@type table\nlocal f = {}\nf()",
+        "---@alias Unknown Missing\n---@type Unknown\nlocal f\nf()",
+    ] {
+        assert_eq!(missing(source), Vec::<String>::new(), "{source}");
+    }
+    assert_eq!(
+        redundant_parameters("---@type fun(a: integer)\nlocal f = function(...) end\nf(1, 2)", None, &[]),
+        ["'f' is called with 2 arguments, but takes at most 1"],
+        "the declared type holds over the value it is given"
+    );
+}
+
+#[test]
 fn methods_count_self_the_way_they_are_called() {
     let missing = |call: &str| {
         missing_parameters(&format!("local M = {{}}\n---@param x number\nfunction M:m(x) end\n{call}"), None, &[])
