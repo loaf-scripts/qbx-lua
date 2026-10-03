@@ -326,7 +326,8 @@ and for `redundant-parameter` the one that takes the most.
 
 `param-type-mismatch` compares each argument with the type of its parameter, as
 `assign-type-mismatch` compares a value with the type of its variable: a different kind of value,
-or a literal the type does not list, is reported.
+or a literal the type does not list, is reported. Each type a union lists has to fit, so a
+`string|number` is no `string`, as in lua-language-server.
 
 ```lua
 ---@param mode "fast" | "slow"
@@ -352,14 +353,41 @@ An argument has a type when something declares it, as for `impossible-comparison
 operator, an annotation, a stub, or the values a local is declared with or assigned that reach the
 call. A literal stored in a local counts by its kind only: `local mode = 'dev'` is a setting to
 change, so it passes for `"fast" | "slow"`, while `local count = 5` is still no `string`. A
-`--[[@as T]]` right after an argument casts it. Only clear cases count, and the rest is left alone:
+`--[[@as T]]` right after an argument casts it.
 
-- Natives. The runtime converts their arguments, so `0` and `1` pass for a `boolean`, a string for
-  a hash, a number for a string, and a vector for three floats.
-- `nil`, written out or as the `?` of a `string?`, which is checked as a `string`. Annotations often
-  leave out the `?` of a parameter that code skips.
-- `false`, which FiveM code passes to skip a parameter, as in `AddItem(source, item, 1, false, info)`,
-  since exports and events serialize their arguments.
+As in LuaLS, `nil`, written out or as the `?` of a `string?`, needs a parameter that takes it: one
+marked optional, or typed with `nil`, `any` or `unknown`. A guard such as `if name then` rules the
+`nil` out first. `false` is a `boolean` like any other, also where code passes it to skip a
+parameter, as in `AddItem(source, item, 1, false, info)`.
+
+```lua
+---@param name string
+local function greet(name) end
+
+---@type string?
+local maybe
+greet(maybe) -- Cannot assign `string?` to parameter `name` of type `string`
+greet(nil)   -- Cannot assign `nil` to parameter `name` of type `string`
+```
+
+Natives are checked as the runtime passes their arguments on:
+
+- Numbers and booleans pass for each other, as a `BOOL` is an integer to natives: `0` and `1` pass
+  for a `boolean`, and `false` for an integer.
+- A string parameter takes `nil` or a `string?`, and `0` and `false`, which the native wrappers
+  turn into NULL, as in `DrawMarker(..., nil, nil, false)`, and a number or boolean written out,
+  which they turn into the text it is written as, as in `SetConvarReplicated('volume', 30)`. A
+  parameter for the server id of a player, such as the `playerSrc` of `DropPlayer`, takes any
+  number. Other numbers and booleans are reported: `ReleaseNamedRendertarget(GetHashKey(name))`
+  passes a hash, not the name.
+- A hash parameter takes a string, which the wrappers hash.
+- A vector fills a number parameter for each of its parts, as in `SetEntityCoords(ped, coords, ...)`.
+  The values after a value of unknown type that may be a vector are not checked when the call
+  passes fewer values than the native takes, since they may go to later parameters.
+
+Other parameters of natives do not take `nil`: `DoesEntityExist(entity)` with an `Entity?` is
+reported. Only clear cases count, and the rest is left alone:
+
 - Types inferred from assigned values, such as that of `Config.Value = ''`.
 - Parameters typed with a generic of the function called: the arguments of the call bind it, which
   declares nothing. A function that a callee passes to a callback, such as `resolve` of
@@ -804,22 +832,20 @@ reported. Where guards together rule out every value of the type, the read has t
 reported, as in lua-language-server. After `round and (round == true or i < round)`, a `boolean?`
 keeps its type, but the `nil` that `round and` rules out stays out.
 
-A local that may hold `nil` is reported as well where a call passes it for a parameter that does not
-take `nil`, in every signature the call may use as `param-type-mismatch` reads them. A parameter
-takes `nil` when it is optional, as `label?`, or its type allows it or any value, as `string?`,
-`any` or a generic do. Natives are left out, and so is an argument of another type than the
-parameter takes, which `param-type-mismatch` reports:
+A local that may hold `nil`, passed for a parameter that does not take `nil`, is a
+`param-type-mismatch`, as in lua-language-server:
 
 ```lua
 ---@param target Player
 local function greet(target) end
 
 local player = GetPlayer() -- Player?
-greet(player) -- `player` may be nil, which parameter `target` of type `Player` does not take: ...
+greet(player) -- Cannot assign `Player?` to parameter `target` of type `Player`
 ```
 
-lua-language-server reports such an argument as a `param-type-mismatch`, so a
-`---@diagnostic disable` comment for that rule silences it too.
+`need-check-nil` still reports one passed for a parameter typed with the name of a native handle,
+such as `Vehicle`, which `param-type-mismatch` leaves out, in every signature the call may use. A
+`---@diagnostic disable` comment for `param-type-mismatch` silences it too.
 
 Only a guard on the local itself checks it. After
 `local vehicle, coords = lib.getClosestVehicle(pos)` and `if not vehicle then return end`, `coords`

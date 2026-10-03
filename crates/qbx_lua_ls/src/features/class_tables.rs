@@ -599,6 +599,25 @@ impl<'a, 'b> Classes<'a, 'b> {
         }
     }
 
+    /// The member of `given`, inferred in this file, that can clearly not be stored where
+    /// `expected` is declared in `from`, as the `number` of a `string|number` for a `string`: each
+    /// member of a union has to fit, and one of no known type does.
+    pub fn rejected_part(&self, expected: &Type, from: FileId, given: &Type) -> Option<Type> {
+        let mut parts = Vec::new();
+        self.flatten(given, self.file(), &mut parts, 0);
+        parts.into_iter().find(|part| self.rejects(expected, from, part))
+    }
+
+    /// How a message shows `given`, of which `expected` rejects `part`: as it is written when `part`
+    /// is a literal that `expected` does not list, like the `'c'` of `'a'|'c'`, and widened to its
+    /// kinds otherwise.
+    pub fn shown(&self, expected: &Type, from: FileId, given: &Type, part: &Type) -> Type {
+        match self.literal_mismatch(expected, from, part) {
+            true => given.clone(),
+            false => given.widen(),
+        }
+    }
+
     /// The kinds of Lua value `ty` allows, as `kind` bits, or `None` when it may be anything.
     fn kinds(&self, ty: &Type, from: FileId, depth: u32) -> Option<u8> {
         if depth > MAX_DEPTH {

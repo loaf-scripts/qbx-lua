@@ -5330,22 +5330,26 @@ run()
     );
     let line = |needle: &str| pos(text, needle, 0).0 as u64;
     let finding = |needle: &str, message: &str| ("need-check-nil".to_string(), line(needle), message.to_string());
-    let passed = |local: &str| {
-        format!(
-            "`{local}` may be nil, which parameter `target` of type `Probe.Target` does not take: its type here is \
-             `Probe.Target?`"
-        )
+    let mismatch = |needle: &str, given: &str, param: &str, ty: &str| {
+        let message = format!("Cannot assign `{given}` to parameter `{param}` of type `{ty}`");
+        ("param-type-mismatch".to_string(), line(needle), message)
     };
+    let target = |needle: &str| mismatch(needle, "Probe.Target?", "target", "Probe.Target");
     assert_eq!(
-        findings(&mut client, CLIENT, &["need-check-nil"]),
+        findings(&mut client, CLIENT, &["need-check-nil", "param-type-mismatch"]),
         [
-            finding("greet(missing)", &passed("missing")),
-            finding("Box:put(stored)", &passed("stored")),
+            target("greet(missing)"),
+            mismatch("needsNumber(wrong)", "Probe.Target?", "n", "number"),
+            target("either(overloaded)"),
+            target("Box:put(stored)"),
             finding("print(read.name)", "`read` may be nil: its type here is `Probe.Target?`"),
-            finding("greet(read)", &passed("read")),
+            target("greet(read)"),
+            mismatch("SetEntityHeading(handle", "number?", "entity", "Entity"),
         ],
-        "parameters that are optional or take nil, any value or a generic, overloads that take nil, guards, \
-         natives, arguments of another type and suppressed `param-type-mismatch` are left alone"
+        "`param-type-mismatch` reports a value that may be nil passed for a parameter that does not take \
+         it, as LuaLS does, also to a native, and also where the overload that takes `nil` takes no \
+         `Probe.Target`; parameters that are optional or take nil, any value or a generic, guards and \
+         suppressed lines are left alone"
     );
 }
 
@@ -6028,11 +6032,106 @@ print(either, rest, head, position)
             finding("Box.resize(Box, 'large')", "Cannot assign `string` to parameter `size` of type `integer`"),
             finding("find('alone')", "Cannot assign `string` to parameter `id` of type `number`"),
             finding("find(1, 'label')", "Cannot assign `integer` to parameter `name` of type `string`"),
-            finding("needsNumber(maybe)", "Cannot assign `string` to parameter `n` of type `number`"),
+            finding("needsNumber(nil)", "Cannot assign `nil` to parameter `n` of type `number`"),
+            finding("needsNumber(false)", "Cannot assign `boolean` to parameter `n` of type `number`"),
+            finding("needsNumber(maybe)", "Cannot assign `string?` to parameter `n` of type `number`"),
             finding("needsNumber(name())", "Cannot assign `string` to parameter `n` of type `number`"),
+            finding("SetEntityHeading", "Cannot assign `string` to parameter `heading` of type `number`"),
         ],
-        "a call passes when a signature that takes as many arguments takes them all; nil, false, values \
-         inferred from assignments, casts, type guards, generics, natives, the string a string method is          called on and suppressed lines pass"
+        "a call passes when a signature that takes as many arguments takes them all; `nil` and `false` are \
+         values like any other, as in LuaLS; values inferred from assignments, casts, type guards, generics, \
+         the string a string method is called on and suppressed lines pass"
+    );
+}
+
+#[test]
+fn natives_take_their_arguments_as_the_runtime_converts_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type Ped?
+local maybePed
+---@type string?
+local maybeName
+local coords = vector3(1, 2, 3)
+local ped = PlayerPedId()
+SetEntityVisible(ped, 1, 0)
+SetEntityHeading(ped, true)
+print(GetHashKey(123), GetHashKey(maybeName))
+RequestModel('adder')
+SetEntityCoords(ped, coords, false, false, false, false)
+SetEntityCoords(ped, coords.x, coords.y, coords.z, false, false, false, false)
+DrawMarker(1, coords, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 255, 0, 0, 100, false, true, 2, false, nil, nil, false)
+SetEntityCoords(ped, UnknownCoords, 'x')
+AddExplosion(1.0, 2.0, 3.0, 'EXPLOSION_TANKER', 2.0, true, false, 2.0)
+NetworkSetInSpectatorMode(false, nil)
+print(DoesEntityExist(maybePed))
+SetEntityCoords(ped, coords, 'flag', false, false, false)
+---@param point vector
+local function place(point)
+    SetEntityCoords(ped, point, 'size unknown')
+end
+print(place)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [
+            finding("AddExplosion", "Cannot assign `string` to parameter `explosionType` of type `integer`"),
+            finding("NetworkSetInSpectatorMode", "Cannot assign `nil` to parameter `playerPed` of type `Ped`"),
+            finding("DoesEntityExist", "Cannot assign `Ped?` to parameter `entity` of type `Entity`"),
+            finding("'flag'", "Cannot assign `string` to parameter `alive` of type `boolean`"),
+        ],
+        "numbers and booleans pass for each other, a string parameter takes numbers and `nil`, a hash \
+         parameter strings, a vector fills a number parameter for each of its parts, and after a value of \
+         unknown type where a vector may go, the values that follow are not checked"
+    );
+}
+
+#[test]
+fn native_string_parameters_take_only_numbers_and_booleans_written_out() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local name = 'target'
+---@type number
+local volume = 30
+---@type string|number
+local value = 1
+ReleaseNamedRendertarget(GetHashKey(name))
+ReleaseNamedRendertarget(0)
+ReleaseNamedRendertarget(false)
+ReleaseNamedRendertarget(nil)
+SetConvarReplicated('volume', 30)
+SetConvarReplicated('volume', true)
+SetConvarReplicated('volume', volume)
+SetConvarReplicated('volume', value)
+TaskStartScenarioInPlace(PlayerPedId(), 'WORLD_HUMAN_SMOKING', true)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [
+            finding("GetHashKey(name)", "Cannot assign `Hash` to parameter `name` of type `string`"),
+            finding("volume', volume)", "Cannot assign `number` to parameter `value` of type `string`"),
+            finding("volume', value)", "Cannot assign `string|number` to parameter `value` of type `string`"),
+        ],
+        "`nil`, `0` and `false` are NULL to a native and a literal is the text it is written as, while \
+         other numbers and booleans are no string; a boolean still passes for a number"
+    );
+    let server = "\
+---@type number
+local src = 1
+DropPlayer(src, 'kicked')
+";
+    client.open_with(SERVER, server);
+    assert!(
+        findings(&mut client, SERVER, &["param-type-mismatch"]).is_empty(),
+        "a player's server id is a number to scripts"
     );
 }
 

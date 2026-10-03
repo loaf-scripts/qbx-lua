@@ -1,7 +1,8 @@
 //! `param-type-mismatch`: a call passes an argument that its parameter does not take, such as a
 //! string for `number`. As for `assign-type-mismatch`, the argument has to be a different kind of
-//! value, or a literal the parameter does not list, and as for `impossible-comparison` only
-//! declared types count: what inference reads from assigned values is left out.
+//! value, or a literal the parameter does not list, for each type a union lists, and as for
+//! `impossible-comparison` only declared types count: what inference reads from assigned values is
+//! left out.
 //!
 //! A call is compared with every function it may run: each member of that name on its side, such
 //! as the client and the server `lib.notify`, or each global of that name its file sees, with their
@@ -9,15 +10,22 @@
 //! takes each of them; only when none takes that many do the others count. The payload of a
 //! `---@callback` wrapper call is compared with the handlers registered under its name.
 //!
-//! Natives are left out: the runtime converts their arguments, so `0` passes for a `boolean`, a
-//! string for a hash and a vector for three floats. `nil` is never a mismatch, as annotations often
-//! leave out the `?` of a parameter that code skips, and neither is `false`, which FiveM code passes
-//! to skip a parameter of exports and events, whose arguments are serialized. Parameters typed with a
-//! generic of the function called are left out, as the arguments of the call bind them. The function
-//! a callee passes to a callback, such as `resolve` of `fun(resolve: fun(value: T))`, takes and
-//! returns what the other arguments of that call declare for its generics, as the `boolean` of
-//! `Promise:New('boolean', function(resolve) end)` for a `` `T` ``; a generic they leave unbound
-//! takes any value.
+//! As in LuaLS, `nil`, and a value whose type allows it like a `string?`, needs a parameter that takes
+//! `nil`, and `false` is a boolean like any other.
+//!
+//! Natives are checked as the runtime passes their arguments on: numbers and booleans pass for each
+//! other, as a `BOOL` is an integer to them, a hash parameter hashes a string, and a vector fills
+//! one number parameter for each of its parts. The native wrappers turn `nil`, `0` and `false` into
+//! NULL for string parameters, and only for those, and other values into their text, so a string
+//! parameter takes a number or a boolean written out, and the server id of a player, but not
+//! another number, such as a hash. A value of unknown type that may be a vector leaves where the
+//! values after it go unknown, when the call passes fewer values than the native takes.
+//!
+//! Parameters typed with a generic of the function called are left out, as the arguments of the
+//! call bind them. The function a callee passes to a callback, such as `resolve` of
+//! `fun(resolve: fun(value: T))`, takes and returns what the other arguments of that call declare
+//! for its generics, as the `boolean` of `Promise:New('boolean', function(resolve) end)` for a
+//! `` `T` ``; a generic they leave unbound takes any value.
 
 use std::sync::Arc;
 
@@ -63,7 +71,7 @@ fn checked_arguments(
     calls.visit_block(&chunk.block);
     for payload in payloads {
         let handlers: Vec<&FunType> = payload.handlers.iter().collect();
-        calls.passed(&handlers, false, payload.args);
+        calls.passed(&handlers, false, false, payload.args);
     }
     calls.out
 }
@@ -91,21 +99,26 @@ impl<'c> Visitor<'c> for Calls<'_, '_> {
 
 impl Calls<'_, '_> {
     fn check(&mut self, call: &Expr, base: &Expr, method: Option<&Name>, args: &[Expr]) {
-        let signatures = signatures(self.infer, &self.declared, call, base, method, args);
+        // A native's arguments are checked as the runtime converts them, which `no-unknown` leaves out.
+        let native = method.is_none() && !args.is_empty() && self.declared.is_native(base, 0);
+        let signatures = match native && self.unknowns.is_none() {
+            true => definitions(self.infer, base, method),
+            false => signatures(self.infer, &self.declared, call, base, method, args),
+        };
         if signatures.is_empty() {
             return;
         }
         let signatures: Vec<&FunType> = signatures.iter().map(Arc::as_ref).collect();
-        self.passed(&signatures, method.is_some(), args);
+        self.passed(&signatures, method.is_some(), native, args);
     }
 
-    /// Checks `args`, passed to a function that has one of `signatures`.
-    fn passed(&mut self, signatures: &[&FunType], via_colon: bool, args: &[Expr]) {
+    /// Checks `args`, passed to a function that has one of `signatures`, or to a `native`.
+    fn passed(&mut self, signatures: &[&FunType], via_colon: bool, native: bool, args: &[Expr]) {
         if let Some(pick) = self.unknowns {
             return self.unknown(signatures, via_colon, args, pick);
         }
         let values: Vec<Type> = args.iter().map(|arg| self.value(arg)).collect();
-        self.compare(signatures, via_colon, args, &values);
+        self.compare(signatures, via_colon, native, args, &values);
     }
 
     /// Reports each of `args` of no known type that `pick` picks, when the parameter it goes to has a
@@ -152,10 +165,10 @@ impl Calls<'_, '_> {
     /// Reports the arguments that the signature closest to taking them does not take, unless one of
     /// them takes them all. Only the signatures that take as many arguments as the call passes count,
     /// unless none does.
-    fn compare(&mut self, signatures: &[&FunType], via_colon: bool, args: &[Expr], values: &[Type]) {
+    fn compare(&mut self, signatures: &[&FunType], via_colon: bool, native: bool, args: &[Expr], values: &[Type]) {
         let mut closest: Option<Vec<(Span, String)>> = None;
         for fun in candidates(self.infer, signatures, via_colon, args) {
-            let found = self.mismatches(fun, via_colon, args, values);
+            let found = self.mismatches(fun, via_colon, native, args, values);
             if found.is_empty() {
                 return;
             }
@@ -166,21 +179,75 @@ impl Calls<'_, '_> {
         self.out.extend(closest.unwrap_or_default());
     }
 
-    /// Each of `args` that the parameter of `fun` it goes to does not take.
-    fn mismatches(&self, fun: &FunType, via_colon: bool, args: &[Expr], values: &[Type]) -> Vec<(Span, String)> {
-        let passed = args.iter().zip(values).enumerate();
-        passed
-            .filter_map(|(i, (arg, given))| {
-                let message = mismatch(&self.classes, fun, param_for(fun, via_colon, i)?, given)?;
-                Some((arg.span, message))
-            })
-            .collect()
+    /// Each of `args` that the parameter of `fun`, or of a `native`, it goes to does not take.
+    fn mismatches(
+        &self,
+        fun: &FunType,
+        via_colon: bool,
+        native: bool,
+        args: &[Expr],
+        values: &[Type],
+    ) -> Vec<(Span, String)> {
+        let mut out = Vec::new();
+        // The parameters that the vectors passed before take beyond their first.
+        let mut spread = 0;
+        for (i, (arg, given)) in args.iter().zip(values).enumerate() {
+            // The `self` a `.` call passes to a method has no parameter of its own.
+            let Some(param) = param_for(fun, via_colon, i + spread) else { continue };
+            if native && matches!(expected(param), Type::Number | Type::Integer) {
+                match self.vector_parts(arg, given) {
+                    Some(1) => {}
+                    Some(parts) => {
+                        spread += parts - 1;
+                        continue;
+                    }
+                    None if args.len() - i < fun.params.len().saturating_sub(i + spread) => break,
+                    None => {}
+                }
+            }
+            let message = match native {
+                true => native_mismatch(&self.classes, param, arg, given),
+                false => mismatch(&self.classes, fun, param, given),
+            };
+            out.extend(message.map(|message| (arg.span, message)));
+        }
+        out
+    }
+
+    /// How many parameters of a native `arg` fills, declared as `declared`: a vector fills one for
+    /// each of its parts, as the runtime spreads it. Where nothing declares the type of `arg`, what
+    /// it holds tells, as only its place is in question. `None` when that is not known, or the type
+    /// allows vectors of different sizes, as the `vector` of the runtime stubs does.
+    fn vector_parts(&self, arg: &Expr, declared: &Type) -> Option<usize> {
+        let ty = match declared.is_unknown() {
+            true => self.infer.cast_after(arg.span.end).unwrap_or_else(|| self.infer.expr(arg)),
+            false => declared.clone(),
+        };
+        let parts = |ty: &Type| match ty {
+            Type::Named(name, _) => match name.as_str() {
+                "vector2" => Some(2),
+                "vector3" => Some(3),
+                "vector4" | "quat" => Some(4),
+                _ => Some(1),
+            },
+            Type::Unknown | Type::Any => None,
+            _ => Some(1),
+        };
+        match self.infer.expand_aliases(&ty.without_nil(), 0) {
+            Type::Union(types) => {
+                let mut sizes = types.iter().filter(|ty| **ty != Type::Nil).map(parts);
+                let first = sizes.next()??;
+                sizes.all(|size| size == Some(first)).then_some(first)
+            }
+            ty => parts(&ty),
+        }
     }
 }
 
 /// The signatures that a call of `base`, or of its `method`, with `args` may use: those of each
 /// function `definitions` finds, with their `@overload`s for the side of the call. None for a call
-/// without arguments, for a native, whose arguments the runtime converts, and for
+/// without arguments, for a native, whose arguments the runtime converts as `param-type-mismatch`
+/// checks them on its own, and for
 /// `require 'name' --[[@as T]]`, where the cast after the argument is that of the call.
 pub fn signatures(
     infer: &Infer,
@@ -246,22 +313,79 @@ pub fn expected(param: &Param) -> &Type {
 /// The message for a value of type `given` that `param` of `fun` does not take.
 pub fn mismatch(classes: &Classes, fun: &FunType, param: &Param, given: &Type) -> Option<String> {
     let expected = expected(param);
-    let given = given.without_nil();
     let is_generic = |name: &str| fun.generics.iter().any(|generic| generic == name);
     // Resources declare classes such as `Vehicle` that share the name of a native handle, which a
     // parameter of that type may well mean.
     let is_handle = |name: &str| NATIVE_HANDLE_TYPES.contains(&name);
-    if matches!(given, Type::Unknown | Type::Nil | Type::BooleanLit(false))
-        || mentions(expected, &is_generic)
-        || names(expected, &is_handle)
-    {
+    if matches!(given, Type::Unknown | Type::Any) || mentions(expected, &is_generic) || names(expected, &is_handle) {
         return None;
     }
     let from = classes.file();
-    if !classes.rejects(expected, from, &given) {
+    if classes.admits_nil(given, from) && !takes_nil(classes, param) {
+        return Some(format!("Cannot assign `{given}` to parameter `{}` of type `{expected}`", param.name));
+    }
+    rejected(classes, param, &given.without_nil())
+}
+
+/// The message for the value `arg` of type `given` that `param` of a native does not take, as the
+/// runtime passes it on: numbers and booleans pass for each other, and a hash parameter takes the
+/// hash of a string. The native wrappers turn `nil`, `0` and `false` into NULL for string
+/// parameters and other values into their text, so a string parameter takes `nil`, a number or a
+/// boolean written out, and the number of a player's server id; other numbers and booleans, such as
+/// the hash that `GetHashKey` gives, are no string it is meant to get. Each type a union lists has
+/// to pass.
+fn native_mismatch(classes: &Classes, param: &Param, arg: &Expr, given: &Type) -> Option<String> {
+    let expected = expected(param);
+    if matches!(given, Type::Unknown | Type::Any) {
         return None;
     }
-    let shown = if classes.literal_mismatch(expected, from, &given) { given } else { given.widen() };
+    let from = classes.file();
+    if *expected != Type::String && classes.admits_nil(given, from) && !takes_nil(classes, param) {
+        return Some(format!("Cannot assign `{given}` to parameter `{}` of type `{expected}`", param.name));
+    }
+    let given = given.without_nil();
+    let written = is_literal(arg) || PLAYER_ID_PARAMS.contains(&param.name.as_str());
+    let converts = |part: &Type| {
+        let converted = |kind: Type| !classes.rejects(&kind, from, part);
+        match expected {
+            Type::String => written && (converted(Type::Number) || converted(Type::Boolean)),
+            Type::Handle(name) if name == "Hash" => converted(Type::String) || converted(Type::Boolean),
+            Type::Number | Type::Integer | Type::Handle(_) => converted(Type::Boolean),
+            Type::Boolean => converted(Type::Number),
+            _ => false,
+        }
+    };
+    let mut parts = Vec::new();
+    classes.flatten(&given, from, &mut parts, 0);
+    let rejected = |part: &&Type| **part != Type::Nil && !converts(part) && classes.rejects(expected, from, part);
+    let part = parts.iter().find(rejected)?;
+    let shown = classes.shown(expected, from, &given, part);
+    Some(format!("Cannot assign `{shown}` to parameter `{}` of type `{expected}`", param.name))
+}
+
+/// The string parameters of natives that take the server id of a player, which scripts hold as a
+/// number.
+const PLAYER_ID_PARAMS: &[&str] = &["playerSrc", "eventTarget"];
+
+/// Whether `expr` is a number or a boolean written out, as `0`, `-1` or `false`.
+fn is_literal(expr: &Expr) -> bool {
+    match &expr.unparen().kind {
+        ExprKind::Number(_) | ExprKind::True | ExprKind::False => true,
+        ExprKind::Unary { op: UnOp::Neg, expr } => matches!(expr.unparen().kind, ExprKind::Number(_)),
+        _ => false,
+    }
+}
+
+/// The message for a value of type `given`, with no `nil` in it, that `param` clearly does not
+/// take: one that may be of another kind, or a literal it does not list.
+fn rejected(classes: &Classes, param: &Param, given: &Type) -> Option<String> {
+    let expected = expected(param);
+    let from = classes.file();
+    if matches!(given, Type::Unknown | Type::Nil) {
+        return None;
+    }
+    let part = classes.rejected_part(expected, from, given)?;
+    let shown = classes.shown(expected, from, given, &part);
     Some(format!("Cannot assign `{shown}` to parameter `{}` of type `{expected}`", param.name))
 }
 
@@ -311,6 +435,10 @@ pub fn definitions(infer: &Infer, base: &Expr, method: Option<&Name>) -> Vec<Arc
         (None, ExprKind::Name(name)) => match infer.ctx.resolution.resolve_at(name.span.start) {
             Some(Resolved::Global(_)) => {
                 let globals = infer.index.globals_named(&name.text, infer.ctx.file);
+                // A native is no global of the index.
+                if globals.is_empty() {
+                    return held();
+                }
                 let globals: Vec<_> = globals.into_iter().filter(|(file, _)| reaches(*file)).collect();
                 if !globals.iter().all(|(file, _)| known(Some(*file))) {
                     return Vec::new();
