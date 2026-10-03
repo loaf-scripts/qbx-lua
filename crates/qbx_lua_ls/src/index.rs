@@ -27,6 +27,9 @@ pub enum Read {
     /// Whether the tables an owner names have members, and their array parts, `[key]` entries,
     /// metatables and the `---@enum` whose table they are.
     Table(SmolStr),
+    /// The files that set members on the tables an owner names, which decide whose members of a
+    /// name a lookup takes: those of its own resource, when one of its files sets any.
+    MemberFiles(SmolStr),
     /// The classes, aliases and enums of a name.
     Type(SmolStr),
     /// The operators that classes declare with `@operator`, whichever classes they are.
@@ -510,6 +513,14 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Adds `slot` to the slots of `key` in file order, where a scan puts them, so that what lookups find
+/// first does not depend on which files were indexed again since.
+fn insert_slot(map: &mut FxHashMap<SmolStr, Vec<Slot>>, key: &SmolStr, slot: Slot) {
+    let slots = map.entry(key.clone()).or_default();
+    let at = slots.partition_point(|existing| *existing < slot);
+    slots.insert(at, slot);
+}
+
 fn remove_file_slots<'a>(
     map: &mut FxHashMap<SmolStr, Vec<Slot>>,
     keys: impl Iterator<Item = &'a SmolStr>,
@@ -585,26 +596,26 @@ impl Index {
     pub fn set_file(&mut self, id: FileId, entry: FileEntry) -> Option<FileEntry> {
         let replaced = self.clear_slots(id);
         for (i, symbol) in entry.index.globals.iter().enumerate() {
-            self.globals.entry(symbol.name.clone()).or_default().push((id, i as u32));
+            insert_slot(&mut self.globals, &symbol.name, (id, i as u32));
         }
         for (i, member) in entry.index.members.iter().enumerate() {
-            self.members.entry(member.owner.clone()).or_default().push((id, i as u32));
+            insert_slot(&mut self.members, &member.owner, (id, i as u32));
         }
         for (i, element) in entry.index.elements.iter().enumerate() {
-            self.elements.entry(element.owner.clone()).or_default().push((id, i as u32));
+            insert_slot(&mut self.elements, &element.owner, (id, i as u32));
         }
         for (i, metatable) in entry.index.metatables.iter().enumerate() {
-            self.metatables.entry(metatable.owner.clone()).or_default().push((id, i as u32));
+            insert_slot(&mut self.metatables, &metatable.owner, (id, i as u32));
         }
         for (i, class) in entry.index.classes.iter().enumerate() {
-            self.classes.entry(class.name.clone()).or_default().push((id, i as u32));
+            insert_slot(&mut self.classes, &class.name, (id, i as u32));
         }
         for (i, alias) in entry.index.aliases.iter().enumerate() {
-            self.aliases.entry(alias.name.clone()).or_default().push((id, i as u32));
+            insert_slot(&mut self.aliases, &alias.name, (id, i as u32));
         }
         for (i, member) in entry.index.members.iter().enumerate() {
             if member.owner == "exports" && entry.declares_export_type(i as u32) {
-                self.export_types.entry(member.symbol.name.clone()).or_default().push((id, i as u32));
+                insert_slot(&mut self.export_types, &member.symbol.name, (id, i as u32));
             }
         }
         if let Some(resource) = entry.resource.and_then(|r| self.resources.get_mut(r as usize)) {
@@ -723,6 +734,7 @@ impl Index {
             entry.into_iter().flat_map(|entry| &entry.index.members).map(|member| &member.owner).collect()
         };
         let (old, new) = (owners(before), owners(after));
+        out.extend(old.symmetric_difference(&new).map(|owner| Read::MemberFiles((*owner).clone())));
         let file = after.or(before).and_then(|entry| self.file_id(&entry.path));
         let elsewhere = |owner: &SmolStr| {
             self.members.get(owner).is_some_and(|slots| slots.iter().any(|(slot, _)| Some(*slot) != file))
@@ -826,7 +838,7 @@ impl Index {
     fn reads_from(&self, reader: FileId, declarer: FileId, read: &Read) -> bool {
         match read {
             Read::Global(_) => self.is_visible(reader, declarer),
-            Read::Members(owner, _) | Read::Table(owner) => {
+            Read::Members(owner, _) | Read::Table(owner) | Read::MemberFiles(owner) => {
                 let owner = instance_class(owner).unwrap_or(owner);
                 owner.starts_with('%') || self.classes.contains_key(owner) || self.reaches(reader, declarer)
             }
@@ -933,6 +945,9 @@ impl Index {
     /// statements that set them tell about them. With a `name`, those called so.
     pub fn member_entries(&self, owner: &str, name: Option<&str>, from: FileId) -> Vec<(FileId, &Member)> {
         self.note(|| Read::Members(SmolStr::new(owner), name.map(SmolStr::new)));
+        if name.is_some() {
+            self.note(|| Read::MemberFiles(SmolStr::new(owner)));
+        }
         self.owner_slots(self.members.get(owner), owner, from)
             .into_iter()
             .filter_map(|(file, i)| Some((file, self.file(file)?.index.members.get(i as usize)?)))
@@ -1032,6 +1047,7 @@ impl Index {
         let visible: Vec<Slot> = slots.iter().copied().filter(|(f, _)| self.reaches(from, *f)).collect();
         // Classes travel between resources through exports and events, so their members are looked
         // up everywhere; plain tables of unrelated resources are not.
+        self.note(|| Read::Type(SmolStr::new(owner)));
         if !visible.is_empty() || !self.classes.contains_key(owner) {
             return visible;
         }
@@ -1106,8 +1122,10 @@ impl Index {
     /// scoped to.
     pub fn enums_of_table(&self, owner: &str) -> Vec<(FileId, &AliasDef)> {
         self.note(|| Read::Table(SmolStr::new(owner)));
-        let slots = self.aliases.values().flatten();
+        let mut slots: Vec<&Slot> = self.aliases.values().flatten().collect();
+        slots.sort_unstable();
         slots
+            .into_iter()
             .filter_map(|(f, i)| Some((*f, self.file(*f)?.index.aliases.get(*i as usize)?)))
             .filter(|(_, alias)| alias.table.as_ref().is_some_and(|table| table.owner == owner))
             .collect()
@@ -1129,7 +1147,9 @@ impl Index {
     /// looked up in every file whose side fits, like registered exports are.
     pub fn declared_exports(&self, from: FileId) -> Vec<(FileId, &Symbol)> {
         self.note(|| Read::Members(SmolStr::new("exports"), None));
-        self.export_type_slots(self.export_types.values().flatten(), from)
+        let mut slots: Vec<&Slot> = self.export_types.values().flatten().collect();
+        slots.sort_unstable();
+        self.export_type_slots(slots.into_iter(), from)
     }
 
     /// The types declared for the exports of `resource`, as `declared_exports` finds them.

@@ -402,6 +402,45 @@ fn types_that_functions_infer_from_themselves_stop_growing() {
     assert_eq!(f.depth(), 7, "{f}");
 }
 
+/// What the index holds for each file, and the members of `owner` in the order lookups from
+/// `reader` find them.
+fn index_state(ws: &Workspace, owner: &str, reader: &Path) -> Vec<String> {
+    let files = ws.index.files().filter(|(_, file)| file.origin != FileOrigin::Stub);
+    let mut state: Vec<String> = files.map(|(_, file)| format!("{:?}", file.index)).collect();
+    let reader = ws.index.file_id(reader).unwrap();
+    state.extend(ws.index.members_of(owner, reader).into_iter().map(|(_, member)| member.name.to_string()));
+    state
+}
+
+#[test]
+fn a_scan_leaves_what_indexing_files_again_in_any_order_would() {
+    let fixture = Fixture::new();
+    fixture.write("demo/fxmanifest.lua", "shared_script '*.lua'\n");
+    // What `AddBlip` returns comes from `utils.lua`, indexed after it, which takes it from a
+    // function beside it in turn. Indexing every file twice is not enough to know it.
+    fixture.write("demo/blips.lua", "function lib.AddBlip()\n    return lib.Key()\nend\n");
+    fixture.write("demo/init.lua", "lib = {}\n");
+    fixture.write(
+        "demo/utils.lua",
+        "function lib.Key()\n    return lib.String()\nend\n\nfunction lib.String()\n    return ''\nend\n",
+    );
+    // Functions that return what each other return settle at the depth that the index keeps.
+    fixture.write("demo/x.lua", "X = {}\n\nfunction X.f()\n    return { Y.g() }\nend\n");
+    fixture.write("demo/y.lua", "Y = {}\n\nfunction Y.g()\n    return { X.f() }\nend\n");
+    let mut ws = fixture.workspace("demo");
+    let blips = fixture.0.join("demo/blips.lua");
+    assert_eq!(returned(&ws, &blips, "AddBlip"), qbx_lua_ls::types::Type::String);
+
+    // Indexing a file again, as opening and closing it does, leaves it and the order of what
+    // several files set as the scan did.
+    let scanned = index_state(&ws, "lib", &blips);
+    let files = ["blips.lua", "init.lua", "utils.lua", "x.lua", "y.lua"].map(|name| fixture.0.join("demo").join(name));
+    for path in files.iter().chain(files.iter().rev()) {
+        ws.index_path(path, FileOrigin::Workspace, None);
+        assert_eq!(index_state(&ws, "lib", &blips), scanned, "after indexing {} again", path.display());
+    }
+}
+
 #[test]
 fn manual_reindex_restores_unsaved_documents_and_their_new_file_ids() {
     let fixture = Fixture::new();

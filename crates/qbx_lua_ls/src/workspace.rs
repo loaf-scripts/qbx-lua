@@ -23,6 +23,10 @@ const MAX_INDEXED_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// How often one change may index the same files again, so that globals typed from each other
 /// cannot keep it going.
 pub const MAX_INDEX_PASSES: usize = 4;
+/// How often a scan may index files again once every file is known. Only the files that read what
+/// the pass before changed are indexed again, and types inferred from each other in a cycle cannot
+/// keep it going.
+const MAX_SCAN_PASSES: usize = 8;
 
 /// A file just indexed, with the entry the index held for it before.
 type Indexed = (FileId, Option<FileEntry>);
@@ -140,18 +144,14 @@ impl Workspace {
         stats
     }
 
-    /// Symbol types are inferred while indexing and may refer to files that were not indexed yet
-    /// (exports, imported globals), so a second pass settles them once every file is known.
+    /// Symbol types are inferred while indexing and may come from files that were not indexed yet
+    /// (exports, imported globals), or from what those infer in turn. So once every file is known,
+    /// each is indexed again, and then each that read what that changed, until nothing changes.
+    /// Indexing a file again then changes nothing, so what the index holds does not depend on the
+    /// order files were indexed in, nor on which were indexed again since.
     fn reindex_all(&mut self) {
-        let files: Vec<(PathBuf, FileOrigin)> = self
-            .index
-            .files()
-            .filter(|(_, f)| f.origin != FileOrigin::Stub)
-            .map(|(_, f)| (f.path.clone(), f.origin))
-            .collect();
-        for (path, origin) in files {
-            self.index_path(&path, origin, None);
-        }
+        let files = self.index.files().filter(|(_, f)| f.origin != FileOrigin::Stub).map(|(id, _)| id).collect();
+        self.refresh_readers(files, &FxHashSet::default(), MAX_SCAN_PASSES);
     }
 
     /// Indexes resources that workspace manifests refer to but that live outside the workspace,
