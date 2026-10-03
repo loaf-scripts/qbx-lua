@@ -724,6 +724,233 @@ function string.tostringall(...) end
 ---@return string
 function string.blob(length) end
 
+---The difference between 1 and the next larger number. CfxLua extension.
+---@type number
+math.eps = 2.220446049250313e-16
+
+---The difference between 1 and the next larger single-precision float. CfxLua extension.
+---@type number
+math.feps = 1.1920928955078125e-07
+
+---Returns the inverse hyperbolic cosine of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.acosh(x) end
+
+---Returns the inverse hyperbolic sine of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.asinh(x) end
+
+---Returns the arc tangent of `y / x` in radians, using both signs to pick the quadrant. `x` defaults to 1. CfxLua extension.
+---@param y number
+---@param x? number
+---@return number result
+---@nodiscard
+function math.atan2(y, x) end
+
+---Returns the inverse hyperbolic tangent of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.atanh(x) end
+
+---Returns the cube root of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.cbrt(x) end
+
+---Returns `x` limited to the range from `min` to `max`, per component for vectors. CfxLua extension.
+---@param x number
+---@param min number
+---@param max number
+---@return number result
+---@overload fun(x: vector2, min: vector2, max: vector2): vector2
+---@overload fun(x: vector3, min: vector3, max: vector3): vector3
+---@overload fun(x: vector4, min: vector4, max: vector4): vector4
+---@nodiscard
+function math.clamp(x, min, max) end
+
+---Returns `x` with the sign of `y`. CfxLua extension.
+---@param x number
+---@param y number
+---@return number result
+---@nodiscard
+function math.copysign(x, y) end
+
+---Returns the hyperbolic cosine of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.cosh(x) end
+
+---Returns the error function of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.erf(x) end
+
+---Returns the complementary error function of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.erfc(x) end
+
+---Returns 2 raised to the power `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.exp2(x) end
+
+---Returns e raised to the power `x`, minus 1. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.expm1(x) end
+
+---Returns `x - y` when it is positive, otherwise 0. CfxLua extension.
+---@param x number
+---@param y number
+---@return number result
+---@nodiscard
+function math.fdim(x, y) end
+
+---Splits `x` into a mantissa in [0.5, 1) and an exponent of 2. CfxLua extension.
+---@param x number
+---@return number mantissa
+---@return integer exponent
+---@nodiscard
+function math.frexp(x) end
+
+---Returns the gamma function of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.gamma(x) end
+
+---Returns the length of the hypotenuse of a right triangle with sides `x` and `y`. CfxLua extension.
+---@param x number
+---@param y number
+---@return number result
+---@nodiscard
+function math.hypot(x, y) end
+
+---Returns whether `x` is neither infinite nor NaN. CfxLua extension.
+---@param x number
+---@return boolean result
+---@nodiscard
+function math.isfinite(x) end
+
+---Returns whether `x` is infinite. CfxLua extension.
+---@param x number
+---@return boolean result
+---@nodiscard
+function math.isinf(x) end
+
+---Returns whether `x` is NaN. CfxLua extension.
+---@param x number
+---@return boolean result
+---@nodiscard
+function math.isnan(x) end
+
+---Returns whether `x` is a normal number: not zero, subnormal, infinite or NaN. CfxLua extension.
+---@param x number
+---@return boolean result
+---@nodiscard
+function math.isnormal(x) end
+
+---Returns `m` multiplied by 2 raised to the power `e`. CfxLua extension.
+---@param m number
+---@param e integer
+---@return number result
+---@nodiscard
+function math.ldexp(m, e) end
+
+---Returns the natural logarithm of the absolute value of the gamma function of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.lgamma(x) end
+
+---Returns the base-10 logarithm of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.log10(x) end
+
+---Returns the natural logarithm of 1 plus `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.log1p(x) end
+
+---Returns the exponent of `x` in base 2, as a float. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.logb(x) end
+
+---Returns `x` rounded to an integral value, halfway cases to even, as a float. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.nearbyint(x) end
+
+---Returns the next representable number after `x` in the direction of `y`. CfxLua extension.
+---@param x number
+---@param y number
+---@return number result
+---@nodiscard
+function math.nextafter(x, y) end
+
+---Returns `x` raised to the power `y`. CfxLua extension.
+---@param x number
+---@param y number
+---@return number result
+---@nodiscard
+function math.pow(x, y) end
+
+---Returns the remainder of `x / y` with the quotient rounded to the nearest integer. CfxLua extension.
+---@param x number
+---@param y number
+---@return number result
+---@nodiscard
+function math.remainder(x, y) end
+
+---Returns `x` rounded to an integral value, halfway cases away from zero, as a float. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.round(x) end
+
+---Returns `x` multiplied by 2 raised to the power `n`. CfxLua extension.
+---@param x number
+---@param n integer
+---@return number result
+---@nodiscard
+function math.scalbn(x, n) end
+
+---Returns the hyperbolic sine of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.sinh(x) end
+
+---Returns the hyperbolic tangent of `x`. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.tanh(x) end
+
+---Returns `x` with its fractional part removed, as a float. CfxLua extension.
+---@param x number
+---@return number result
+---@nodiscard
+function math.trunc(x) end
+
 ---Lists the entries of a directory. CfxLua extension, server only in practice.
 ---@param path string
 ---@return string[]

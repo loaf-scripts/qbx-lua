@@ -78,7 +78,8 @@ Available features depend on the editor's LSP client.
   `impossible-comparison` reports an `==` or `~=` between values whose declared types share no
   value, such as `GetState() == "invalid"` for a function that returns `"active"|"busy"`, and
   `cast-type-mismatch` a `---@cast` to a type the local is not declared to take. `inject-field`
-  reports fields set through a value whose class or table type does not have them, and
+  reports fields set through a value whose class or table type does not have them,
+  `undefined-field` fields read from one, and
   `need-check-nil` a value that may be `nil` used where a missing value raises an error. The opt-in
   `no-unknown` reports parameters, locals and loop variables that have no type.
 - Signature help, parameter hints, semantic tokens, folding and document/workspace symbols.

@@ -2,11 +2,11 @@
 //! and assignments, arguments to class-typed parameters, `return` in a function documented with
 //! `@return`, and the tables such fields hold. With the fields that code sets on and reads from
 //! values of a class, they drive `missing-fields`, `assign-type-mismatch`, `undeclared-field`,
-//! `inject-field` and the completion of field names. Table constructors typed as a table type, like a shape
-//! `{ value: string }`, `string[]` or `table<string, integer>`, are found in the same places for
-//! `assign-type-mismatch`, and those typed as a shape or a union of classes and shapes, also as the
-//! entries of an array, a map or a tuple, for `missing-fields`. Only the language server knows the
-//! classes, so qbx-lint registers the rules and this module reports them.
+//! `inject-field`, `undefined-field` and the completion of field names. Table constructors typed as a
+//! table type, like a shape `{ value: string }`, `string[]` or `table<string, integer>`, are found in
+//! the same places for `assign-type-mismatch`, and those typed as a shape or a union of classes and
+//! shapes, also as the entries of an array, a map or a tuple, for `missing-fields`. Only the language
+//! server knows the classes, so qbx-lint registers the rules and this module reports them.
 //!
 //! Type names are global, and resources may declare the same one differently: ox_fuel's
 //! `@class State` is not qbx_vehicles' `@enum State`. A name is looked up the way the file that
@@ -891,6 +891,9 @@ pub struct Access<'c> {
     pub value: Option<&'c Expr>,
     /// Set on the table a `---@class` annotation declares, which may take new fields.
     pub on_class_table: bool,
+    /// For a read, the expression whose field it reads, like `a.b` in `a.b.c`; `None` for a field
+    /// that is set.
+    pub read: Option<&'c Expr>,
 }
 
 /// The fields that assignments and `function value:name()` statements set and, with `reads`, the
@@ -937,8 +940,8 @@ impl<'c> Visitor<'c> for Accesses<'_, '_, 'c> {
                         Some((base, key, span)) => {
                             let on_class_table = self.is_class_table(base);
                             let owner = self.infer.expr(base);
-                            let value = exprs.get(i);
-                            self.out.push(Access { owner, holder: base.span, key, span, value, on_class_table });
+                            let (holder, value) = (base.span, exprs.get(i));
+                            self.out.push(Access { owner, holder, key, span, value, on_class_table, read: None });
                             // The target's value and key are read.
                             visit::walk_expr(self, target);
                         }
@@ -962,7 +965,8 @@ impl<'c> Visitor<'c> for Accesses<'_, '_, 'c> {
                     let holder = Span::new(name.base.span.start, path.last().unwrap_or(&name.base).span.end);
                     let owner = self.infer.func_name_owner_type(&owner);
                     let key = Key::Name(&field.text);
-                    self.out.push(Access { owner, holder, key, span: field.span, value: None, on_class_table });
+                    let span = field.span;
+                    self.out.push(Access { owner, holder, key, span, value: None, on_class_table, read: None });
                 }
             }
             _ => {}
@@ -973,12 +977,16 @@ impl<'c> Visitor<'c> for Accesses<'_, '_, 'c> {
     fn visit_expr(&mut self, expr: &'c Expr) {
         if self.reads {
             let read = match &expr.kind {
-                ExprKind::MethodCall { base, method, .. } => Some((&**base, Key::Name(&method.text), method.span)),
+                ExprKind::MethodCall { base, method, .. } if !method.is_missing() => {
+                    Some((&**base, Key::Name(&method.text), method.span))
+                }
+                ExprKind::MethodCall { .. } => None,
                 _ => self.target(expr),
             };
             if let Some((base, key, span)) = read {
                 let owner = self.infer.expr(base);
-                self.out.push(Access { owner, holder: base.span, key, span, value: None, on_class_table: false });
+                let (holder, read) = (base.span, Some(base));
+                self.out.push(Access { owner, holder, key, span, value: None, on_class_table: false, read });
             }
         }
         visit::walk_expr(self, expr);

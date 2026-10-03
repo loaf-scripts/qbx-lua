@@ -14,7 +14,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | --- | --- | --- |
 | `syntax-error` | error | Source rejected by the parser, including its nesting limit. |
 | `undefined-global` | warning | A read of a global absent from the known environment. |
-| `undefined-field` | warning | An unknown field on a standard library table. |
+| `undefined-field` | warning | An unknown field on a standard library table. qbx-lua-ls also reports a field read from a value whose `---@class` or table type does not have it, such as `point.z` for a class with `x` and `y`, as TypeScript reports a property its type does not declare. A type has the fields that `inject-field` lets code set; global tables, the exports of a resource without a declared type, empty tables and values of unknown type have any. See [Undefined fields](reference.md#undefined-fields). |
 | `unused-local` | warning | A local variable is never read. |
 | `unused-function` | warning | A local function is never used. |
 | `unused-argument` | hint | A function parameter is never read. |

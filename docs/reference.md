@@ -102,16 +102,16 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-global-doc`, `missing-local-export-doc`, `incomplete-signature-doc`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `no-unknown`, `need-check-nil` and `inject-field`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-global-doc`, `missing-local-export-doc`, `incomplete-signature-doc`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `no-unknown`, `need-check-nil`, `inject-field` and `undefined-field`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `diagnostics.neededFileStatus` | For the same codes, `Any` or `Opened` turns a rule that is off by default, such as `no-unknown` or `missing-global-doc`, on as a warning, unless `diagnostics.severity` gives its level. `None` turns a rule off, whatever its severity. With or without a trailing `!` |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
 
-Codes that only share a name with a rule here, such as `undefined-field` and `deprecated`, are
-ignored, as are all other settings. Keys may be dotted (`"diagnostics.globals"`), nested, or
-prefixed with `Lua.`. Comments and trailing commas are accepted. Formatting keeps its defaults; in
-the language server, the editor's indentation settings still apply. Discovery skips a file or
+Codes that only share a name with a rule here, such as `deprecated`, are ignored, as are all other
+settings. Keys may be dotted (`"diagnostics.globals"`), nested, or prefixed with `Lua.`. Comments
+and trailing commas are accepted. Formatting keeps its defaults; in the language server, the
+editor's indentation settings still apply. Discovery skips a file or
 exclusion pattern it cannot read and says so on stderr; pass the file with `--config` to make that
 an error.
 
@@ -529,6 +529,56 @@ An empty table, such as `local result = {}`, takes any field, and so do values o
 `table` and `any`. Keys held in variables are not checked, and strict classes are left to
 `undeclared-field`. lua-language-server's `inject-field` checks classes only, and its
 `---@diagnostic disable: inject-field` comments and `diagnostics.disable` entries apply here too.
+
+## Undefined fields
+
+`undefined-field` reports a field read from a value whose type does not have it, as TypeScript
+reports a property its type does not declare. Outside the language server it covers the standard
+library tables, such as `string.nope`. In qbx-lua-ls it also covers values whose type the language
+server knows, with the fields that `inject-field` lets code set: those a class or table type
+declares, including the `{ label: string }` a table constructor gives, and those set through the
+names that own a table. Reads with `.`, `['name']` and `:` count, also in conditions such as
+`if point.z then`. A union lacks a field when none of its parts has it, and a local that is
+assigned again has the types of all the values that may reach the read.
+
+```lua
+---@class Point
+---@field x number
+---@field y number
+
+---@param point Point
+local function show(point)
+    print(point.x, point.z) -- undefined-field: Field `z` is not declared in `Point`
+end
+
+local rows = { { label = 'a' }, { label = 'b' } }
+for _, row in pairs(rows) do
+    print(row.count) -- undefined-field: Field `count` is not declared in `{ label: string }`
+end
+```
+
+Some values may have any field, so reads from them are not checked:
+
+- values of unknown type, `table` and `any`, empty tables such as `local result = {}`, and classes
+  with an index that takes the name or a parent that is no class, such as `table`;
+- global tables and the paths from them, such as `Config.debug` or `ESX.PlayerData`, whose fields
+  other files and resources set, and the instances made from them, unless an annotation types them;
+  the exports of a resource are checked only against a type declared for them, as `---@type
+  PhoneExports` above `exports['phone'] = {}` declares one, with what the resource registers;
+- `self` in a method of a table without a `---@class`, whose instances get their fields elsewhere,
+  and tables whose metatable has an `__index` function;
+- numbers, booleans and functions whose type is only inferred, not declared;
+- strict classes, whose fields `undeclared-field` checks.
+
+lua-language-server's `undefined-field` does not check tables built from table constructors, and
+it counts a field set through any value of a class, which `inject-field` reports instead. Its
+`---@diagnostic disable: undefined-field` comments and `diagnostics.disable` entries apply here too,
+also to the standard library tables. To turn it off:
+
+```toml
+[rules]
+"undefined-field" = "off"
+```
 
 ## Member visibility
 

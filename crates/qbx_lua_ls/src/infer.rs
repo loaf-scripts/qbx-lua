@@ -2246,6 +2246,28 @@ impl<'a> Infer<'a> {
         index
     }
 
+    /// Whether a metatable that `setmetatable` gives the table `owner` has an `__index` that is no
+    /// table, such as a function, which decides at runtime which fields the table has.
+    pub fn indexes_at_runtime(&self, owner: &str) -> bool {
+        if !self.index.has_metatables(owner) {
+            return false;
+        }
+        self.index.metatables_of(owner, self.ctx.file).into_iter().any(|metatable| {
+            let mut found = Vec::new();
+            self.guarded(|| self.raw_index(metatable, &mut found, 0));
+            let parts = found.into_iter().flat_map(|ty| match ty {
+                Type::Union(types) => types,
+                other => vec![other],
+            });
+            let mut parts = parts.filter(|ty| !matches!(ty, Type::Nil));
+            parts.any(|ty| match ty {
+                Type::GlobalTable(_) | Type::Shape(_) | Type::Require(_) => false,
+                Type::Named(name, _) => self.index.class(&name, self.side).is_none(),
+                _ => true,
+            })
+        })
+    }
+
     /// The tables that the `__index` of a metatable of type `metatable` gives, whose fields a table
     /// with that metatable falls back on. A function there decides them at runtime, so it gives none.
     fn metatable_index(&self, metatable: &Type) -> Type {
@@ -3189,6 +3211,13 @@ impl<'a> Infer<'a> {
             }
         }
         values
+    }
+
+    /// The type declared for the exports of `resource`, as `---@type PhoneExports` above
+    /// `exports['phone'] = {}` declares it, when one is.
+    pub fn declared_export_type(&self, resource: &str) -> Option<Type> {
+        let declared = self.index.declared_exports_of(resource, self.ctx.file);
+        declared.into_iter().map(|(_, symbol)| &symbol.ty).find(|ty| !holds_exports(ty)).cloned()
     }
 
     /// Every member of `ty` called `name`, as the definitions a call of it may reach.

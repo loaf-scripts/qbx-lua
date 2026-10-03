@@ -46,7 +46,7 @@ pub fn injected_fields(infer: &Infer, chunk: &Chunk, by_default: impl Fn(FileId)
 
 /// Whether the value written at `holder` is `self` in a method, or a path from it, whose fields the
 /// method declares.
-fn through_self(infer: &Infer, holder: Span) -> bool {
+pub(super) fn through_self(infer: &Infer, holder: Span) -> bool {
     let Some(Resolved::Local(id)) = infer.ctx.resolution.resolve_at(holder.start) else { return false };
     matches!(infer.ctx.decl(infer.ctx.resolution.local(id).decl.start), Some(Decl::SelfParam { .. }))
 }
@@ -81,7 +81,7 @@ fn has(
 
 /// The message for the field `name` set through the value of type `owner` written at `holder`.
 /// A table that a local declares has no name of its own, so the expression that holds it names it.
-fn message(infer: &Infer, name: &str, owner: &Type, holder: Span) -> String {
+pub(super) fn message(infer: &Infer, name: &str, owner: &Type, holder: Span) -> String {
     let shown = owner.without_nil().to_string();
     if !shown.is_empty() && shown != "table" {
         return format!("Field `{name}` is not declared in `{shown}`");

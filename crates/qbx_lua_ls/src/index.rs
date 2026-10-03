@@ -192,6 +192,12 @@ pub fn instance_class(owner: &str) -> Option<&str> {
     owner.strip_prefix("%inst(")?.strip_suffix(')')
 }
 
+/// Whether `owner` is the table that a local of one file holds, or a path from it, as
+/// `FileContext::local_owner_key` names them, rather than a global table.
+pub fn is_local_table(owner: &str) -> bool {
+    owner.starts_with("%f")
+}
+
 /// A metatable that `setmetatable` gives the table `owner`, as `setmetatable(Child, { __index = Base })`
 /// does: the table falls back on the `__index` of `metatable` for the fields it lacks.
 #[derive(Clone, Debug)]

@@ -53,6 +53,8 @@ const OFF: Option<Severity> = None;
 
 pub const SYNTAX_ERROR: &str = "syntax-error";
 pub const UNDEFINED_GLOBAL: &str = "undefined-global";
+/// The linter reports it for the standard library tables, and qbx-lua-ls, which reads the LuaCATS
+/// types, also for other values.
 pub const UNDEFINED_FIELD: &str = "undefined-field";
 pub const UNUSED_LOCAL: &str = "unused-local";
 pub const UNUSED_FUNCTION: &str = "unused-function";
@@ -145,7 +147,7 @@ pub const UNUSED_LOCALE_KEY: &str = "qbox/unused-locale-key";
 pub static RULES: &[Rule] = &[
     rule(SYNTAX_ERROR, Correctness, ERROR, false, "The file cannot be parsed by the CfxLua 5.4 runtime."),
     rule(UNDEFINED_GLOBAL, Correctness, WARN, false, "A global is read that no script in the resource, its imports, the runtime or the natives define."),
-    rule(UNDEFINED_FIELD, Correctness, WARN, false, "A field that does not exist is read from a standard library table."),
+    rule(UNDEFINED_FIELD, Correctness, WARN, false, "A field that does not exist is read from a standard library table or, in the language server, from a value whose LuaCATS class or table type does not have it."),
     rule(UNUSED_LOCAL, Suspicious, WARN, false, "A local variable is never read."),
     rule(UNUSED_FUNCTION, Suspicious, WARN, false, "A local function is never used."),
     rule(UNUSED_ARGUMENT, Style, HINT, false, "A function parameter is never read."),

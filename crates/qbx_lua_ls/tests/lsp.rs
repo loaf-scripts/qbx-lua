@@ -4739,6 +4739,128 @@ print(tag, build)
 }
 
 #[test]
+fn undefined_field_reports_fields_read_from_values_whose_type_lacks_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Point
+---@field x number
+local Point = {}
+Point.__index = Point
+Point.origin = 0
+
+function Point:move()
+    self.moved = true
+end
+
+---@class Test.Other
+---@field y number
+
+---@class Test.Open : table
+
+---@class Test.Dict
+---@field [string] number
+
+---@class (strict) Test.Exact
+---@field x number
+
+---@param point Test.Point
+---@param either Test.Point|Test.Other
+---@param maybe? Test.Point
+---@param open Test.Open
+---@param dict Test.Dict
+---@param exact Test.Exact
+---@param count number
+---@param name string
+local function read(point, either, maybe, open, dict, exact, count, name)
+    print(point.x, point.moved, point.origin, point:move())
+    print(point.y, point['w'], point:jump())
+    if point.z then
+        print(either.y, either.k)
+    end
+    print(maybe and maybe.y)
+    print(open.anything, dict.anything, exact.y)
+    print(count.x, name:upper(), name:nope())
+    ---@diagnostic disable-next-line: undefined-field
+    print(point.allowed)
+end
+
+local Settings = { debug = false }
+Settings.verbose = true
+print(Settings.debug, Settings.verbose, Settings.missing)
+
+Shared = { items = {} }
+print(Shared.items, Shared.missing, Shared.items.anything)
+
+local rows = { { label = 'a' }, { label = 'b' } }
+for _, row in pairs(rows) do
+    print(row.label, row.count)
+end
+
+local function build(first, second)
+    local result = {}
+    local options = { size = 1 }
+    local delta = first - second
+    return result.any, options.size, options.color, delta.x
+end
+
+local current = { id = 0 }
+RegisterNetEvent('test:set', function(value)
+    current = value
+end)
+
+local function show()
+    return current.anything
+end
+
+local Lazy = setmetatable({ loaded = true }, { __index = function(_, key) return key end })
+print(Lazy.loaded, Lazy.anything)
+
+Tracker = {}
+
+function Tracker:reset()
+    return self.count, self.anything
+end
+
+function math.lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+print(json.nope, math.clamp(1, 0, 2), math.lerp(1, 2, 0.5), math.nope)
+print(read, build, show)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let found = |needle: &str, message: &str| ("undefined-field".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["undefined-field"]),
+        [
+            found("point.y", "Field `y` is not declared in `Test.Point`"),
+            found("point.y", "Field `w` is not declared in `Test.Point`"),
+            found("point.y", "Field `jump` is not declared in `Test.Point`"),
+            found("point.z", "Field `z` is not declared in `Test.Point`"),
+            found("either.k", "Field `k` is not declared in `Test.Point|Test.Other`"),
+            found("maybe.y", "Field `y` is not declared in `Test.Point`"),
+            found("count.x", "Field `x` is not declared in `number`"),
+            found("count.x", "Field `nope` is not declared in `string`"),
+            found("Settings.missing", "Field `missing` is not declared in the table `Settings` holds"),
+            found("row.count", "Field `count` is not declared in `{ label: string }`"),
+            found("options.color", "Field `color` is not declared in `{ size: integer }`"),
+            found("json.nope", "'json' has no field 'nope'"),
+            found("json.nope", "Field `nope` is not declared in `mathlib`"),
+        ],
+        "fields that a class declares, that its methods set through `self` or its table holds, or that \
+         the table's own local sets are read, while open classes, strict classes, global tables, empty \
+         tables, locals given values of unknown type, an `__index` function, `self` of a table that is \
+         no class and an inferred `number` take any field; the linter alone reports `json`"
+    );
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "undefined-field": "off" } } } } }),
+    );
+    assert_eq!(findings(&mut client, CLIENT, &["undefined-field"]), [], "the rule can be turned off");
+}
+
+#[test]
 fn private_protected_and_package_members_stay_in_their_class_or_file() {
     let mut client = Client::start(fixture_root());
     const SHARED: &str = "myresource/shared/config.lua";
@@ -12021,6 +12143,25 @@ fn exports_of_escrowed_resources_are_not_second_guessed() {
         client.diagnostics_for("late/hidden.lua"),
         [("fivem/unknown-export".to_string(), 1)],
         "vault has an encrypted file that may register anything; mylib is fully readable"
+    );
+}
+
+#[test]
+fn methods_that_the_declared_type_of_an_export_lacks_are_reported() {
+    let root = declared_exports_root();
+    let mut client = Client::start_with_library(root.join("workspace"), &root.join("types"));
+    let file = "app/client.lua";
+    let text = client.open(file);
+    let added = "exports['tablet']:Flash()\nexports.tablet:Ring(1)\nexports.phone:Anything()\n\
+                 ---@type TabletExports\nlocal tablet = exports.tablet\ntablet:Flash()\n";
+    client.change(file, 2, &format!("{text}{added}"));
+    let line = text.lines().count() as u64;
+    let message = "Field `Flash` is not declared in `TabletExports`".to_string();
+    assert_eq!(
+        findings(&mut client, file, &["undefined-field"]),
+        [("undefined-field".to_string(), line, message.clone()), ("undefined-field".to_string(), line + 5, message)],
+        "a call through the exports proxy is checked as one through a local of the declared type; an index \
+         of the type takes any name"
     );
 }
 

@@ -15,8 +15,8 @@ pub const FILE_NAMES: &[&str] = &[".luarc.json", ".luarc.jsonc", ".emmyrc.json"]
 const ALIASES: &[(&str, &[&str])] =
     &[("unused", &["unused-local", "unused-function", "unused-argument", "unused-loop-variable"])];
 
-/// Codes that check the same thing in both tools. `undefined-field` and `deprecated` only share the
-/// name: projects often turn off the broad LuaLS checks, which must not turn off the narrow ones here.
+/// Codes that check the same thing in both tools. `deprecated` only shares the name: projects often
+/// turn off the broad LuaLS check, which must not turn off the narrow one here.
 const EQUIVALENT_CODES: &[&str] = &[
     "undefined-global",
     "lowercase-global",
@@ -51,6 +51,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "no-unknown",
     "need-check-nil",
     "inject-field",
+    "undefined-field",
 ];
 
 #[derive(Debug, Default)]
@@ -297,6 +298,7 @@ mod tests {
         assert_eq!(
             settings.rules,
             [
+                ("undefined-field".to_string(), Level::Off),
                 ("undefined-global".to_string(), Level::Off),
                 ("missing-parameter".to_string(), Level::Off),
                 ("duplicate-set-field".to_string(), Level::Off)
