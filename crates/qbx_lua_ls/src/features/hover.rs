@@ -95,22 +95,39 @@ const MAX_OVERVIEW_FIELDS: usize = 14;
 fn describe_value(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: Option<&str>) -> String {
     if let (Some(fun), Type::Fun(_)) = (ty.as_fun(), ty) {
         let marker = if fun.is_async { "(async) " } else { "" };
-        return format!("{marker}{prefix}{}", fun.signature(name));
+        let mut out = format!("{marker}{prefix}{}", fun.signature(name));
+        push_aliases(&mut out, &nested_aliases(infer, [ty], &[], false));
+        return out;
     }
-    let mut out = value_overview(infer, prefix, name, ty, literal);
-    for (name, alias) in alias_expansions(infer, ty) {
-        out.push('\n');
-        out.push_str(&alias_definition(&name, alias));
-    }
+    let (mut out, shown) = value_overview(infer, prefix, name, ty, literal);
+    let aliases = alias_expansions(infer, ty);
+    push_aliases(&mut out, &aliases);
+    // Then those that its type arguments and the fields it lists use, as `Mode` of `Box<Mode>` or of
+    // `Car { mode: Mode }`.
+    let names = |aliases: &[(SmolStr, &AliasDef)]| aliases.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+    let mut nested = nested_aliases(infer, [ty], &names(&aliases), true);
+    let listed = [names(&aliases), names(&nested)].concat();
+    nested.extend(nested_aliases(infer, &shown, &listed, false));
+    nested.truncate(MAX_NESTED_ALIASES);
+    push_aliases(&mut out, &nested);
     out
 }
 
-fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: Option<&str>) -> String {
+/// Writes each alias out on a line of its own after `out`.
+fn push_aliases(out: &mut String, aliases: &[(SmolStr, &AliasDef)]) {
+    for (name, alias) in aliases {
+        out.push('\n');
+        out.push_str(&alias_definition(name, alias));
+    }
+}
+
+/// `name: type`, or for tables an overview of their fields, with the types of the fields it lists.
+fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: Option<&str>) -> (String, Vec<Type>) {
     let bare = ty.without_nil();
     let members = infer.members(&table_part(infer, &bare, 0));
     if members.is_empty() {
         let value = literal.map(|l| format!(" = {l}")).unwrap_or_default();
-        return format!("{prefix}{name}: {}{value}", shown_type(infer, ty));
+        return (format!("{prefix}{name}: {}{value}", shown_type(infer, ty)), Vec::new());
     }
     // The fields are those of the value when it is not nil; the `?` still says it may be.
     let optional = if *ty != bare && matches!(ty, Type::Union(types) if types.contains(&Type::Nil)) { "?" } else { "" };
@@ -122,11 +139,15 @@ fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: O
         _ => String::new(),
     };
     let mut out = format!("{prefix}{name}: {label}{{");
+    let mut shown = Vec::new();
     for member in members.iter().take(MAX_OVERVIEW_FIELDS) {
         let ty = match &member.ty {
             Type::Fun(_) => "function".to_string(),
             Type::GlobalTable(_) | Type::Shape(_) => "table".to_string(),
-            other => other.to_string(),
+            other => {
+                shown.push(other.clone());
+                other.to_string()
+            }
         };
         let value = member.literal.as_ref().map(|l| format!(" = {l}")).unwrap_or_default();
         out.push_str(&format!("\n    {}: {ty}{value},", member.name));
@@ -138,7 +159,7 @@ fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: O
     if label.is_empty() {
         out.push_str(optional);
     }
-    out
+    (out, shown)
 }
 
 /// Whether `ty` is a table that a hover shows by its fields alone, such as `{ name: string }` or
@@ -200,9 +221,78 @@ fn alias_expansions<'a>(infer: &Infer<'a>, ty: &Type) -> Vec<(SmolStr, &'a Alias
     out
 }
 
+/// How many aliases a hover, or a parameter in signature help, writes out after the types that use
+/// them, so that a class with many fields stays readable.
+const MAX_NESTED_ALIASES: usize = 8;
+
+/// The aliases that `types` use in the parameters and returns of functions, the fields of tables and
+/// type arguments, as `Mode` in `fun(mode: Mode)` or `{ mode: Mode }`, each once and leaving out those
+/// in `skip`. With `top`, the aliases the types name themselves are left out too, as a hover that
+/// expands them already shows them. Classes are left to their own hovers.
+pub(super) fn nested_aliases<'a, 't>(
+    infer: &Infer<'a>,
+    types: impl IntoIterator<Item = &'t Type>,
+    skip: &[SmolStr],
+    top: bool,
+) -> Vec<(SmolStr, &'a AliasDef)> {
+    let mut out = Vec::new();
+    for ty in types {
+        collect_aliases(infer, ty, skip, top, 0, &mut out);
+    }
+    out
+}
+
+fn collect_aliases<'a>(
+    infer: &Infer<'a>,
+    ty: &Type,
+    skip: &[SmolStr],
+    top: bool,
+    depth: u32,
+    out: &mut Vec<(SmolStr, &'a AliasDef)>,
+) {
+    if depth > 8 || out.len() >= MAX_NESTED_ALIASES {
+        return;
+    }
+    let mut inner = |ty: &Type, top: bool| collect_aliases(infer, ty, skip, top, depth + 1, out);
+    match ty {
+        Type::Named(name, args) => {
+            for arg in args {
+                inner(arg, false);
+            }
+            let listed = skip.iter().chain(out.iter().map(|(seen, _)| seen)).any(|seen| *seen == name.text);
+            if top || listed || out.len() >= MAX_NESTED_ALIASES || infer.index.class(name, infer.side()).is_some() {
+                return;
+            }
+            if let Some((_, alias)) = infer.index.alias(name, infer.side()) {
+                out.push((name.text.clone(), alias));
+            }
+        }
+        Type::Union(types) => types.iter().for_each(|ty| inner(ty, top)),
+        Type::Array(item) | Type::Variadic(item) => inner(item, top),
+        Type::Tuple(types) => types.iter().for_each(|ty| inner(ty, false)),
+        Type::Map(key, value) => {
+            inner(key, false);
+            inner(value, false);
+        }
+        Type::Fun(fun) => {
+            fun.params.iter().for_each(|param| inner(&param.ty, false));
+            fun.returns.iter().for_each(|ty| inner(ty, false));
+        }
+        Type::Shape(shape) => {
+            shape.fields.iter().for_each(|field| inner(&field.ty, false));
+            shape.array.iter().for_each(|ty| inner(ty, false));
+            shape.indices.iter().for_each(|(key, value)| {
+                inner(key, false);
+                inner(value, false);
+            });
+        }
+        _ => {}
+    }
+}
+
 /// An alias as written out in a hover: `type Mode = "fast"|"slow"`, or with each value on a line of
 /// its own when the `---|` lines that list them describe any.
-fn alias_definition(name: &str, alias: &AliasDef) -> String {
+pub(super) fn alias_definition(name: &str, alias: &AliasDef) -> String {
     let name = with_params(name, &alias.generics);
     if alias.values.iter().all(|listed| listed.description.is_empty()) {
         return format!("type {name} = {}", alias.ty);
@@ -369,22 +459,32 @@ fn class_hover(infer: &Infer, class: &ClassDef) -> String {
         declaration.push_str(&format!(" : {}", parents.join(", ")));
     }
     let members = infer.members(&own_type(&class.name, &class.generics));
-    let mut fields: Vec<String> = members.iter().map(|member| format!("{}: {}", member.name, member.ty)).collect();
-    fields.extend(class.literal_fields(infer.side()).map(|(key, value)| format!("[{key}]: {value}")));
+    let mut fields: Vec<(String, Type)> =
+        members.iter().map(|member| (format!("{}: {}", member.name, member.ty), member.ty.clone())).collect();
+    fields.extend(class.literal_fields(infer.side()).map(|(key, value)| (format!("[{key}]: {value}"), value.clone())));
     let indices = class.indices(infer.side());
+    let mut shown: Vec<&Type> = Vec::new();
     if !fields.is_empty() || !indices.is_empty() {
         declaration.push_str(" {");
-        for field in fields.iter().take(MAX_OVERVIEW_FIELDS) {
+        for (field, ty) in fields.iter().take(MAX_OVERVIEW_FIELDS) {
             declaration.push_str(&format!("\n    {field},"));
+            shown.push(ty);
         }
-        for (key, value) in indices {
+        for (key, value) in &indices {
             declaration.push_str(&format!("\n    [{key}]: {value},"));
+            shown.extend([key, value]);
         }
         if fields.len() > MAX_OVERVIEW_FIELDS {
             declaration.push_str(&format!("\n    ...(+{})", fields.len() - MAX_OVERVIEW_FIELDS));
         }
         declaration.push_str("\n}");
     }
+    let parents = class.parent_types.iter().filter_map(|parent| match parent {
+        Type::Named(_, args) => Some(args.iter()),
+        _ => None,
+    });
+    let used = parents.flatten().chain(shown);
+    push_aliases(&mut declaration, &nested_aliases(infer, used, std::slice::from_ref(&class.name), false));
     let mut out = lua_block(&declaration);
     if let Some(doc) = &class.doc {
         out.push_str("\n\n");
@@ -409,7 +509,9 @@ fn type_hover(infer: &Infer, name: &str) -> Option<String> {
     }
     let aliases = infer.index.alias_defs(name).into_iter();
     let (_, alias) = aliases.max_by_key(|(file, alias)| preference(*file, alias.side))?;
-    let mut out = lua_block(&alias_definition(name, alias));
+    let mut definition = alias_definition(name, alias);
+    push_aliases(&mut definition, &nested_aliases(infer, [&alias.ty], &[SmolStr::new(name)], false));
+    let mut out = lua_block(&definition);
     if let Some(doc) = &alias.doc {
         out.push_str("\n\n");
         out.push_str(doc);

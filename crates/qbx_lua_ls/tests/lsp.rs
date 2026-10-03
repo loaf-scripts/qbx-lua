@@ -8542,6 +8542,59 @@ end
 }
 
 #[test]
+fn hovers_and_signature_help_write_out_the_aliases_their_types_use() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Mode \"a\"|\"b\"
+---@alias Test.Pair { left: number, right: number }
+---@alias Test.Wrapped<T> { value: T }
+---@alias Test.Opts { mode: Test.Mode, size: integer }
+
+---@class Test.Car
+---@field mode Test.Mode
+---@field speed number
+
+---@param m Test.Mode
+---@param p Test.Pair
+---@return Test.Mode?, Test.Car
+local function useMode(m, p) end
+
+---@type Test.Car
+local car = { mode = 'a', speed = 1 }
+---@type Test.Wrapped<Test.Mode>
+local wrapped = { value = 'a' }
+---@type Test.Opts
+local opts = { mode = 'a', size = 1 }
+useMode('a', { left = 1, right = 2 })
+print(car, wrapped, opts)
+";
+    client.open_with(CLIENT, text);
+    let mode = "type Test.Mode = \"a\"|\"b\"";
+    let pair = "type Test.Pair = { left: number, right: number }";
+    let cases: &[(&str, &[&str])] = &[
+        ("useMode(m", &["useMode(m: Test.Mode, p: Test.Pair): Test.Mode?, Test.Car", mode, pair]),
+        ("car = {", &["mode: Test.Mode,", mode]),
+        ("wrapped = {", &["Test.Wrapped<Test.Mode>", mode]),
+        ("Test.Opts\nlocal", &["type Test.Opts = { mode: Test.Mode, size: integer }", mode]),
+        ("Test.Car\nlocal car", &["(class) Test.Car", mode]),
+    ];
+    for &(needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        for part in expected {
+            assert!(hover.contains(part), "{needle}: expected {part:?} in {hover}");
+        }
+    }
+
+    let (l, c) = pos(text, "useMode('a'", 9);
+    let result = client.request("textDocument/signatureHelp", client.position_params(CLIENT, l, c));
+    let parameters = &result["signatures"][0]["parameters"];
+    let doc = |i: usize| parameters[i]["documentation"]["value"].as_str().unwrap_or_default().to_string();
+    assert!(doc(0).contains(mode), "{}", doc(0));
+    assert!(doc(1).contains(pair) && !doc(1).contains(mode), "{}", doc(1));
+}
+
+#[test]
 fn calls_through_function_aliases_use_their_signature() {
     let mut client = Client::start(fixture_root());
     let text = "\

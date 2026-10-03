@@ -4,12 +4,13 @@ use qbx_lua_analysis::scope::Resolved;
 use qbx_lua_syntax::ast::{ExprKind, Name, StmtKind};
 
 use super::event_call::{event_call, wrapper_call};
-use super::{markdown, with_infer};
+use super::hover::{alias_definition, nested_aliases};
+use super::{lua_block, markdown, with_infer};
 use crate::document::Document;
 use crate::indexer::render_doc;
 use crate::infer::{Decl, Infer};
 use crate::locate::locate;
-use crate::types::FunType;
+use crate::types::{FunType, Type};
 use crate::workspace::Workspace;
 
 pub fn signature_help(ws: &Workspace, doc: &Document, position: Position) -> Option<SignatureHelp> {
@@ -60,7 +61,7 @@ pub fn signature_help(ws: &Workspace, doc: &Document, position: Position) -> Opt
         let argument = site.active_argument(&doc.text, offset);
         let signatures: Vec<SignatureInformation> = signatures
             .iter()
-            .map(|fun| information(fun, &name, argument, site.method.is_some(), documentation.as_deref()))
+            .map(|fun| information(infer, fun, &name, argument, site.method.is_some(), documentation.as_deref()))
             .collect();
         let active_parameter = signatures[active_signature].active_parameter;
         Some(SignatureHelp { signatures, active_signature: Some(active_signature as u32), active_parameter })
@@ -103,7 +104,9 @@ fn name_doc(ws: &Workspace, doc: &Document, infer: &Infer, name: &Name) -> Optio
 }
 
 /// One signature of a call, with the parameter that the argument at index `argument` is passed to.
+/// Each parameter writes out the aliases its type uses, as `type Mode = "a"|"b"` for `mode: Mode`.
 fn information(
+    infer: &Infer,
     fun: &FunType,
     name: &str,
     argument: usize,
@@ -129,9 +132,23 @@ fn information(
         parameters: Some(
             labels
                 .into_iter()
-                .map(|l| ParameterInformation { label: ParameterLabel::Simple(l), documentation: None })
+                .zip(&params)
+                .map(|(label, param)| ParameterInformation {
+                    label: ParameterLabel::Simple(label),
+                    documentation: aliases_of(infer, &param.ty),
+                })
                 .collect(),
         ),
         active_parameter: Some(active as u32),
     }
+}
+
+/// The aliases that a parameter of type `ty` uses, written out, if it uses any.
+fn aliases_of(infer: &Infer, ty: &Type) -> Option<Documentation> {
+    let aliases = nested_aliases(infer, [ty], &[], false);
+    if aliases.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = aliases.iter().map(|(name, alias)| alias_definition(name, alias)).collect();
+    Some(Documentation::MarkupContent(markdown(lua_block(&lines.join("\n")))))
 }
