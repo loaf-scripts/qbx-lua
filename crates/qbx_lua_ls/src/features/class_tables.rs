@@ -4,9 +4,9 @@
 //! values of a class, they drive `missing-fields`, `assign-type-mismatch`, `undeclared-field`,
 //! `inject-field` and the completion of field names. Table constructors typed as a table type, like a shape
 //! `{ value: string }`, `string[]` or `table<string, integer>`, are found in the same places for
-//! `assign-type-mismatch`, and those typed as a shape or a union of classes and shapes for
-//! `missing-fields`. Only the language server knows the classes, so qbx-lint registers the rules
-//! and this module reports them.
+//! `assign-type-mismatch`, and those typed as a shape or a union of classes and shapes, also as the
+//! entries of an array, a map or a tuple, for `missing-fields`. Only the language server knows the
+//! classes, so qbx-lint registers the rules and this module reports them.
 //!
 //! Type names are global, and resources may declare the same one differently: ox_fuel's
 //! `@class State` is not qbx_vehicles' `@enum State`. A name is looked up the way the file that
@@ -39,13 +39,14 @@ pub struct ClassTable<'c> {
     pub from: FileId,
 }
 
-/// A table constructor and the classes and shapes of which it has to be one, for `missing-fields`.
+/// A table constructor and the types of which it has to be one, for `missing-fields`.
 struct RequiredTable<'c> {
     members: Vec<Member>,
     table: &'c Expr,
 }
 
-/// A type with required fields that a table constructor may have to be.
+/// A type that a table constructor may have to be, which requires fields or types the tables the
+/// constructor holds.
 #[derive(PartialEq)]
 enum Member {
     /// A class, with the type arguments it is given and the file whose view of the type names
@@ -53,14 +54,18 @@ enum Member {
     Class(SmolStr, Vec<Type>, FileId),
     /// A shape like `{ name: string }`, with the file whose view of the type names it is read with.
     Shape(Arc<Shape>, FileId),
+    /// An array like `Dog[]`, a `table<K, V>` or a tuple like `[Dog, Cat]`, with the file whose
+    /// view of the type names it is read with. It requires no field, but types its entries.
+    Table(Type, FileId),
 }
 
 impl Member {
-    /// How a message names the type: a class by its name, a shape written out.
+    /// How a message names the type: a class by its name, a table type written out.
     fn name(&self) -> String {
         match self {
             Member::Class(class, ..) => class.to_string(),
             Member::Shape(shape, _) => Type::Shape(shape.clone()).to_string(),
+            Member::Table(ty, _) => ty.to_string(),
         }
     }
 }
@@ -264,23 +269,34 @@ impl<'a, 'b> Classes<'a, 'b> {
     }
 
     /// The type that `key` of a table of the table type `ty`, as `from` sees it, holds: the field
-    /// of a shape that a name names, or else the value of its array part or of an index that takes
-    /// the key.
+    /// of a shape that a name names, the item of a tuple at the position a literal names, or else
+    /// the value of its array part or of an index that takes the key. Any other integer key of a
+    /// tuple may hold each of its items.
     pub fn table_field_type(&self, ty: &Type, from: FileId, key: &Key) -> Option<(Type, FileId)> {
-        if let (Type::Shape(shape), Key::Name(name)) = (ty, key) {
-            if let Some(field) = shape.fields.iter().find(|field| field.name == *name) {
-                let ty = if field.optional { field.ty.clone().optional() } else { field.ty.clone() };
-                return Some((ty, from));
+        match (ty, key) {
+            (Type::Shape(shape), Key::Name(name)) => {
+                if let Some(field) = shape.fields.iter().find(|field| field.name == *name) {
+                    let ty = if field.optional { field.ty.clone().optional() } else { field.ty.clone() };
+                    return Some((ty, from));
+                }
             }
+            (Type::Tuple(items), Key::Typed(Type::IntLit(i))) => {
+                return items.get((*i as usize).wrapping_sub(1)).map(|item| (item.clone(), from));
+            }
+            (Type::Tuple(items), key) => {
+                return self.takes(&Type::Integer, from, &key.ty()).then(|| (Type::union(items.clone()), from));
+            }
+            _ => {}
         }
         self.table_index_for(ty, from, &key.ty())
     }
 
-    /// The classes and shapes of which a table constructor typed as one of `types`, each named as
-    /// its file sees it, has to be one, looking through `?`, unions and aliases and leaving out the
-    /// types that hold no table, like `string`. There are none when no class or shape is listed, or
-    /// when another type that holds tables is, like `table`, `any`, `string[]` or a generic, since a
-    /// table may be one of those without setting any field.
+    /// The types of which a table constructor typed as one of `types`, each named as its file sees
+    /// it, has to be one, looking through `?`, unions and aliases and leaving out the types that
+    /// hold no table, like `string`: classes and shapes, and arrays, maps and tuples, which a table
+    /// is without setting any field but which type the tables it holds. There are none when no such
+    /// type is listed, or when another type that holds tables is, like `table`, `any` or a generic,
+    /// since a table may be one of those without setting any field or what it holds being known.
     fn table_members(&self, types: &[(Type, FileId)]) -> Option<Vec<Member>> {
         let mut members = Vec::new();
         for (ty, from) in types {
@@ -290,6 +306,7 @@ impl<'a, 'b> Classes<'a, 'b> {
                 let member = match (self.class_of(&part, *from), part) {
                     (Some((class, args, view)), _) => Member::Class(class, args, view),
                     (None, Type::Shape(shape)) => Member::Shape(shape, *from),
+                    (None, part @ (Type::Array(_) | Type::Map(..) | Type::Tuple(_))) => Member::Table(part, *from),
                     (None, part) if self.kinds(&part, *from, 0).is_some_and(|kinds| kinds & kind::TABLE == 0) => {
                         continue
                     }
@@ -309,11 +326,13 @@ impl<'a, 'b> Classes<'a, 'b> {
         match member {
             Member::Class(class, args, from) => self.field_type(class, args, *from, key),
             Member::Shape(shape, from) => self.table_field_type(&Type::Shape(shape.clone()), *from, key),
+            Member::Table(ty, from) => self.table_field_type(ty, *from, key),
         }
     }
 
     /// The fields of `member` that a table setting the names `given` leaves out although their
-    /// type does not allow `nil`; of a class, those that `required_fields` lists.
+    /// type does not allow `nil`; of a class, those that `required_fields` lists. Arrays, maps and
+    /// tuples require none.
     fn missing(&self, member: &Member, given: &[&str]) -> Vec<SmolStr> {
         let fields: Vec<(SmolStr, Type, FileId)> = match member {
             Member::Class(class, args, from) => {
@@ -324,6 +343,7 @@ impl<'a, 'b> Classes<'a, 'b> {
                 let required = shape.fields.iter().filter(|field| !field.optional);
                 required.map(|field| (field.name.clone(), field.ty.clone(), *from)).collect()
             }
+            Member::Table(..) => Vec::new(),
         };
         fields
             .into_iter()
@@ -849,8 +869,8 @@ fn typed_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> (Vec<ClassTable<'c>>, Ve
 }
 
 /// The table constructors of `chunk` that `missing-fields` checks: those typed as a class, a shape
-/// or a union of them, found where `class_tables` finds class tables, and those that such tables
-/// hold for fields of these types.
+/// or a union of them, found where `class_tables` finds class tables, and those that such tables,
+/// or arrays, maps and tuples of them, hold for fields and entries of these types.
 fn required_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> Vec<RequiredTable<'c>> {
     let declared = Some(Declared::keeping_annotations(infer));
     let mut finder = Finder { declared, required: Some(Vec::new()), ..Finder::new(infer) };
@@ -996,7 +1016,8 @@ impl<'c> Visitor<'c> for Innermost {
 /// message naming them. Fields that a class keeps from the code there, like `---@field private`,
 /// are required too, as in LuaLS, and a class marked `(partial)` requires only the fields it
 /// declares itself. A table typed as a union of classes and shapes has to set the required fields
-/// of one of them, and its message has a line for each, as LuaLS's does.
+/// of one of them, and its message has a line for each, as LuaLS's does. A table that may be an
+/// array, a map or a tuple is not reported, but the tables it holds are.
 pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
     required_tables(infer, chunk)
@@ -1153,9 +1174,10 @@ impl<'a, 'b, 'c> Finder<'a, 'b, 'c> {
         }
     }
 
-    /// Records `expr` when it is a table constructor that has to be one of the classes and shapes
-    /// that `expected` lists, each named as its file sees it, then the constructors it holds for
-    /// fields that some of them declare, which have to be one of the types those declare.
+    /// Records `expr` when it is a table constructor that has to be one of the classes, shapes,
+    /// arrays, maps and tuples that `expected` lists, each named as its file sees it, then the
+    /// constructors it holds for fields and entries that some of them declare, which have to be one
+    /// of the types those declare.
     fn required_table(&mut self, expected: &[(Type, FileId)], expr: &'c Expr, depth: u32) {
         let table = expr.unparen();
         let ExprKind::Table(fields) = &table.kind else { return };

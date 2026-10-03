@@ -709,13 +709,20 @@ lua-language-server, such a table may set fields its type does not name, and the
 typed as a union are not checked.
 
 `missing-fields` reports a table typed as a shape that leaves out a field the shape requires, one
-without `?` whose type does not allow `nil`, as TypeScript does and lua-language-server does not. A
-table typed as a union of classes and shapes needs the required fields of one of them, and the
+without `?` whose type does not allow `nil`, as TypeScript does and lua-language-server does not.
+The tables that an array, a `table<K, V>` or a tuple holds need the fields of the type of their
+entry, so the `{}` of `{ {} }` for `Dog[]` and of `{ rex = {} }` for `table<string, Dog>` are
+reported, as in both. An entry whose key the type does not take, like the `{}` of `{ {} }` for
+`table<string, Dog>`, is not checked.
+
+A table typed as a union of classes and shapes needs the required fields of one of them, and the
 report has a line for each, as lua-language-server's does. Types that hold no table are left out,
 so a table for `Dog|string` needs the fields of `Dog`, and as in TypeScript, a union that also
-lists a type that takes any table, such as `table`, `any` or `string[]`, is not reported. A table
-in a field of such a table, like the `{}` of `{ pet = {} }`, needs the fields of one of the types
-that the classes and shapes declare for the field.
+lists an array, a `table<K, V>`, a tuple or a type that takes any table, such as `table` or `any`,
+is not reported. A table that a table typed as a union holds, like the `{}` of `{ pet = {} }`,
+needs the fields of one of the types that its members declare for its key, as `Dog|Cat` for an
+entry of `Dog[]|Cat[]`. As in TypeScript and unlike in lua-language-server, the tables held by one
+that may be a `table` or `any`, as for `Dog[]|table`, are not checked.
 
 ## Casts
 

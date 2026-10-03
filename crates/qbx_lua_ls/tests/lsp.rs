@@ -3924,6 +3924,130 @@ print(untagged, unnamed, kennel, named)
 }
 
 #[test]
+fn tables_held_in_arrays_maps_and_tuples_need_the_fields_of_their_entries() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Dog
+---@field bark boolean
+
+---@class Test.Cat
+---@field meow boolean
+
+---@class Test.Owner
+---@field pets Test.Dog[]
+
+---@alias Test.Dogs Test.Dog[]
+
+---@type Test.Dog[]
+local dogs = { {}, { bark = true } }
+
+---@type table<string, Test.Dog>
+local named = { rex = {} }
+
+---@type table<string, Test.Dog>
+local positional = { {} }
+
+---@type [Test.Dog, Test.Cat]
+local pair = { {}, {}, {} }
+
+---@type Test.Dogs?
+local aliased = { {} }
+
+---@type Test.Dog[][]
+local nested = { { {} } }
+
+---@type Test.Owner
+local owner = { pets = { {} } }
+
+---@param list Test.Dog[]
+local function walk(list) end
+walk({ {} })
+
+---@return Test.Dog[]
+local function adopt()
+    return { {} }
+end
+print(dogs, named, positional, pair, aliased, nested, owner, adopt)
+";
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let dog = || "Missing required fields in type `Test.Dog`: `bark`".to_string();
+    assert_eq!(
+        missing_field_messages(&mut client, text),
+        [
+            (line("local dogs"), dog()),
+            (line("local named"), dog()),
+            // A `[string]` index takes no array entry, and a tuple has no item past its end.
+            (line("local pair"), dog()),
+            (line("local pair"), "Missing required fields in type `Test.Cat`: `meow`".into()),
+            (line("local aliased"), dog()),
+            (line("local nested"), dog()),
+            (line("local owner"), dog()),
+            (line("walk({"), dog()),
+            (line("return {"), dog()),
+        ],
+        "the tables an array, a map or a tuple holds have the type of its entries"
+    );
+}
+
+#[test]
+fn tables_held_in_a_union_with_arrays_need_the_fields_of_a_type_its_members_give_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Dog
+---@field bark boolean
+
+---@class Test.Cat
+---@field meow boolean
+
+---@type Test.Dog|Test.Dog[]
+local either = {
+    {},
+}
+
+---@type Test.Dog[]|Test.Cat[]
+local lists = { {} }
+
+---@type [Test.Dog, Test.Cat]|Test.Dog[]
+local mixed = { {}, {} }
+
+---@type { pet: Test.Dog }|Test.Dog[]
+local shaped = { pet = {} }
+
+---@type Test.Dog[]|{ name: string }
+local unnamed = { {} }
+
+---@type Test.Dog[]|table
+local open = { {} }
+print(either, lists, mixed, shaped, unnamed, open)
+";
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let dog = || "Missing required fields in type `Test.Dog`: `bark`".to_string();
+    assert_eq!(
+        missing_field_messages(&mut client, text),
+        [
+            // The array makes the outer table pass, and types the one it holds.
+            (line("    {},"), dog()),
+            (
+                line("local lists"),
+                "Missing required fields in type `Test.Dog`: `bark`\n\
+                 Missing required fields in type `Test.Cat`: `meow`"
+                    .into()
+            ),
+            (line("local mixed"), dog()),
+            (
+                line("local mixed"),
+                "Missing required fields in type `Test.Cat`: `meow`\n\
+                 Missing required fields in type `Test.Dog`: `bark`"
+                    .into()
+            ),
+            (line("local shaped"), dog()),
+            (line("local unnamed"), dog()),
+        ],
+        "a held table has to be one of the types the members give its key, and `table` takes any table"
+    );
+}
+
+#[test]
 fn class_typed_tables_complete_the_fields_they_lack() {
     let mut client = Client::start(fixture_root());
     // `|` marks where completion is asked for.
