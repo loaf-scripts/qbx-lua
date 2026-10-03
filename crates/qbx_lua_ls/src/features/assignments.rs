@@ -9,8 +9,8 @@ use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
 
-use super::class_tables::{mismatched_fields, Classes};
-use super::unknown_types::has_param_line;
+use super::class_tables::{mismatched_fields, unknown_fields, Classes};
+use super::unknown_types::{given_values, has_param_line, is_typed, value_at};
 use crate::infer::{Decl, Infer};
 use crate::types::Type;
 
@@ -18,7 +18,18 @@ use crate::types::Type;
 /// naming both types. A value that its field rejects is reported for the field alone.
 pub fn mismatched_assignments(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let mut out = mismatched_fields(infer, chunk);
-    let mut finder = Finder { infer, classes: Classes::new(infer), out: Vec::new() };
+    let mut finder = Finder { infer, classes: Classes::new(infer), unknowns: None, out: Vec::new() };
+    finder.visit_block(&chunk.block);
+    finder.out.retain(|(span, _)| !out.iter().any(|(reported, _)| reported == span));
+    out.append(&mut finder.out);
+    out
+}
+
+/// Each value of no known type, of those `pick` picks, stored in a class field or a variable whose
+/// type is declared, with the message naming the target.
+pub fn unknown_assignments(infer: &Infer, chunk: &Chunk, pick: &dyn Fn(&Expr) -> bool) -> Vec<(Span, String)> {
+    let mut out = unknown_fields(infer, chunk, pick);
+    let mut finder = Finder { infer, classes: Classes::new(infer), unknowns: Some(pick), out: Vec::new() };
     finder.visit_block(&chunk.block);
     finder.out.retain(|(span, _)| !out.iter().any(|(reported, _)| reported == span));
     out.append(&mut finder.out);
@@ -28,6 +39,8 @@ pub fn mismatched_assignments(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String
 struct Finder<'a, 'b> {
     infer: &'a Infer<'b>,
     classes: Classes<'a, 'b>,
+    /// When the values of no known type are looked for instead of mismatches, which of them count.
+    unknowns: Option<&'a dyn Fn(&Expr) -> bool>,
     out: Vec<(Span, String)>,
 }
 
@@ -58,10 +71,24 @@ impl Finder<'_, '_> {
             return;
         }
         let from = self.classes.file();
-        for (index, (target, (given, span))) in targets.iter().zip(self.classes.values(exprs)).enumerate() {
+        let mut values = self.classes.values(exprs);
+        if self.unknowns.is_some() {
+            values = given_values(self.infer, exprs, values);
+        }
+        for (index, (target, (given, span))) in targets.iter().zip(values).enumerate() {
             let Some(expected) = &target.ty else { continue };
             // LuaLS lets the statement whose `---@type` declares a name give it `nil`.
             if target.annotated && exprs.get(index).is_some_and(|expr| matches!(expr.kind, ExprKind::Nil)) {
+                continue;
+            }
+            if let Some(pick) = self.unknowns {
+                if given.is_unknown() && is_typed(expected) && value_at(exprs, index).is_some_and(pick) {
+                    let name = target.name.text(self.infer.ctx.source);
+                    self.out.push((
+                        span,
+                        format!("The type of the value assigned to `{name}` of type `{expected}` is unknown"),
+                    ));
+                }
                 continue;
             }
             if self.classes.rejects(expected, from, &given) {

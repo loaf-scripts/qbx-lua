@@ -20,6 +20,7 @@ use qbx_lua_syntax::{NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::comparisons::Declared;
+use super::unknown_types::is_typed;
 use crate::index::{AliasDef, ClassDef, FileId, ResourceId};
 use crate::infer::{bound_parents, class_bindings, expanded_bindings, substitute, Infer};
 use crate::luacats::applies_on;
@@ -896,17 +897,33 @@ pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
 /// `table<K, V>` are checked the same way, but only classes are checked in assignments. Only clear
 /// cases count: a different kind of value, or a literal the field does not list.
 pub fn mismatched_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
+    checked_fields(infer, chunk, None)
+}
+
+/// Each value of no known type, of those `pick` picks, that a typed table constructor or an
+/// assignment stores in a field whose type is declared, as `mismatched_fields` finds them.
+pub fn unknown_fields(infer: &Infer, chunk: &Chunk, pick: &dyn Fn(&Expr) -> bool) -> Vec<(Span, String)> {
+    checked_fields(infer, chunk, Some(pick))
+}
+
+fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) -> bool>) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
     let mut out = Vec::new();
     let mut check = |field: Option<(Type, FileId)>, key: &Key, value: &Expr| {
         let Some((ty, file)) = field else { return };
         let given = classes.value_type(value);
+        let target = match key.field() {
+            Some(field) => format!("field `{field}`"),
+            None => format!("`[{}]`", key.ty()),
+        };
+        if let Some(pick) = unknowns {
+            if given.is_unknown() && is_typed(&ty) && pick(value) {
+                out.push((value.span, format!("The type of the value assigned to {target} of type `{ty}` is unknown")));
+            }
+            return;
+        }
         if classes.rejects(&ty, file, &given) {
             let shown = if classes.literal_mismatch(&ty, file, &given) { given } else { given.widen() };
-            let target = match key.field() {
-                Some(field) => format!("field `{field}`"),
-                None => format!("`[{}]`", key.ty()),
-            };
             out.push((value.span, format!("Cannot assign `{shown}` to {target} of type `{ty}`")));
         }
     };

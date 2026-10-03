@@ -23,6 +23,7 @@ use qbx_lua_syntax::Span;
 use rustc_hash::FxHashSet;
 
 use super::class_tables::Classes;
+use super::unknown_types::{given_values, is_typed, value_at};
 use crate::infer::{always_exits, return_stmts, Infer};
 use crate::types::Type;
 
@@ -35,6 +36,27 @@ pub fn mismatched_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
         for (_, exprs) in return_stmts(&function.func.body) {
             let values = classes.values(exprs);
             out.extend(mismatches(&classes, function.closest(&classes, exprs, &values), &values));
+        }
+    }
+    out
+}
+
+/// Each returned value of no known type, of those `pick` picks, whose function's `@return` declares
+/// its type, with the message naming the position.
+pub fn unknown_returns(infer: &Infer, chunk: &Chunk, pick: &dyn Fn(&Expr) -> bool) -> Vec<(Span, String)> {
+    let classes = Classes::new(infer);
+    let mut out = Vec::new();
+    for function in documented(infer, chunk) {
+        for (_, exprs) in return_stmts(&function.func.body) {
+            let values = given_values(infer, exprs, classes.values(exprs));
+            let returns = function.closest(&classes, exprs, &values);
+            for (index, (given, span)) in values.iter().enumerate() {
+                let Some(expected) = expected_at(returns, index) else { break };
+                if given.is_unknown() && is_typed(expected) && value_at(exprs, index).is_some_and(pick) {
+                    let message = format!("The type of return value #{} of type `{expected}` is unknown", index + 1);
+                    out.push((*span, message));
+                }
+            }
         }
     }
     out

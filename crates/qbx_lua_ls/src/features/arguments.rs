@@ -30,6 +30,7 @@ use qbx_lua_syntax::{SmolStr, Span};
 use super::callback_payloads::Payload;
 use super::class_tables::Classes;
 use super::comparisons::Declared;
+use super::unknown_types::is_typed;
 use crate::index::{FileId, FileOrigin};
 use crate::infer::{Infer, NATIVE_HANDLE_TYPES};
 use crate::types::{FunType, Param, Type};
@@ -37,12 +38,32 @@ use crate::types::{FunType, Param, Type};
 /// Each argument whose parameter does not take it, with the message naming both types, also among
 /// the `payloads` of the wrapper calls of `chunk`.
 pub fn mismatched_arguments(infer: &Infer, chunk: &Chunk, payloads: &[Payload]) -> Vec<(Span, String)> {
-    let mut calls = Calls { infer, declared: Declared::new(infer), classes: Classes::new(infer), out: Vec::new() };
+    checked_arguments(infer, chunk, payloads, None)
+}
+
+/// Each argument of no known type, of those `pick` picks, passed for a parameter whose type is
+/// declared in each signature that the call may use, with the message naming the parameter.
+pub fn unknown_arguments(
+    infer: &Infer,
+    chunk: &Chunk,
+    payloads: &[Payload],
+    pick: &dyn Fn(&Expr) -> bool,
+) -> Vec<(Span, String)> {
+    checked_arguments(infer, chunk, payloads, Some(pick))
+}
+
+fn checked_arguments(
+    infer: &Infer,
+    chunk: &Chunk,
+    payloads: &[Payload],
+    unknowns: Option<&dyn Fn(&Expr) -> bool>,
+) -> Vec<(Span, String)> {
+    let mut calls =
+        Calls { infer, declared: Declared::new(infer), classes: Classes::new(infer), unknowns, out: Vec::new() };
     calls.visit_block(&chunk.block);
     for payload in payloads {
-        let values: Vec<Type> = payload.args.iter().map(|arg| calls.value(arg)).collect();
         let handlers: Vec<&FunType> = payload.handlers.iter().collect();
-        calls.compare(&handlers, false, payload.args, &values);
+        calls.passed(&handlers, false, payload.args);
     }
     calls.out
 }
@@ -51,6 +72,9 @@ struct Calls<'a, 'b> {
     infer: &'a Infer<'b>,
     declared: Declared<'a, 'b>,
     classes: Classes<'a, 'b>,
+    /// When the arguments of no known type are looked for instead of mismatches, which of them
+    /// count.
+    unknowns: Option<&'a dyn Fn(&Expr) -> bool>,
     out: Vec<(Span, String)>,
 }
 
@@ -71,9 +95,53 @@ impl Calls<'_, '_> {
         if signatures.is_empty() {
             return;
         }
-        let values: Vec<Type> = args.iter().map(|arg| self.value(arg)).collect();
         let signatures: Vec<&FunType> = signatures.iter().map(Arc::as_ref).collect();
-        self.compare(&signatures, method.is_some(), args, &values);
+        self.passed(&signatures, method.is_some(), args);
+    }
+
+    /// Checks `args`, passed to a function that has one of `signatures`.
+    fn passed(&mut self, signatures: &[&FunType], via_colon: bool, args: &[Expr]) {
+        if let Some(pick) = self.unknowns {
+            return self.unknown(signatures, via_colon, args, pick);
+        }
+        let values: Vec<Type> = args.iter().map(|arg| self.value(arg)).collect();
+        self.compare(signatures, via_colon, args, &values);
+    }
+
+    /// Reports each of `args` of no known type that `pick` picks, when the parameter it goes to has a
+    /// declared type in each signature the call may use.
+    fn unknown(&mut self, signatures: &[&FunType], via_colon: bool, args: &[Expr], pick: &dyn Fn(&Expr) -> bool) {
+        let candidates = candidates(self.infer, signatures, via_colon, args);
+        for (index, arg) in args.iter().enumerate() {
+            let given = self.infer.cast_after(arg.span.end).unwrap_or_else(|| self.infer.expr(arg));
+            if !given.is_unknown() || !pick(arg) {
+                continue;
+            }
+            // The parameter it goes to in the first signature, when each has a declared type.
+            let mut first: Option<&Param> = None;
+            for fun in candidates.iter().copied() {
+                let Some(param) = param_for(fun, via_colon, index) else {
+                    first = None;
+                    break;
+                };
+                let is_generic = |name: &str| fun.generics.iter().any(|generic| generic == name);
+                let is_handle = |name: &str| NATIVE_HANDLE_TYPES.contains(&name);
+                let expected = expected(param);
+                if !is_typed(expected) || mentions(expected, &is_generic) || names(expected, &is_handle) {
+                    first = None;
+                    break;
+                }
+                first.get_or_insert(param);
+            }
+            if let Some(param) = first {
+                let message = format!(
+                    "The type of the value passed to parameter `{}` of type `{}` is unknown",
+                    param.name,
+                    expected(param)
+                );
+                self.out.push((arg.span, message));
+            }
+        }
     }
 
     /// The declared type of an argument, or the type a `--[[@as T]]` right after it gives it.

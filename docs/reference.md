@@ -746,6 +746,25 @@ later assignments are not followed. Names that start with `ignore_unused_prefix`
 not reported. To check only your own resources, set the level in an `[[overrides]]` entry instead
 of `[rules]`.
 
+It also reports a value of unknown type where a type is declared for what takes it: a local or
+parameter with a `---@type` or `@param`, a field of a class or of a table built for a declared
+table type, an element of such a table, a parameter that each signature the call may use declares,
+and a value that `@return` declares:
+
+```lua
+---@param entities number[]
+local function target(entities)
+    if type(entities) ~= "table" then
+        entities = { entities } -- The type of the value assigned to field `[1]` of type `number` is unknown
+    end
+end
+```
+
+A target declared `any` takes any value, and the parameters that `param-type-mismatch` leaves out,
+those of natives and those typed with a generic of the function called, are left out here too. A
+value read from a local that is itself reported, as `data.id` for an untyped parameter `data`, is
+not reported again: typing the local types the value.
+
 ## Nil checks
 
 `need-check-nil` reports a local that may hold `nil` where code indexes it, calls it, stores a value

@@ -171,7 +171,7 @@ pub static RULES: &[Rule] = &[
     rule(REDUNDANT_RETURN_VALUE, Correctness, WARN, false, "A function returns more values than its @return annotations declare (language server only)."),
     rule(DISCARD_RETURNS, Correctness, WARN, false, "A call drops the values of a function whose @nodiscard annotation requires using them (language server only)."),
     rule(CAST_TYPE_MISMATCH, Correctness, WARN, false, "A ---@cast gives a variable a type that its declared type does not take (language server only)."),
-    rule(NO_UNKNOWN, Style, OFF, false, "A parameter, local or loop variable has no type: none is declared and none can be inferred (language server only)."),
+    rule(NO_UNKNOWN, Style, OFF, false, "A parameter, local or loop variable has no type, or a value of unknown type goes where a type is declared (language server only)."),
     rule(CONST_REASSIGN, Correctness, ERROR, false, "A <const> or <close> local is assigned to."),
     rule(SELF_ASSIGNMENT, Suspicious, WARN, false, "A variable is assigned to itself."),
     rule(SELF_COMPARISON, Suspicious, WARN, false, "Both sides of a comparison are the same expression."),

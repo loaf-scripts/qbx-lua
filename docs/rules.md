@@ -45,7 +45,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `redundant-return-value` | warning | A `return` passes more values than the function's `@return` annotations, or the function type it is written as, declare. A trailing `...T` takes any number. Reported by qbx-lua-ls only. |
 | `discard-returns` | warning | A call on a line of its own drops the values of a function marked `@nodiscard`, such as `tostring(value)`. Reported by qbx-lua-ls only. |
 | `cast-type-mismatch` | warning | A `---@cast name T` gives a local a type that its declared type does not take, such as `string` for a local declared as `integer`, a literal the type does not list, or a class it neither names nor extends. Reported by qbx-lua-ls only. |
-| `no-unknown` | off | A parameter, local or loop variable has no type: none is declared with `@param` or `@type`, and none can be inferred. Reported by qbx-lua-ls only. |
+| `no-unknown` | off | A parameter, local or loop variable has no type: none is declared with `@param` or `@type`, and none can be inferred. A value of unknown type is stored in a typed variable or field, passed for a typed parameter, or returned where `@return` declares a type. Reported by qbx-lua-ls only. |
 | `const-reassign` | error | An assignment to a `<const>` or `<close>` local. |
 | `self-assignment` | warning | A variable is assigned to itself. |
 | `self-comparison` | warning | A comparison has the same expression on both sides. |

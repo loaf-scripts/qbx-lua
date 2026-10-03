@@ -27,7 +27,7 @@ use super::doc_names::undefined_doc_names;
 use super::nil_checks::{unchecked_nils, UncheckedNils};
 use super::returns::{mismatched_returns, missing_returns, redundant_returns};
 use super::strict_classes::undeclared_fields;
-use super::unknown_types::unknown_types;
+use super::unknown_types::{unknown_types, unknown_values};
 use super::visibility::invisible_members;
 use crate::document::Document;
 use crate::index::{FileId, FileOrigin};
@@ -106,7 +106,12 @@ fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<
         (CAST_TYPE_MISMATCH, |input| mismatched_casts(input.infer)),
         (MISSING_PARAMETER, |input| missing_payloads(input.infer, input.payloads())),
         (REDUNDANT_PARAMETER, |input| redundant_payloads(input.payloads())),
-        (NO_UNKNOWN, |input| unknown_types(input.infer, &input.ws.lint_config.ignore_unused_prefix)),
+        (NO_UNKNOWN, |input| {
+            let prefix = &input.ws.lint_config.ignore_unused_prefix;
+            let mut out = unknown_types(input.infer, prefix);
+            out.extend(unknown_values(input.infer, &input.doc.chunk, input.payloads(), prefix));
+            out
+        }),
         (IMPOSSIBLE_COMPARISON, |input| impossible_comparisons(input.infer, &input.doc.chunk)),
         (NEED_CHECK_NIL, |input| {
             let UncheckedNils { reads, arguments } = unchecked_nils(input.infer, &input.doc.chunk);

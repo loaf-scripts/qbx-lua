@@ -3166,6 +3166,82 @@ print(plain, either, checked, guards)
 }
 
 #[test]
+fn values_of_unknown_type_that_typed_targets_take_are_reported_by_no_unknown() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Box
+---@field label string
+
+---@param n number
+local function takesNumber(n) end
+---@param value any
+local function takesAny(value) end
+
+---@param entities number[]
+local function target(entities, options)
+    if type(entities) ~= 'table' then
+        entities = { entities }
+    end
+    takesNumber(options.count)
+    return entities
+end
+
+---@type number
+local typed = Undefined()
+takesNumber(Undefined)
+takesAny(Undefined)
+---@type Probe.Box
+local box = { label = Undefined }
+box.label = Undefined
+
+---@return string
+local function name()
+    return Undefined
+end
+
+---@return string
+local function call()
+    return Undefined()
+end
+print(target, typed, name, box, call)
+";
+    client.open_with(CLIENT, text);
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "no-unknown": "warning" } } } } }),
+    );
+    let finding =
+        |needle: &str, message: &str| ("no-unknown".to_string(), pos(text, needle, 0).0 as u64, message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["no-unknown"]),
+        [
+            finding("target(entities, options)", "Parameter `options` has no type; add `---@param options <type>`"),
+            finding(
+                "entities = { entities }",
+                "The type of the value assigned to field `[1]` of type `number` is unknown"
+            ),
+            finding("local typed", "The type of the value assigned to `typed` of type `number` is unknown"),
+            finding(
+                "takesNumber(Undefined)",
+                "The type of the value passed to parameter `n` of type `number` is unknown"
+            ),
+            finding(
+                "label = Undefined }",
+                "The type of the value assigned to field `label` of type `string` is unknown"
+            ),
+            finding(
+                "box.label = Undefined",
+                "The type of the value assigned to field `label` of type `string` is unknown"
+            ),
+            finding("return Undefined\n", "The type of return value #1 of type `string` is unknown"),
+            finding("return Undefined()", "The type of return value #1 of type `string` is unknown"),
+        ],
+        "a value of unknown type is reported where a declared type takes it, but not for `any`, nor when it is read \
+         from a local that is reported itself"
+    );
+}
+
+#[test]
 fn casts_change_the_type_of_a_local_from_their_line_on() {
     let mut client = Client::start(fixture_root());
     let text = "\
