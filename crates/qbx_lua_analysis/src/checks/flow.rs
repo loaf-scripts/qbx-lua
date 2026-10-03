@@ -99,7 +99,7 @@ impl Flow<'_, '_> {
         );
     }
 
-    fn balance(&mut self, targets: usize, exprs: &[Expr], stmt_span: Span, is_local: bool) {
+    fn balance(&mut self, targets: usize, exprs: &[Expr], stmt_span: Span) {
         let Some(last) = exprs.last() else { return };
         if exprs.len() > targets {
             let extra = exprs[targets].span.to(last.span);
@@ -108,7 +108,7 @@ impl Flow<'_, '_> {
                 extra,
                 format!("{} value(s) assigned to {targets} target(s); the extra values are discarded", exprs.len()),
             );
-        } else if exprs.len() < targets && !last.is_multi_value() && !is_local {
+        } else if exprs.len() < targets && !last.is_multi_value() {
             self.sink.report(
                 rules::UNBALANCED_ASSIGNMENTS,
                 stmt_span,
@@ -334,9 +334,9 @@ impl<'ast> Visitor<'ast> for Flow<'_, '_> {
 
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
         match &stmt.kind {
-            StmtKind::Local { names, exprs, in_unpack: false } => self.balance(names.len(), exprs, stmt.span, true),
+            StmtKind::Local { names, exprs, in_unpack: false } => self.balance(names.len(), exprs, stmt.span),
             StmtKind::Assign { targets, exprs } => {
-                self.balance(targets.len(), exprs, stmt.span, false);
+                self.balance(targets.len(), exprs, stmt.span);
                 if let ([target], [value]) = (targets.as_slice(), exprs.as_slice()) {
                     if same_place(target, value) {
                         self.sink.report(rules::SELF_ASSIGNMENT, stmt.span, "value is assigned to itself");

@@ -390,6 +390,22 @@ fn clean_snippets_stay_clean() {
 }
 
 #[test]
+fn local_statements_and_assignments_give_each_name_a_value() {
+    let unbalanced = |source: &str| codes(source).into_iter().filter(|code| *code == "unbalanced-assignments").count();
+    assert_eq!(unbalanced("local a, b = 1\nprint(a, b)"), 1, "as in LuaLS");
+    assert_eq!(unbalanced("gx, gy = 1\nprint(gx, gy)"), 1);
+    assert_eq!(unbalanced("local a = 1, 2\nprint(a)"), 1, "an extra value");
+    for source in [
+        "local a, b\nprint(a, b)",
+        "local a, b = pcall(error)\nprint(a, b)",
+        "local function f(...) local a, b = ... return a, b end\nprint(f)",
+        "local a, b = 1, 2\nprint(a, b)",
+    ] {
+        assert_eq!(unbalanced(source), 0, "{source}");
+    }
+}
+
+#[test]
 fn syntax_errors_are_not_suppressible() {
     assert_eq!(codes("-- qbx-lint: disable\nlocal = 1"), ["syntax-error"]);
 }

@@ -151,7 +151,7 @@ pub static RULES: &[Rule] = &[
     rule(SHADOWED_LOCAL, Style, OFF, false, "A local hides a local from an enclosing scope."),
     rule(UNREACHABLE_CODE, Suspicious, WARN, false, "Code follows a return, break or goto and can never run."),
     rule(EMPTY_BLOCK, Style, INFO, false, "A block has no statements."),
-    rule(UNBALANCED_ASSIGNMENTS, Suspicious, WARN, false, "An assignment has more values than targets, or leaves targets without a value."),
+    rule(UNBALANCED_ASSIGNMENTS, Suspicious, WARN, false, "An assignment or `local` statement has more values than targets, or leaves targets without a value."),
     rule(DUPLICATE_INDEX, Suspicious, WARN, false, "A table constructor sets the same key twice."),
     rule(DUPLICATE_SET_FIELD, Suspicious, WARN, false, "A function is assigned to the same table field twice in one block of a file, so the second replaces the first."),
     rule(DUPLICATE_ARGUMENT, Correctness, ERROR, false, "Two parameters of one function share a name."),
