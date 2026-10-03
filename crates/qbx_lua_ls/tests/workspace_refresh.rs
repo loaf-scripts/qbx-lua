@@ -373,6 +373,35 @@ fn open_documents_alone_are_indexed_again_for_the_classes_they_declare() {
     assert_ne!(chained("Scanned", false), "Demo.Scanned");
 }
 
+/// What the member `name` of a table returns, as the index holds it.
+fn returned(ws: &Workspace, path: &Path, name: &str) -> qbx_lua_ls::types::Type {
+    let index = &ws.index.file(ws.index.file_id(path).unwrap()).unwrap().index;
+    let member = index.members.iter().find(|member| member.symbol.name == name).unwrap();
+    member.symbol.ty.as_fun().unwrap().returns[0].clone()
+}
+
+#[test]
+fn types_that_functions_infer_from_themselves_stop_growing() {
+    let fixture = Fixture::new();
+    fixture.write("demo/fxmanifest.lua", "shared_script '*.lua'\n");
+    // A function that returns what it returns itself reads its own call as unknown.
+    fixture.write("demo/wrap.lua", "Wrap = {}\n\nfunction Wrap.wrap()\n    return { Wrap.wrap() }\nend\n");
+    // Functions that return what each other return grow to the depth that the index keeps.
+    fixture.write("demo/a.lua", "A = {}\n\nfunction A.f()\n    return { B.g() }\nend\n");
+    fixture.write("demo/b.lua", "B = {}\n\nfunction B.g()\n    return { A.f() }\nend\n");
+    let mut ws = fixture.workspace("demo");
+    let path = |name: &str| fixture.0.join("demo").join(name);
+    for _ in 0..20 {
+        for name in ["wrap.lua", "a.lua", "b.lua"] {
+            ws.index_path(&path(name), FileOrigin::Workspace, None);
+        }
+    }
+    assert_eq!(returned(&ws, &path("wrap.lua"), "wrap").to_string(), "unknown[]");
+    // The function type nests 8 levels deep, of which its own takes one.
+    let f = returned(&ws, &path("a.lua"), "f");
+    assert_eq!(f.depth(), 7, "{f}");
+}
+
 #[test]
 fn manual_reindex_restores_unsaved_documents_and_their_new_file_ids() {
     let fixture = Fixture::new();

@@ -530,6 +530,9 @@ pub struct Infer<'a> {
     depth: Cell<u32>,
     /// Set when `guarded` cuts a lookup short at `MAX_DEPTH`, so that what it found is not cached.
     truncated: Cell<bool>,
+    /// The functions of this file whose types are inferred for the index, by the name that declares
+    /// each and its range, as `typing` sets them.
+    typing: RefCell<Vec<(SmolStr, Range)>>,
 }
 
 /// Natives call their handles `Vehicle`, `Ped` and so on. They are integers, and resources (ox_lib,
@@ -574,6 +577,46 @@ impl<'a> Infer<'a> {
             passed_indexes: RefCell::new(FxHashMap::default()),
             depth: Cell::new(0),
             truncated: Cell::new(false),
+            typing: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Runs `infer` while the function that `name` at `range` declares in this file is the one
+    /// whose type is inferred. The index still holds what it returned before, so a call of it within
+    /// itself reads as unknown, as lua-language-server reads it, rather than as a type that grows
+    /// each time the file is indexed again.
+    pub fn typing<T>(&self, name: &SmolStr, range: Range, infer: impl FnOnce() -> T) -> T {
+        self.typing.borrow_mut().push((name.clone(), range));
+        let out = infer();
+        self.typing.borrow_mut().pop();
+        out
+    }
+
+    /// Whether calling `base`, or its `method`, calls a function whose type `typing` infers.
+    fn calls_itself(&self, base: &Expr, method: Option<&Name>) -> bool {
+        let (owner, name) = match (method, &base.kind) {
+            (Some(method), _) => (Some(base), &method.text),
+            (None, ExprKind::Field { base: owner, name, .. }) => (Some(&**owner), &name.text),
+            (None, ExprKind::Name(name)) => (None, &name.text),
+            _ => return false,
+        };
+        let typing = self.typing.borrow();
+        let typed: Vec<Range> = typing.iter().filter(|(typed, _)| typed == name).map(|(_, range)| *range).collect();
+        drop(typing);
+        if typed.is_empty() {
+            return false;
+        }
+        let declared = |file: FileId, range: Range| file == self.ctx.file && typed.contains(&range);
+        match owner {
+            Some(owner) => {
+                let members = self.members_named(&self.expr(owner), name);
+                members.iter().any(|member| member.location.is_some_and(|(file, range)| declared(file, range)))
+            }
+            None => {
+                let global = !matches!(self.ctx.resolution.resolve_at(base.span.start), Some(Resolved::Local(_)));
+                let symbols = self.index.globals_named(name, self.ctx.file);
+                global && symbols.iter().any(|(file, symbol)| declared(*file, symbol.range))
+            }
         }
     }
 
@@ -2122,6 +2165,9 @@ impl<'a> Infer<'a> {
                 (Some("tonumber"), _) => return only(Type::Number.optional(), true),
                 _ => {}
             }
+        }
+        if !self.typing.borrow().is_empty() && self.calls_itself(base, method) {
+            return only(Type::Unknown, false);
         }
         let args = CallArgs::new(args);
         let fun = match self.sided_definition(base, method, &args) {

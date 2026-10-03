@@ -343,6 +343,28 @@ pub struct FileIndex {
 }
 
 impl FileIndex {
+    /// Cuts the types the entry inferred off `depth` levels deep, as `Type::limit_depth` does.
+    pub fn limit_depth(&mut self, depth: usize) {
+        let symbols =
+            self.globals.iter_mut().chain(&mut self.exports).chain(self.members.iter_mut().map(|m| &mut m.symbol));
+        symbols.for_each(|symbol| symbol.ty.limit_depth(depth));
+        for element in &mut self.elements {
+            element.key.iter_mut().chain([&mut element.value]).for_each(|ty| ty.limit_depth(depth));
+        }
+        self.metatables.iter_mut().for_each(|metatable| metatable.metatable.limit_depth(depth));
+        // The values of an `---@enum` are inferred too.
+        for alias in self.aliases.iter_mut().filter(|alias| alias.table.is_some()) {
+            alias.ty.limit_depth(depth);
+            if let Some(table) = &mut alias.table {
+                let members = &mut Arc::make_mut(table).members;
+                members.iter_mut().flat_map(|(key, value)| [key, value]).for_each(|ty| ty.limit_depth(depth));
+            }
+        }
+        let handlers = self.events.iter_mut().filter_map(|event| event.handler.as_mut());
+        handlers.for_each(|handler| Arc::make_mut(handler).limit_depth(depth));
+        self.module_return.iter_mut().for_each(|ty| ty.limit_depth(depth));
+    }
+
     /// Gives the class and alias names in the types the entry holds that have no origin the file
     /// `file`, which wrote them. Those it took from the entries of other files keep theirs.
     pub fn set_origin(&mut self, file: FileId) {

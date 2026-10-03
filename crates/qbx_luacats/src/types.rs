@@ -299,6 +299,16 @@ impl Shape {
             value.origins(out);
         }
     }
+
+    fn types(&self) -> impl Iterator<Item = &Type> {
+        let indices = self.indices.iter().flat_map(|(key, value)| [key, value]);
+        self.fields.iter().map(|field| &field.ty).chain(&self.array).chain(indices)
+    }
+
+    fn types_mut(&mut self) -> impl Iterator<Item = &mut Type> {
+        let indices = self.indices.iter_mut().flat_map(|(key, value)| [key, value]);
+        self.fields.iter_mut().map(|field| &mut field.ty).chain(&mut self.array).chain(indices)
+    }
 }
 
 impl FunType {
@@ -336,6 +346,25 @@ impl FunType {
         self.returns.iter().for_each(|ty| ty.origins(out));
         self.return_sets.iter().flatten().for_each(|ty| ty.origins(out));
         self.overloads.iter().for_each(|overload| overload.origins(out));
+    }
+
+    /// How deep the types of its parameters and returned values nest, as `Type::depth` counts.
+    fn depth_inside(&self) -> usize {
+        let params = self.params.iter().map(|param| param.ty.depth());
+        let returns = self.returns.iter().chain(self.return_sets.iter().flatten()).map(Type::depth);
+        let overloads = self.overloads.iter().map(|overload| overload.depth_inside());
+        params.chain(returns).chain(overloads).max().unwrap_or(0)
+    }
+
+    /// Cuts the signature off so that a function type of it nests at most `depth` levels deep, as
+    /// `Type::limit_depth` does.
+    pub fn limit_depth(&mut self, depth: usize) {
+        let inside = depth.saturating_sub(1);
+        self.params.iter_mut().for_each(|param| param.ty.limit_depth(inside));
+        self.returns.iter_mut().chain(self.return_sets.iter_mut().flatten()).for_each(|ty| ty.limit_depth(inside));
+        for overload in self.overloads.iter_mut().filter(|overload| overload.depth_inside() > inside) {
+            Arc::make_mut(overload).limit_depth(depth);
+        }
     }
 }
 
@@ -400,6 +429,45 @@ impl Type {
         self.origins(&mut ours);
         other.origins(&mut theirs);
         ours == theirs
+    }
+
+    /// How many levels of tables, functions and type arguments nest in the type: 2 for
+    /// `fun(): integer[]`, 0 for `integer|string`.
+    pub fn depth(&self) -> usize {
+        let deepest = |types: &mut dyn Iterator<Item = &Type>| types.map(Type::depth).max().unwrap_or(0);
+        match self {
+            Type::Array(inner) | Type::Variadic(inner) => 1 + inner.depth(),
+            Type::Map(key, value) => 1 + key.depth().max(value.depth()),
+            Type::Tuple(types) => 1 + deepest(&mut types.iter()),
+            Type::Union(types) => deepest(&mut types.iter()),
+            Type::Named(_, args) if !args.is_empty() => 1 + deepest(&mut args.iter()),
+            Type::Fun(fun) => 1 + fun.depth_inside(),
+            Type::Shape(shape) => 1 + deepest(&mut shape.types()),
+            _ => 0,
+        }
+    }
+
+    /// Cuts the type off `depth` levels deep, as `depth` counts them: what nests deeper reads as
+    /// unknown. A type that a function infers from what it returned before, as
+    /// `function T.wrap() return { T.wrap() } end` does, stops growing so.
+    pub fn limit_depth(&mut self, depth: usize) {
+        if self.depth() <= depth {
+            return;
+        }
+        let inside = depth.saturating_sub(1);
+        match self {
+            Type::Union(types) => types.iter_mut().for_each(|ty| ty.limit_depth(depth)),
+            _ if depth == 0 => *self = Type::Unknown,
+            Type::Array(inner) | Type::Variadic(inner) => inner.limit_depth(inside),
+            Type::Map(key, value) => {
+                key.limit_depth(inside);
+                value.limit_depth(inside);
+            }
+            Type::Tuple(types) | Type::Named(_, types) => types.iter_mut().for_each(|ty| ty.limit_depth(inside)),
+            Type::Fun(fun) => Arc::make_mut(fun).limit_depth(depth),
+            Type::Shape(shape) => Arc::make_mut(shape).types_mut().for_each(|ty| ty.limit_depth(inside)),
+            _ => {}
+        }
     }
 
     /// The files that the class and alias names in the type were written in, in order.

@@ -20,6 +20,9 @@ use crate::luacats::{own_type, parse_doc_lines, DocGroup};
 use crate::types::{CallbackRole, DescribedValue, FunType, Param, Type};
 
 const MAX_TABLE_DEPTH: u32 = 4;
+/// How deep the types that the index holds may nest, as `Type::depth` counts. Real code was seen to
+/// infer types 7 levels deep, as functions that return nested table constructors do.
+const MAX_TYPE_DEPTH: usize = 8;
 const MAX_TABLE_FIELDS: usize = 400;
 const MAX_MEMBERS_PER_FILE: usize = 6000;
 
@@ -116,6 +119,9 @@ pub fn index_file(
     out.reads.extend(global_reads(resolution).into_iter().map(Read::Global));
     out.reads.sort_unstable();
     out.reads.dedup();
+    // Types that functions infer from each other, as `A.f` returning `{ B.g() }` and `B.g` returning
+    // `{ A.f() }` do, would otherwise grow every time the files are indexed again.
+    out.limit_depth(MAX_TYPE_DEPTH);
     // The class names this file wrote stand for the declarations it sees, also where other resources
     // read its types.
     out.set_origin(file);
@@ -401,7 +407,10 @@ impl<'a> Indexer<'a> {
                 }
                 Some((ExprKind::Function(func), _)) => {
                     kind = SymbolKind::Function;
-                    Type::Fun(Arc::new(self.infer.fun_type(func, Some(doc_anchor), false)))
+                    let range = self.range(name.span);
+                    let fun =
+                        self.infer.typing(&name.text, range, || self.infer.fun_type(func, Some(doc_anchor), false));
+                    Type::Fun(Arc::new(fun))
                 }
                 Some((_, expr)) => self.infer.expr(expr).widen(),
                 None => Type::Unknown,
@@ -650,16 +659,17 @@ impl<'a> Indexer<'a> {
     fn function_decl(&mut self, stmt: &Stmt, name: &FuncName, func: &FuncBody) {
         let doc = self.ctx.doc_at(stmt.span.start);
         let is_method = name.method.is_some();
-        let fun = Type::Fun(Arc::new(self.infer.fun_type(func, Some(stmt.span.start), is_method)));
         let last = name.method.as_ref().or(name.path.last()).unwrap_or(&name.base);
+        let range = self.range(last.span);
+        let fun = self.infer.typing(&last.text, range, || self.infer.fun_type(func, Some(stmt.span.start), is_method));
         let symbol = Symbol {
             name: last.text.clone(),
             kind: if is_method { SymbolKind::Method } else { SymbolKind::Function },
-            ty: fun,
+            ty: Type::Fun(Arc::new(fun)),
             doc: render_doc(&doc),
             deprecated: doc.deprecated.is_some(),
             literal: None,
-            range: self.range(last.span),
+            range,
         };
         if name.path.is_empty() && name.method.is_none() {
             if self.is_global(&name.base) {
