@@ -382,8 +382,10 @@ fn bounded_inventory(root: &Path, budget: &mut InspectionBudget, entries: &mut u
     }
     let mut files = Vec::new();
     let mut complete = true;
-    let mut walker = walkdir::WalkDir::new(root).into_iter().filter_entry(|entry| {
-        entry.depth() == 0 || (entry.file_name() != "node_modules" && entry.file_name() != ".git")
+    let walked = root.canonicalize().ok();
+    let mut walker = walkdir::WalkDir::new(root).follow_links(true).into_iter().filter_entry(|entry| {
+        let skipped = entry.depth() > 0 && (entry.file_name() == "node_modules" || entry.file_name() == ".git");
+        !skipped && qbx_lua_analysis::project::walks_into(walked.as_deref(), entry)
     });
     while *entries > 0 {
         let Some(entry) = walker.next() else { break };

@@ -6,7 +6,7 @@ use qbx_lua_syntax::ast::Chunk;
 use qbx_lua_syntax::{parse, SmolStr};
 use qbx_luacats::types::{FunType, Type};
 use rustc_hash::{FxHashMap, FxHashSet};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 use crate::config::Config;
 use crate::glob::{is_glob, manifest_glob_match};
@@ -99,12 +99,41 @@ pub fn relative_slash_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
+/// The real path of `entry` when it is a folder that a walk reached through a symbolic link.
+fn linked_folder(entry: &DirEntry) -> Option<PathBuf> {
+    let linked = entry.depth() > 0 && entry.path_is_symlink() && entry.file_type().is_dir();
+    linked.then(|| entry.path().canonicalize().ok()).flatten()
+}
+
+/// Whether a folder at `target` that a link leads to is somewhere else than the folders a walk from
+/// `root`, by its real path, covers anyway, or one above them, which it would walk again.
+fn leads_elsewhere(root: Option<&Path>, target: &Path) -> bool {
+    root.is_some_and(|root| !target.starts_with(root) && !root.starts_with(target))
+}
+
+/// Whether a walk from `root`, by its real path, goes into `entry`. FiveM loads resources from
+/// symlinked folders too, as a server's `[local]` linked to where they are developed, so walks
+/// follow links, but only those that lead somewhere else.
+pub fn walks_into(root: Option<&Path>, entry: &DirEntry) -> bool {
+    linked_folder(entry).is_none_or(|target| leads_elsewhere(root, &target))
+}
+
+/// The Lua files under `root`, sorted. Symbolic links are followed as `walks_into` decides, and a
+/// folder that several of them lead to is read once, through the first by name.
 pub fn lua_files_under(root: &Path, config: &Config) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    let walker = WalkDir::new(root).follow_links(false).into_iter().filter_entry(|entry| {
+    let canonical_root = root.canonicalize().ok();
+    let mut linked: FxHashSet<PathBuf> = FxHashSet::default();
+    let walker = WalkDir::new(root).follow_links(true).sort_by_file_name().into_iter().filter_entry(|entry| {
         let name = entry.file_name().to_string_lossy();
         let hidden_dir = entry.file_type().is_dir() && name.starts_with('.') && entry.depth() > 0;
-        !(hidden_dir || name == "node_modules" || config.excludes_entry(entry.path()))
+        if hidden_dir || name == "node_modules" || config.excludes_entry(entry.path()) {
+            return false;
+        }
+        match linked_folder(entry) {
+            Some(target) => leads_elsewhere(canonical_root.as_deref(), &target) && linked.insert(target),
+            None => true,
+        }
     });
     for entry in walker.flatten() {
         if entry.file_type().is_file() && entry.path().extension().is_some_and(|e| e == "lua") {
@@ -359,9 +388,11 @@ impl ResourceLocator {
         let dir = Self::resources_dir(from_resource)?;
         let index = self.roots.entry(dir.clone()).or_insert_with(|| {
             let mut index = FxHashMap::default();
-            let walker = WalkDir::new(&dir).max_depth(6).into_iter().filter_entry(|entry| {
+            let root = dir.canonicalize().ok();
+            let walker = WalkDir::new(&dir).max_depth(6).follow_links(true).into_iter().filter_entry(|entry| {
                 let name = entry.file_name().to_string_lossy();
-                entry.depth() == 0 || !(name.starts_with('.') || name == "node_modules")
+                let hidden = entry.depth() > 0 && (name.starts_with('.') || name == "node_modules");
+                !hidden && walks_into(root.as_deref(), entry)
             });
             for entry in walker.flatten() {
                 if entry.file_type().is_file() && is_manifest_file(entry.path()) {
@@ -463,6 +494,54 @@ mod tests {
         assert!(!is_not_source(table.as_bytes()));
         assert!(!is_not_source(format!("local avatar='{}'\n", "A".repeat(8000)).as_bytes()));
         assert!(!is_not_source(format!("local t={{{}}}\n", "functions=1,_function=2,".repeat(200)).as_bytes()));
+    }
+
+    /// Links `link` to the folder `target`, unless the platform refuses to, as Windows refuses
+    /// symbolic links without the right to create them; a junction needs no such right.
+    fn link_folder(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(target, link).is_ok();
+        #[cfg(windows)]
+        return std::os::windows::fs::symlink_dir(target, link).is_ok()
+            || std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .is_ok_and(|output| output.status.success());
+        #[cfg(not(any(unix, windows)))]
+        false
+    }
+
+    #[test]
+    fn lua_files_under_follows_linked_folders_once() {
+        let root = std::env::temp_dir().join(format!("qbx-linked-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // `mklink` takes no forward slashes.
+        let at = |relative: &str| relative.split('/').fold(root.clone(), |path, part| path.join(part));
+        for file in ["elsewhere/racing/client.lua", "server/resources/[core]/core.lua", "server/cache/stray.lua"] {
+            std::fs::create_dir_all(at(file).parent().unwrap()).unwrap();
+            std::fs::write(at(file), "").unwrap();
+        }
+        let resources = at("server/resources");
+        let links = [
+            ("elsewhere", "server/resources/[symlink]"),
+            ("elsewhere", "server/resources/[again]"),
+            ("server/resources/[core]", "server/resources/[core-link]"),
+            ("server/resources", "server/resources/[core]/loop"),
+            ("server", "server/resources/[up]"),
+        ];
+        if !links.iter().all(|(target, link)| link_folder(&at(target), &at(link))) {
+            eprintln!("skipped: folder links cannot be created here");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let files = lua_files_under(&resources, &Config::default());
+        let relative: Vec<String> = files.iter().map(|file| relative_slash_path(&resources, file)).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        // The folder two links lead to is read through the first, and links into the tree, or to a
+        // folder above it, are left out.
+        assert_eq!(relative, ["[again]/racing/client.lua", "[core]/core.lua"]);
     }
 
     #[test]

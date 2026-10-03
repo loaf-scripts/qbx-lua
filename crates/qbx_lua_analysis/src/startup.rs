@@ -5,7 +5,7 @@ use qbx_lua_syntax::SmolStr;
 use rustc_hash::{FxHashMap, FxHashSet};
 use walkdir::WalkDir;
 
-use crate::project::manifest_in;
+use crate::project::{manifest_in, walks_into};
 
 /// Resources the server artifact ships in `citizen/system_resources`. They are installed on
 /// every server without appearing under `resources`, so a recipe may even delete its own copy.
@@ -36,9 +36,12 @@ fn provided_names(manifest_text: &str) -> impl Iterator<Item = SmolStr> + '_ {
 fn installed_resources(resources_dir: &Path) -> (FxHashSet<SmolStr>, FxHashMap<SmolStr, Vec<SmolStr>>) {
     let mut names: FxHashSet<SmolStr> = SYSTEM_RESOURCES.iter().map(SmolStr::new).collect();
     let mut provided: FxHashMap<SmolStr, Vec<SmolStr>> = FxHashMap::default();
-    let mut walker = WalkDir::new(resources_dir).max_depth(7).into_iter().filter_entry(|entry| {
+    // FiveM starts resources from symlinked folders too.
+    let root = resources_dir.canonicalize().ok();
+    let mut walker = WalkDir::new(resources_dir).max_depth(7).follow_links(true).into_iter().filter_entry(|entry| {
         let name = entry.file_name().to_string_lossy();
-        entry.depth() == 0 || !(name == "node_modules" || name.starts_with('.'))
+        let hidden = entry.depth() > 0 && (name == "node_modules" || name.starts_with('.'));
+        !hidden && walks_into(root.as_deref(), entry)
     });
     while let Some(entry) = walker.next() {
         let Ok(entry) = entry else { continue };
@@ -84,9 +87,13 @@ fn find_server_cfg(resource_root: &Path) -> Option<PathBuf> {
 
 fn resources_in_category(resources_dir: &Path, category: &str) -> Vec<SmolStr> {
     let mut names = Vec::new();
-    let folders = WalkDir::new(resources_dir).max_depth(4).into_iter().flatten();
+    let root = resources_dir.canonicalize().ok();
+    let folders = WalkDir::new(resources_dir).max_depth(4).follow_links(true).into_iter();
+    let folders = folders.filter_entry(|entry| walks_into(root.as_deref(), entry)).flatten();
     for folder in folders.filter(|e| e.file_type().is_dir() && e.file_name().to_string_lossy() == category) {
-        let mut entries = WalkDir::new(folder.path()).max_depth(5).into_iter();
+        let walked = folder.path().canonicalize().ok();
+        let entries = WalkDir::new(folder.path()).max_depth(5).follow_links(true).into_iter();
+        let mut entries = entries.filter_entry(|entry| walks_into(walked.as_deref(), entry));
         while let Some(entry) = entries.next() {
             let Ok(entry) = entry else { continue };
             if entry.file_type().is_dir() && manifest_in(entry.path()).is_some() {
@@ -117,10 +124,13 @@ impl StartOrder {
         order.installed.extend(SYSTEM_RESOURCES.iter().map(SmolStr::new));
         let mut resources = Vec::new();
         let mut partial = false;
-        let mut walker = WalkDir::new(&resources_dir).max_depth(7).into_iter().filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            entry.depth() == 0 || !(name == "node_modules" || name.starts_with('.'))
-        });
+        let root = resources_dir.canonicalize().ok();
+        let mut walker =
+            WalkDir::new(&resources_dir).max_depth(7).follow_links(true).into_iter().filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                let hidden = entry.depth() > 0 && (name == "node_modules" || name.starts_with('.'));
+                !hidden && walks_into(root.as_deref(), entry)
+            });
         while *remaining_entries > 0 {
             let Some(entry) = walker.next() else { break };
             *remaining_entries -= 1;

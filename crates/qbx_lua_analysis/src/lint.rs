@@ -12,8 +12,8 @@ use crate::crossref::CrossRefs;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::locale::{locale_usage, LocaleFile};
 use crate::project::{
-    find_manifest_dir, is_manifest_file, lua_files_under, read_source, relative_slash_path, ParsedFile, Resource,
-    ResourceLocator,
+    find_manifest_dir, is_manifest_file, lua_files_under, read_source, relative_slash_path, walks_into, ParsedFile,
+    Resource, ResourceLocator,
 };
 use crate::rules;
 use qbx_lua_syntax::parse;
@@ -241,11 +241,14 @@ fn lint_resource(
 }
 
 pub fn all_files(root: &Path) -> Vec<String> {
+    let walked = root.canonicalize().ok();
     WalkDir::new(root)
+        .follow_links(true)
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
-            e.depth() == 0 || !(name == "node_modules" || name == ".git")
+            let skipped = e.depth() > 0 && (name == "node_modules" || name == ".git");
+            !skipped && walks_into(walked.as_deref(), e)
         })
         .flatten()
         .filter(|e| e.file_type().is_file())
