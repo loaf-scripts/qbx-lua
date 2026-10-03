@@ -15,7 +15,7 @@ use crate::callback_wrappers::{self, Wrapper};
 use crate::index::{instance_class, instance_owner, ClassDef, FileId, Index, SymbolKind};
 use crate::locate::statement_at;
 use crate::luacats::{applies_on, own_type, parse_doc_lines, CastEntry, DocGroup, DocOperator};
-use crate::narrow::{Cast, Casts, Fact, Flow, Origin, Version, DECLARATION};
+use crate::narrow::{Casts, Fact, Flow, Origin, Version, DECLARATION};
 use crate::types::{CallbackRole, FunType, Param, Shape, ShapeField, Type, TypeName, TypeParser};
 
 const MAX_DEPTH: u32 = 24;
@@ -1244,7 +1244,7 @@ impl<'a> Infer<'a> {
             // takes from it.
             Origin::Cast(cast) => {
                 let Some(cast) = self.ctx.casts().get(cast) else { return Type::Unknown };
-                let held = match replaces(cast) {
+                let held = match cast.replaces() {
                     true => Type::Unknown,
                     false => self.local_type_at(id, cast.span.start),
                 };
@@ -2381,18 +2381,18 @@ impl<'a> Infer<'a> {
         match op {
             BinOp::Concat => operator("concat").unwrap_or(Type::String),
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Type::Boolean,
-            // `a and b` is `b` whenever `a` holds a value, so an unknown `b` leaves it unknown.
-            BinOp::And => match self.expr(rhs).widen() {
+            // `a and b` is `b` whenever `a` holds a value, and the `nil` or `false` of `a` otherwise,
+            // so `cond and 'a'` is a `string|false`. An unknown `b` leaves it unknown.
+            BinOp::And => match self.expr(rhs) {
                 rhs if rhs.is_unknown() => Type::Unknown,
-                rhs => Type::union([rhs, Type::BooleanLit(false)]).widen(),
+                rhs => booleans_joined(Type::union(
+                    [widened_values(&rhs)].into_iter().chain(self.falsy_parts(&self.expr(lhs))),
+                )),
             },
+            // `a or b` is what `a` holds when it holds a value, and `b` otherwise, so
+            // `cond and 'a' or 'b'` is a `string`.
             BinOp::Or => {
-                let left = self.expr(lhs).without_nil().widen();
-                let left = match left {
-                    Type::Boolean => Type::Unknown,
-                    other => other,
-                };
-                Type::union([left, self.expr(rhs).widen()])
+                booleans_joined(Type::union([self.truthy_part(&self.expr(lhs)), widened_values(&self.expr(rhs))]))
             }
             BinOp::BAnd | BinOp::BOr | BinOp::BXor | BinOp::Shl | BinOp::Shr | BinOp::IDiv => {
                 let name = match op {
@@ -2433,6 +2433,48 @@ impl<'a> Infer<'a> {
                 }
             }
         }
+    }
+
+    /// The values of `ty` that are false, which `a and b` gives for an `a` of that type: its `nil`
+    /// and its `false`, also that of a `boolean`. A type that tells nothing gives none.
+    fn falsy_parts(&self, ty: &Type) -> Vec<Type> {
+        let expanded = self.expand_aliases(ty, 0);
+        let parts = match &expanded {
+            Type::Union(parts) => parts.as_slice(),
+            one => std::slice::from_ref(one),
+        };
+        let mut out = Vec::new();
+        for part in parts {
+            let falsy = match part {
+                Type::Nil => Type::Nil,
+                Type::Boolean | Type::BooleanLit(false) => Type::BooleanLit(false),
+                _ => continue,
+            };
+            if !out.contains(&falsy) {
+                out.push(falsy);
+            }
+        }
+        out
+    }
+
+    /// What `ty` holds when it holds a true value, which `a or b` gives for an `a` of that type: all
+    /// of it but `nil` and `false`, and `true` of a `boolean`.
+    fn truthy_part(&self, ty: &Type) -> Type {
+        let expanded = self.expand_aliases(ty, 0);
+        let parts = match &expanded {
+            Type::Union(parts) => parts.as_slice(),
+            one => std::slice::from_ref(one),
+        };
+        // A type with no false value, as an alias of one, is shown as it is written.
+        if !parts.iter().any(|part| matches!(part, Type::Nil | Type::Boolean | Type::BooleanLit(false))) {
+            return widened_values(ty);
+        }
+        let truthy = parts.iter().filter_map(|part| match part {
+            Type::Nil | Type::BooleanLit(false) => None,
+            Type::Boolean => Some(Type::BooleanLit(true)),
+            other => Some(widened_values(other)),
+        });
+        expanded.rebuilt(truthy)
     }
 
     /// The callee's function type, taking `base:method` lookups into account.
@@ -3976,7 +4018,7 @@ pub fn distinct_bases(given: impl Iterator<Item = Option<Type>>) -> (Rc<[Type]>,
 
 /// The union of the types of the values a local may hold. A literal gives way to its kind when
 /// another value is of that kind, so `"active"|"busy"` and a `string` assigned later make a `string`,
-/// and an `integer` gives way to a `number`.
+/// an `integer` gives way to a `number`, and a `true` and a `false` make a `boolean`.
 fn merge_versions(types: Vec<Type>) -> Type {
     if types.len() < 2 {
         return types.into_iter().next().unwrap_or_default();
@@ -4002,12 +4044,32 @@ fn merge_versions(types: Vec<Type>) -> Type {
         };
         ty.rebuilt(all[index].iter().filter(|part| !absorbed(part)).cloned())
     });
-    Type::union(merged)
+    booleans_joined(Type::union(merged))
 }
 
-/// Whether a cast replaces the type of its local, rather than adding or taking out types.
-fn replaces(cast: &Cast) -> bool {
-    cast.entries.iter().any(|(entry, _)| matches!(entry, CastEntry::Replace(_)))
+/// `ty` with the strings and numbers it lists widened to their kinds, as a value written out is
+/// shown, while `true` and `false` stay: they tell which way an `and` or `or` goes.
+fn widened_values(ty: &Type) -> Type {
+    match ty {
+        Type::Union(parts) => ty.rebuilt(parts.iter().map(widened_values)),
+        Type::BooleanLit(_) => ty.clone(),
+        other => other.widen(),
+    }
+}
+
+/// `ty` with a `true` and a `false` it lists, or either beside a `boolean`, joined into a `boolean`.
+fn booleans_joined(ty: Type) -> Type {
+    let Type::Union(parts) = &ty else { return ty };
+    let both = parts.contains(&Type::BooleanLit(true)) && parts.contains(&Type::BooleanLit(false));
+    let literal = parts.iter().any(|part| matches!(part, Type::BooleanLit(_)));
+    if !(both || (literal && parts.contains(&Type::Boolean))) {
+        return ty;
+    }
+    let joined = parts.iter().map(|part| match part {
+        Type::BooleanLit(_) => Type::Boolean,
+        other => other.clone(),
+    });
+    ty.rebuilt(joined)
 }
 
 /// The `---@type` that `doc` gives the name at `index` of the `local` statement below it. A local

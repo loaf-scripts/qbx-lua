@@ -2016,6 +2016,56 @@ print(state, copy, level, label, changed, mode)
 }
 
 #[test]
+fn and_and_or_give_what_each_side_can_be() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Thing
+---@field name string
+
+---@return Probe.Thing
+local function make() end
+---@type boolean
+local cond
+---@type Probe.Thing?
+local optional
+local thing = make()
+local untyped = {}
+local picked = cond and 'a' or 'b'
+local mixed = cond and 1 or 'x'
+local guarded = optional and optional.name
+local always = thing and thing.name
+local partial = cond and 'a'
+local skipped = cond and nil or 5
+local kept = cond and optional or nil
+local flag = cond and true or false
+local compared = cond and #untyped == 1
+local fallback = cond or 'x'
+local unknown = untyped and untyped.missing
+print(picked, mixed, guarded, always, partial, skipped, kept, flag, compared, fallback, unknown)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("picked =", "local picked: string\n"),
+        ("mixed =", "local mixed: integer|string\n"),
+        // `a and b` is the `nil` or `false` of `a`, or `b`...
+        ("guarded =", "local guarded: string?\n"),
+        ("always =", "local always: string\n"),
+        ("partial =", "local partial: string|false\n"),
+        // ...and `a or b` what `a` holds when it holds a value, or `b`.
+        ("skipped =", "local skipped: integer\n"),
+        ("kept =", "local kept: Probe.Thing? {"),
+        ("flag =", "local flag: boolean\n"),
+        ("compared =", "local compared: boolean\n"),
+        ("fallback =", "local fallback: true|string\n"),
+        ("unknown =", "local unknown: unknown\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn guards_narrow_the_locals_they_test() {
     let mut client = Client::start(fixture_root());
     let text = "\
@@ -3336,10 +3386,10 @@ print(skipped) -- after the label
         ("items) -- added", "items: string[]|true|number[]\n"),
         // The `number[]` that the branch before adds is one of the values after it.
         ("items) -- removed", "items: string[]|number[]\n"),
-        ("items) -- outside guards", "items: string[]|number[]|true|false|integer\n"),
+        ("items) -- outside guards", "items: string[]|number[]|boolean|integer\n"),
         ("skipped) -- before the label", "skipped: string[]|true|number\n"),
         // The `goto` reaches the label without the guard or the cast.
-        ("skipped) -- after the label", "skipped: string[]|true|number|false|nil\n"),
+        ("skipped) -- after the label", "skipped: string[]|boolean|number|nil\n"),
     ] {
         let (l, c) = pos(text, needle, 0);
         let hover = client.hover_text(CLIENT, l, c);
