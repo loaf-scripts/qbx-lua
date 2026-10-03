@@ -313,11 +313,12 @@ impl<'a, 'b> Classes<'a, 'b> {
     }
 
     /// The fields of `member` that a table setting the names `given` leaves out although their
-    /// type does not allow `nil`.
+    /// type does not allow `nil`; of a class, those that `required_fields` lists.
     fn missing(&self, member: &Member, given: &[&str]) -> Vec<SmolStr> {
         let fields: Vec<(SmolStr, Type, FileId)> = match member {
             Member::Class(class, args, from) => {
-                self.fields(class, args, *from).into_iter().map(|field| (field.name, field.ty, field.file)).collect()
+                let fields = self.required_fields(class, args, *from).into_iter();
+                fields.map(|field| (field.name, field.ty, field.file)).collect()
             }
             Member::Shape(shape, from) => {
                 let required = shape.fields.iter().filter(|field| !field.optional);
@@ -355,17 +356,7 @@ impl<'a, 'b> Classes<'a, 'b> {
             return;
         }
         let defs = self.class_defs(class, from);
-        let bindings = class_bindings(&defs, args);
-        for (file, def) in &defs {
-            let sides = def.field_sides.iter().copied().chain(std::iter::repeat(None));
-            for (i, (field, side)) in def.fields.iter().zip(sides).enumerate() {
-                if applies_on(side, self.infer.side()) && !out.iter().any(|seen| seen.name == field.name) {
-                    let (name, ty, doc) = (field.name.clone(), substitute(&field.ty, &bindings), field.doc.clone());
-                    let values = def.field_values.get(i).cloned().unwrap_or_default();
-                    out.push(ClassField { name, ty, doc, values, file: *file });
-                }
-            }
-        }
+        self.add_own_fields(&defs, args, out);
         for (file, parent) in bound_parents(&defs, args) {
             match parent {
                 Type::Named(parent, args) => self.collect_fields(&parent, &args, file, out, visited, depth + 1),
@@ -380,6 +371,35 @@ impl<'a, 'b> Classes<'a, 'b> {
                 _ => {}
             }
         }
+    }
+
+    /// Adds the `@field`s that `defs`, the declarations of a class given the type arguments `args`,
+    /// declare for this side to `out`, leaving out the names it already has.
+    fn add_own_fields(&self, defs: &[(FileId, &ClassDef)], args: &[Type], out: &mut Vec<ClassField>) {
+        let bindings = class_bindings(defs, args);
+        for (file, def) in defs {
+            let sides = def.field_sides.iter().copied().chain(std::iter::repeat(None));
+            for (i, (field, side)) in def.fields.iter().zip(sides).enumerate() {
+                if applies_on(side, self.infer.side()) && !out.iter().any(|seen| seen.name == field.name) {
+                    let (name, ty, doc) = (field.name.clone(), substitute(&field.ty, &bindings), field.doc.clone());
+                    let values = def.field_values.get(i).cloned().unwrap_or_default();
+                    out.push(ClassField { name, ty, doc, values, file: *file });
+                }
+            }
+        }
+    }
+
+    /// The fields that a table of `class`, given the type arguments `args`, has to set unless their
+    /// type allows `nil`: its `fields`, or when one of its declarations says `(partial)`, only those
+    /// that its declarations declare themselves, without those of its parents, as in LuaLS.
+    pub fn required_fields(&self, class: &str, args: &[Type], from: FileId) -> Vec<ClassField> {
+        let defs = self.class_defs(class, from);
+        if !defs.iter().any(|(_, def)| def.partial) {
+            return self.fields(class, args, from);
+        }
+        let mut out = Vec::new();
+        self.add_own_fields(&defs, args, &mut out);
+        out
     }
 
     /// Whether the class `class`, as `from` sees it, is `ancestor` or extends it through its parents.
@@ -974,8 +994,9 @@ impl<'c> Visitor<'c> for Innermost {
 
 /// Each table constructor typed as a class or a shape that leaves out required fields, with the
 /// message naming them. Fields that a class keeps from the code there, like `---@field private`,
-/// are required too, as in LuaLS. A table typed as a union of classes and shapes has to set the
-/// required fields of one of them, and its message has a line for each, as LuaLS's does.
+/// are required too, as in LuaLS, and a class marked `(partial)` requires only the fields it
+/// declares itself. A table typed as a union of classes and shapes has to set the required fields
+/// of one of them, and its message has a line for each, as LuaLS's does.
 pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
     required_tables(infer, chunk)

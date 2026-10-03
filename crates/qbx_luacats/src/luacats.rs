@@ -87,6 +87,8 @@ pub struct DocClass {
     /// `Some(true)` for `@class (strict) Name` or LuaLS's `(exact)`, `Some(false)` for `(loose)`, and
     /// `None` when the configured default decides.
     pub strict: Option<bool>,
+    /// `@class (partial) Name`, whose tables need only the fields the class itself declares.
+    pub partial: bool,
 }
 
 /// `---@operator add(Vec): Vec`: what an operation on a value of the class gives, for an operand of
@@ -424,6 +426,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                     line: index,
                     side: side_attribute(attributes),
                     strict: strict_attribute(attributes),
+                    partial: attributes.split(',').any(|attribute| attribute.trim() == "partial"),
                     ..DocClass::default()
                 });
             }
@@ -1254,6 +1257,9 @@ mod tests {
         assert_eq!(doc.classes[0].name, "Player");
         assert_eq!(doc.classes[0].parents, ["Entity"]);
         assert_eq!(doc.classes[0].strict, None);
+        assert!(doc.classes[0].partial);
+        assert!(parse("---@class (server, partial) Test").classes[0].partial);
+        assert!(!parse("---@class Partial : Test").classes[0].partial);
         let strict = |text: &str| parse(text).classes[0].strict;
         assert_eq!(strict("---@class (strict) Test"), Some(true));
         assert_eq!(strict("---@class (server, exact) Test"), Some(true));

@@ -4089,6 +4089,97 @@ local account = { name = 'Ann' }
 }
 
 #[test]
+fn missing_fields_of_partial_classes_leave_out_inherited_fields() {
+    let mut client = Client::start(fixture_root());
+    const SHARED: &str = "myresource/shared/config.lua";
+    let shared = "\
+---@class Test.Anim
+---@field Dict string
+---@field Player string
+
+---@class (partial) Test.CutAnim : Test.Anim
+---@field StartPhase number
+
+---@class Test.Anims
+---@field Cut Test.CutAnim
+
+---@class (partial) Test.Grandchild : Test.CutAnim
+---@field Extra string
+
+---@class Test.Child : Test.CutAnim
+
+---@class Test.Merged : Test.Anim
+---@field First string
+
+---@class (partial) Test.Merged
+---@field Second string
+
+---@class (partial) Test.Narrowed : Test.Anim
+---@field Dict string
+
+---@class (partial) Test.Empty : Test.Anim
+
+---@class (partial) Test.Holder<T> : Test.Anim
+---@field value T
+";
+    let text = "\
+---@type Test.Anims
+local nested = { Cut = { Dict = 'x', StartPhase = 1 } }
+
+---@type Test.CutAnim
+local direct = { Dict = 'x' }
+
+---@type Test.Grandchild
+local grandchild = {}
+
+---@type Test.Child
+local child = {}
+
+---@type Test.Merged
+local merged = {}
+
+---@type Test.Narrowed
+local narrowed = {}
+
+---@type Test.Empty
+local empty = {}
+
+---@type Test.Holder<string?>
+local optional = {}
+
+---@type Test.Holder<string>
+local holder = {}
+";
+    client.open_with(SHARED, shared);
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |at: &str, message: &str| ("missing-fields".to_string(), line(at), message.to_string());
+    // Only a class that is itself partial leaves out the fields of its parents.
+    assert_eq!(
+        findings(&mut client, CLIENT, &["missing-fields"]),
+        [
+            finding("local direct", "Missing required fields in type `Test.CutAnim`: `StartPhase`"),
+            finding("local grandchild", "Missing required fields in type `Test.Grandchild`: `Extra`"),
+            finding("local child", "Missing required fields in type `Test.Child`: `StartPhase`, `Dict`, `Player`"),
+            finding("local merged", "Missing required fields in type `Test.Merged`: `First`, `Second`"),
+            finding("local narrowed", "Missing required fields in type `Test.Narrowed`: `Dict`"),
+            finding("local holder", "Missing required fields in type `Test.Holder`: `value`"),
+        ]
+    );
+
+    client.change(SHARED, 2, &shared.replace("(partial) Test.CutAnim", "Test.CutAnim"));
+    let found = findings(&mut client, CLIENT, &["missing-fields"]);
+    assert_eq!(
+        found[..2],
+        [
+            finding("local nested", "Missing required fields in type `Test.CutAnim`: `Player`"),
+            finding("local direct", "Missing required fields in type `Test.CutAnim`: `StartPhase`, `Player`"),
+        ],
+        "a class that is no longer partial asks for the fields of its parents again"
+    );
+}
+
+#[test]
 fn a_type_below_the_class_types_the_table_as_a_value_of_it() {
     let mut client = Client::start(fixture_root());
     // LuaLS binds a `---@type` that follows the `---@class` to the statement, and the class to

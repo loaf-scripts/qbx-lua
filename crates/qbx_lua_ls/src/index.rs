@@ -92,7 +92,8 @@ fn same_class(a: &ClassDef, b: &ClassDef) -> bool {
         let operators = class.operators.iter().flat_map(|operator| operator.operand.iter().chain([&operator.result]));
         class.fields.iter().map(|field| &field.ty).chain(&class.parent_types).chain(indices).chain(operators)
     }
-    (a.generics == b.generics && a.parent_types == b.parent_types && a.side == b.side && a.strict == b.strict)
+    (a.generics == b.generics && a.parent_types == b.parent_types && a.side == b.side)
+        && (a.strict == b.strict && a.partial == b.partial)
         && (fields(a) == fields(b) && a.field_sides == b.field_sides && a.field_visibility == b.field_visibility)
         && (indices(&a.indices) == indices(&b.indices) && indices(&a.literal_fields) == indices(&b.literal_fields))
         && (a.call == b.call && a.operators == b.operators)
@@ -229,6 +230,8 @@ pub struct ClassDef {
     /// `Some(true)` for `@class (strict) Name` or `(exact)`, `Some(false)` for `(loose)`, and `None`
     /// when `strict_classes` in qbxlint.toml decides.
     pub strict: Option<bool>,
+    /// `@class (partial) Name`, whose tables need only the fields the class itself declares.
+    pub partial: bool,
 }
 
 impl ClassDef {

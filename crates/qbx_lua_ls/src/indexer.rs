@@ -275,6 +275,7 @@ impl<'a> Indexer<'a> {
                 range,
                 side: class.side,
                 strict: class.strict,
+                partial: class.partial,
             });
         }
         for alias in doc.aliases {
