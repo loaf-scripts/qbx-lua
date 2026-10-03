@@ -339,10 +339,11 @@ impl<'a, 'b> Classes<'a, 'b> {
 
     /// The fields of `class`, given the type arguments `args`, and of its parents that are keyed by
     /// an integer or boolean literal, like `---@field [1] number`, with their values and the files
-    /// that declare them. The first declaration of a key wins, as with named fields.
+    /// that declare them. The first declaration of a key wins, as with named fields, and a class
+    /// that several parents share is read once.
     fn literal_fields(&self, class: &str, args: &[Type], from: FileId) -> Vec<(Type, Type, FileId)> {
         let mut out = Vec::new();
-        self.collect_literal_fields(class, args, from, &mut out, 0);
+        self.collect_literal_fields(class, args, from, &mut out, &mut FxHashSet::default(), 0);
         out
     }
 
@@ -352,9 +353,10 @@ impl<'a, 'b> Classes<'a, 'b> {
         args: &[Type],
         from: FileId,
         out: &mut Vec<(Type, Type, FileId)>,
+        visited: &mut FxHashSet<SmolStr>,
         depth: u32,
     ) {
-        if depth > MAX_DEPTH {
+        if depth > MAX_DEPTH || !visited.insert(SmolStr::new(class)) {
             return;
         }
         let defs = self.class_defs(class, from);
@@ -369,7 +371,7 @@ impl<'a, 'b> Classes<'a, 'b> {
         for (file, def) in &defs {
             for parent in &def.parent_types {
                 if let Type::Named(parent, args) = substitute(parent, &bindings) {
-                    self.collect_literal_fields(&parent, &args, *file, out, depth + 1);
+                    self.collect_literal_fields(&parent, &args, *file, out, visited, depth + 1);
                 }
             }
         }
@@ -387,7 +389,7 @@ impl<'a, 'b> Classes<'a, 'b> {
         let named = match key {
             Key::Name(name) => {
                 self.fields(class, &[], from).iter().any(|field| field.name == *name)
-                    || self.members_declare(class, from, name, 0)
+                    || self.members_declare(class, from, name, &mut FxHashSet::default(), 0)
             }
             Key::Typed(ty) => self.kinds(ty, self.file(), 0).is_none_or(|kinds| kinds & kind::STRING != 0),
         };
@@ -399,35 +401,55 @@ impl<'a, 'b> Classes<'a, 'b> {
         };
         named
             || literal
-            || self.index_for(class, &[], from, &key.ty(), 0).is_some()
-            || self.has_open_parent(class, from, 0)
+            || self.index_for(class, &[], from, &key.ty(), &mut FxHashSet::default(), 0).is_some()
+            || self.has_open_parent(class, from, &mut FxHashSet::default(), 0)
     }
 
     /// Whether the table that the `---@class` annotation of `class` or a parent declares sets `name`.
-    fn members_declare(&self, class: &str, from: FileId, name: &str, depth: u32) -> bool {
-        if depth > MAX_DEPTH {
+    /// A class that several parents share is read once.
+    fn members_declare(
+        &self,
+        class: &str,
+        from: FileId,
+        name: &str,
+        visited: &mut FxHashSet<SmolStr>,
+        depth: u32,
+    ) -> bool {
+        if depth > MAX_DEPTH || !visited.insert(SmolStr::new(class)) {
             return false;
         }
-        let parents_declare = |(file, def): &(FileId, &ClassDef)| {
-            def.parents.iter().any(|parent| self.members_declare(parent, *file, name, depth + 1))
-        };
-        self.infer.index.declared_members_of(class, self.file()).iter().any(|member| member.name == name)
-            || self.class_defs(class, from).iter().any(parents_declare)
+        if self.infer.index.declared_members_of(class, self.file()).iter().any(|member| member.name == name) {
+            return true;
+        }
+        let defs = self.class_defs(class, from);
+        let mut parents = defs.iter().flat_map(|(file, def)| def.parents.iter().map(move |parent| (parent, *file)));
+        parents.any(|(parent, file)| self.members_declare(parent, file, name, visited, depth + 1))
     }
 
     /// Whether `class` or one of its ancestors names a parent that is neither a class nor a table
-    /// type with fields or indices, such as a plain `table`.
-    fn has_open_parent(&self, class: &str, from: FileId, depth: u32) -> bool {
+    /// type with fields or indices, such as a plain `table`. A class that several parents share is
+    /// read once, so parents that name each other are no open parent.
+    fn has_open_parent(&self, class: &str, from: FileId, visited: &mut FxHashSet<SmolStr>, depth: u32) -> bool {
+        if !visited.insert(SmolStr::new(class)) {
+            return false;
+        }
         let defs = self.class_defs(class, from);
-        let is_open = |parent: &Type, file: FileId| match parent {
-            Type::Named(parent, _) => self.has_open_parent(parent, file, depth + 1),
-            Type::Shape(shape) => shape.fields.is_empty() && shape.array.is_none() && shape.indices.is_empty(),
-            Type::Map(..) | Type::Array(_) => false,
-            _ => true,
-        };
-        defs.is_empty()
-            || depth > MAX_DEPTH
-            || defs.iter().any(|(file, def)| def.parent_types.iter().any(|parent| is_open(parent, *file)))
+        if defs.is_empty() || depth > MAX_DEPTH {
+            return true;
+        }
+        let parents = defs.iter().flat_map(|(file, def)| def.parent_types.iter().map(move |parent| (parent, *file)));
+        for (parent, file) in parents {
+            let open = match parent {
+                Type::Named(parent, _) => self.has_open_parent(parent, file, visited, depth + 1),
+                Type::Shape(shape) => shape.fields.is_empty() && shape.array.is_none() && shape.indices.is_empty(),
+                Type::Map(..) | Type::Array(_) => false,
+                _ => true,
+            };
+            if open {
+                return true;
+            }
+        }
+        false
     }
 
     /// The type that `key` of a `class` table holds, given the type arguments `args` of the class,
@@ -445,14 +467,23 @@ impl<'a, 'b> Classes<'a, 'b> {
             }
             Key::Typed(_) => None,
         };
-        field.or_else(|| self.index_for(class, args, from, &key.ty(), 0))
+        field.or_else(|| self.index_for(class, args, from, &key.ty(), &mut FxHashSet::default(), 0))
     }
 
     /// The value type of the first index of `class`, given the type arguments `args`, or of a parent
     /// that takes keys of type `key`, inferred in this file, with the file that declares it. A table
-    /// type named as a parent, like `{ [number]: T }` or `table<string, integer>`, counts as one.
-    fn index_for(&self, class: &str, args: &[Type], from: FileId, key: &Type, depth: u32) -> Option<(Type, FileId)> {
-        if depth > MAX_DEPTH {
+    /// type named as a parent, like `{ [number]: T }` or `table<string, integer>`, counts as one. A
+    /// class that several parents share is read once.
+    fn index_for(
+        &self,
+        class: &str,
+        args: &[Type],
+        from: FileId,
+        key: &Type,
+        visited: &mut FxHashSet<SmolStr>,
+        depth: u32,
+    ) -> Option<(Type, FileId)> {
+        if depth > MAX_DEPTH || !visited.insert(SmolStr::new(class)) {
             return None;
         }
         let defs = self.class_defs(class, from);
@@ -463,11 +494,12 @@ impl<'a, 'b> Classes<'a, 'b> {
                 indices.find(|(index_key, _)| self.takes(&substitute(index_key, &bindings), *file, key))?;
             Some((substitute(value, &bindings), *file))
         });
-        own.or_else(|| {
-            bound_parents(&defs, args).into_iter().find_map(|(file, parent)| match parent {
-                Type::Named(parent, args) => self.index_for(&parent, &args, file, key, depth + 1),
-                table => self.table_index_for(&table, file, key),
-            })
+        if own.is_some() {
+            return own;
+        }
+        bound_parents(&defs, args).into_iter().find_map(|(file, parent)| match parent {
+            Type::Named(parent, args) => self.index_for(&parent, &args, file, key, visited, depth + 1),
+            table => self.table_index_for(&table, file, key),
         })
     }
 

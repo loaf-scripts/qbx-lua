@@ -3269,6 +3269,32 @@ print(secret, another)
 }
 
 #[test]
+fn strict_classes_whose_parents_name_each_other_check_their_keys() {
+    let mut client = Client::start(fixture_root());
+    // Seven classes that each name the other six as parents: every walk over the parents reads each
+    // class once, and a parent that leads back to a class leaves no key open.
+    let mut text = String::new();
+    for i in 1..=7 {
+        let parents: Vec<String> = (1..=7).filter(|j| *j != i).map(|j| format!("Test.Ring{j}")).collect();
+        text.push_str(&format!("---@class (strict) Test.Ring{i} : {}\n---@field f{i} integer\n\n", parents.join(", ")));
+    }
+    text.push_str("---@type Test.Ring1\nlocal ring = { f1 = 1, f7 = 7, other = true }\nring.f2 = 2\nring.extra = 1\n");
+    text.push_str("print(ring.f5, ring.missing, ring[1])\n");
+    client.open_with(CLIENT, &text);
+    let line = |needle: &str| pos(&text, needle, 0).0 as u64;
+    let message = |field: &str| format!("Field `{field}` is not declared in strict class `Test.Ring1`");
+    assert_eq!(
+        undeclared_fields(&mut client, CLIENT),
+        [
+            (line("other = true"), message("other")),
+            (line("ring.extra"), message("extra")),
+            (line("print(ring"), message("[1]")),
+            (line("print(ring"), message("missing")),
+        ]
+    );
+}
+
+#[test]
 fn strict_classes_setting_makes_the_workspace_classes_strict() {
     struct Fixture(PathBuf);
     impl Drop for Fixture {
