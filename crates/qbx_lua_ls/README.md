@@ -150,7 +150,8 @@ They apply to the branches of an `if` or `elseif`, failed ones to the conditions
 after them, to the code after an `if` whose other branches all end in `return`, `error(...)`,
 `break` or `goto`, to the body of a `while`, to the right side of `and` and `or`, and to the code
 after `assert(name)`. A guard narrows what a local holds there, also one that is
-[assigned again](#locals-that-are-assigned-again), while globals and fields are not narrowed.
+[assigned again](#locals-that-are-assigned-again), and the [fields](#fields) of locals, while
+globals are not narrowed.
 
 A comparison with a literal narrows the local to that literal: inside `if state == "busy" then`, a
 `"active"|"busy"|nil` and a `string` are both `"busy"`, and in the `else` branch the first is
@@ -171,10 +172,29 @@ A value of no known type takes the kind it is checked for, and so does one whose
 that kind, since such a check handles values the annotations leave out: inside
 `if type(count) == "string" then`, an `integer` is a `string`. `math.type(name)` tells an `integer`
 from a `float`, and `kind == "table"` after `local kind = type(name)` narrows like
-`type(name) == "table"`. Only the global `type` counts, also through a local that holds it, as
+`type(name) == "table"`, while `name` holds the value it held there and no other function assigns
+it. Only the global `type` counts, also through a local that holds it, as
 after `local type = type`, and not `table.type` of ox_lib. Where one of
 several checks held, as inside `if type(value) == "string" or type(value) == "number" then`, the
 local is of the kinds they let through.
+
+Guards that rule out every value a local is declared to hold guard code for values the annotations
+leave out, or code that never runs. There the local is what lua-language-server reads it as:
+
+```lua
+---@param entities number[]
+local function target(entities)
+    if type(entities) ~= "table" then
+        entities = { entities } -- entities is unknown, not a number[], so nothing is reported
+    end
+end
+```
+
+`type(name) ~= "table"` for a table, and `if name` for a value that is always `nil`, leave it
+`unknown`; `not count`, `count == nil` and the `else` of `count ~= nil` make a `number` `nil`; and a
+comparison with a literal of a kind the local never has makes it that kind, as `count == false`
+makes a `number` a `boolean`. After other comparisons with literals, as
+`action ~= "open" and action ~= "close"` for an `"open"|"close"`, it keeps its declared type.
 
 ### Locals that are assigned again
 
@@ -200,14 +220,67 @@ lua-language-server: after `local found` and `if ok then found = item end`, `fou
 local with a `---@type` or `@param` keeps the parts of that type the value may be, as the `string` of
 a `string?` for `"x"`, and all of it for a value of another kind, which `assign-type-mismatch`
 reports, or of no known type. Other locals keep the type of their declaration for such a value. A
-loop starts with what the code before it and its runs before leave, and a label with what the
+`---@type` above an assignment types the value it gives, as in lua-language-server, so a table
+given again to a local declared with a table outside any function is still that local's own table
+for the functions that run at other times. A loop starts with what the code before it and its runs before leave, and a label with what the
 `goto`s to it leave.
 
 Calls are taken to change no local, but a function runs any time after it is created. Inside it, a
 local declared outside it may hold what it held where the function was created, and also what the
-code after that and the other functions assign, with nothing known about those values. Where a
-function that assigns a local is created, the code around it may find that value from then on, as
-after `each(list, function(item) found = item end)`.
+code after that and the other functions assign, with nothing known about those values. Once a
+function that assigns a local is created, the code around it may find any value that a function
+gives the local, as after `each(list, function(item) found = item end)`. A function written as an
+argument of a runtime function that runs it later, as `SetTimeout`, `CreateThread`,
+`AddEventHandler`, `RegisterNetEvent`, `RegisterCommand`, `RegisterNUICallback`,
+`AddStateBagChangeHandler` and `exports` do, gives the locals around it nothing until a call
+yields.
+
+A call that yields lets that code run, as the event handlers of a script do while one of its threads
+waits. After one, a local that other code assigns may hold any value that code gives it again, so a
+guard before the call no longer tells about it:
+
+```lua
+local status = "pending"
+RegisterNetEvent("job:done", function() status = "done" end)
+
+CreateThread(function()
+    while status ~= "done" do -- not always true: the handler may run while the thread waits
+        Wait(0)
+    end
+end)
+```
+
+The calls that yield are those of `Wait`, `Citizen.Wait`, `Citizen.Await` and `coroutine.yield`,
+those of a function read as `await`, as `lib.callback.await` and `MySQL.query.await`, and those of
+the functions of the file that make such a call. Other functions that wait, such as `lib.progressBar`,
+are taken to change no local.
+
+### Fields
+
+A guard on a field of a local, as `self.target`, `data.job.name` or `data["job"]`, narrows it like a
+local, which lua-language-server does not, and an assignment to one gives it the part of its
+declared type that the value is, as `entry.length = entry.length or 1` leaves a `number` of a
+`number?`:
+
+```lua
+---@param data { job: Job? }
+local function show(data)
+    if data.job then
+        print(data.job.name) -- data.job is a Job
+    end
+end
+```
+
+Reading through a field tells that it holds a value too, so `data.job.grade` inside
+`if data.job.name then` reads from a `Job`. What a guard tells about a field holds until something
+may change it: an assignment to the local, or to a field of the same name of any table, as
+`other.job = nil` may set the same table through another name; a call that is given the local, a
+table the field is read through, a local copied from one of them or a table built with them, or an
+assignment to a key of one that is not known, as `reset(data)`, `data:reset()`, `reset(job)` after
+`local job = data.job`, `clearAll({ data })` or `data[key] = nil`; a call that yields; and a loop
+whose code may do any of these before it starts again. A function does not see what the guards
+around it tell about fields, as it runs later. Other calls are taken to change no field, and an
+assignment to a field still has to store a value of the type the field is declared with.
 
 ### Casts
 
@@ -221,25 +294,36 @@ local data = json.decode(payload)
 `---@cast name T` makes it a `T`, `+T` adds `T` to it, `-T` takes `T` out, `+?` and `-?` add and
 take out `nil`, and one line can list several, as in `---@cast value +?, -string`. Adding to a local
 whose type is unknown leaves a value that may still be anything else, as `string|unknown` for
-`+string`, as in lua-language-server. A cast holds to
-the end of the block of the code after it, including the functions defined there, and until the
-statement that assigns the local again. Unlike lua-language-server, a cast inside an `if` ends with
-its branch, except on the last line of the branch: there it holds after the `if`, as it does in
-lua-language-server, which is how code types what the branch leaves:
+`+string`, as in lua-language-server.
+
+A cast gives the local a value, as an assignment does, and the value goes where the code goes: it
+holds until the local is assigned again, a function created after it starts with it, and where the
+ways through an `if`, a loop or a label meet, it joins what the other ways leave:
 
 ```lua
-if type(translation) == "table" then
-    translation = translation[1]
-    ---@cast translation string
+---@return string|number
+local function get() end
+
+local value = get()
+if math.random() > 0.5 then
+    ---@cast value string
+    print(value) -- string
 end
-print(translation) -- string
+print(value) -- string|number: the way that skips the `if` leaves a number too
+
+do
+    ---@cast value number
+end
+print(value) -- number: a `do` block always runs
 ```
 
-On the last line of another block, such as the body of a function or a loop, a cast holds nowhere.
-Casts also apply to locals that are assigned again, and only to locals. A guard that
-took effect before a cast tells nothing about the type it gives, while one after it narrows that
-type. `+T` and `-T` change the type the guards around their line leave instead, so
-`---@cast items +number[]` inside `if items then` keeps out the `nil` of a `string[]?`.
+So a cast on the last line of a branch types what that branch leaves, and a branch that ends in
+`return` or `error(...)` leaves nothing. lua-language-server instead keeps a cast on the last line
+of an `if` branch after the `if`, whatever the other ways leave. Casts apply only to locals, also to
+those that are assigned again. A guard that took effect before a cast tells nothing about the type
+it gives, while one after it narrows that type. `+T` and `-T` change the type the guards around
+their line leave instead, so `---@cast items +number[]` inside `if items then` keeps out the `nil`
+of a `string[]?` there.
 `cast-type-mismatch` reports a cast to a type the declared type of the local does not take,
 such as `---@cast count string` for an `integer`; see the
 [reference](../../docs/reference.md#casts).

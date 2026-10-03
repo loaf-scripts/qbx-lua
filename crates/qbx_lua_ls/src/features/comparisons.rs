@@ -21,8 +21,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::class_tables::{Classes, Key};
 use super::unknown_types::has_param_line;
-use crate::infer::{assigned_value, Decl, Expected, Infer};
-use crate::narrow::Origin;
+use crate::infer::{assigned_value, distinct_bases, Bases, Decl, Expected, Infer, SetTypes};
+use crate::narrow::{Origin, DECLARATION};
 use crate::types::Type;
 
 const MAX_DEPTH: u32 = 16;
@@ -54,6 +54,9 @@ pub struct Declared<'a, 'b> {
     /// assigned again give them, by the local and the origin of the value.
     origins: RefCell<FxHashMap<(LocalId, u32), Type>>,
     in_progress: RefCell<FxHashSet<(LocalId, u32)>>,
+    /// The declared types of the values that each set of `Origin::Others` stands for, by the local
+    /// and the origin of the set.
+    others: RefCell<SetTypes>,
 }
 
 impl<'a, 'b> Declared<'a, 'b> {
@@ -66,6 +69,7 @@ impl<'a, 'b> Declared<'a, 'b> {
             declarations: RefCell::default(),
             origins: RefCell::default(),
             in_progress: RefCell::default(),
+            others: RefCell::default(),
         }
     }
 
@@ -95,9 +99,9 @@ impl<'a, 'b> Declared<'a, 'b> {
                 Some(Resolved::Local(id)) => self.local(id, name.span.start, depth),
                 _ => self.global(&name.text),
             },
-            ExprKind::Field { base, name, .. } => self.field(base, &name.text, depth),
+            ExprKind::Field { base, name, .. } => self.narrowed_field(expr, self.field(base, &name.text, depth)),
             ExprKind::Index { base, index, .. } => match index.as_string() {
-                Some(name) => self.field(base, name, depth),
+                Some(name) => self.narrowed_field(expr, self.field(base, name, depth)),
                 None => Type::Unknown,
             },
             ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
@@ -149,7 +153,7 @@ impl<'a, 'b> Declared<'a, 'b> {
     /// declared leaves the local `unknown`, unless a `---@cast` line types it. A `+T` entry adds to a
     /// type, so one that is not known stays so.
     fn local(&self, id: LocalId, offset: u32, depth: u32) -> Type {
-        self.infer.narrowed_with(id, offset, &|origin| self.origin(id, origin, depth), true)
+        self.infer.narrowed_with(id, offset, &|origin| self.bases(id, origin, depth), true)
     }
 
     /// The declared type of the local `id` where it is read at `offset`, as `of` gives it for a read
@@ -158,21 +162,26 @@ impl<'a, 'b> Declared<'a, 'b> {
         self.local(id, offset, 0)
     }
 
-    /// The type of `expr`, which reads the local `id`, as `of` gives it from only the values that may
-    /// reach the read whose origins `keep` picks.
-    pub fn of_values(&self, expr: &Expr, id: LocalId, keep: &dyn Fn(u32) -> bool) -> Type {
-        if let Some(cast) = self.cast(expr) {
-            return cast;
-        }
-        let origin = |origin| keep(origin).then(|| self.origin(id, origin, 0)).flatten();
-        self.infer.narrowed_with(id, expr.span.start, &origin, true)
+    /// Whether the guards where the local `id` is read at `offset` rule out `value` for each of the
+    /// values that may reach the read and be it.
+    pub fn rules_out(&self, id: LocalId, offset: u32, value: &Type) -> bool {
+        self.infer.rules_out_with(id, offset, value, &|origin| self.bases(id, origin, 0))
     }
 
-    /// Whether the guards where the local `id` is read at `offset` rule out `value` for each of the
-    /// values that may reach the read and be it, of those whose origins `keep` picks.
-    pub fn rules_out_of(&self, id: LocalId, offset: u32, value: &Type, keep: &dyn Fn(u32) -> bool) -> bool {
-        let origin = |origin| keep(origin).then(|| self.origin(id, origin, 0)).flatten();
-        self.infer.rules_out_with(id, offset, value, &origin)
+    /// The declared types of the values that `origin` gives the local `id`: that of its value, or for
+    /// a set of `Origin::Others` those of the values in it, each once. `None` while they are being
+    /// found.
+    fn bases(&self, id: LocalId, origin: u32, depth: u32) -> Option<Bases> {
+        let flow = self.infer.ctx.flow();
+        let Origin::Others(set) = flow.origin(origin) else { return self.origin(id, origin, depth).map(Bases::One) };
+        if let Some(types) = self.others.borrow().get(&(id, origin)) {
+            return Some(Bases::Set(types.clone()));
+        }
+        let (types, complete) = distinct_bases(flow.others(set).iter().map(|other| self.origin(id, *other, depth)));
+        if complete {
+            self.others.borrow_mut().insert((id, origin), types.clone());
+        }
+        (!types.is_empty()).then_some(Bases::Set(types))
     }
 
     /// The declared type of the value that `origin` gives the local `id`, or `None` while it is
@@ -180,7 +189,7 @@ impl<'a, 'b> Declared<'a, 'b> {
     /// of the local, or the `---@type` above it.
     fn origin(&self, id: LocalId, origin: u32, depth: u32) -> Option<Type> {
         let local = self.infer.ctx.resolution.local(id);
-        if !local.refs.iter().any(|r| r.write) {
+        if origin == DECLARATION && !local.refs.iter().any(|r| r.write) {
             return Some(match depth {
                 0 => self.declaration(id),
                 _ => self.local_declaration(id, depth),
@@ -207,10 +216,28 @@ impl<'a, 'b> Declared<'a, 'b> {
                 _ => Type::Unknown,
             },
             Origin::Function { .. } => self.infer.origin_type(id, origin).unwrap_or_default(),
+            Origin::Cast(cast) => self.cast_value(id, cast, depth),
+            // Read through `bases`, value by value.
+            Origin::Others(_) => Type::Unknown,
         };
         self.in_progress.borrow_mut().remove(&key);
         self.origins.borrow_mut().insert(key, ty.clone());
         Some(ty)
+    }
+
+    /// The type of the value that the `---@cast` line of number `cast` gives the local `id`: the
+    /// type it names, or the declared type the local has there with the types it adds or takes out.
+    /// Adding to a type that is not declared leaves one that is still not known.
+    fn cast_value(&self, id: LocalId, cast: u32, depth: u32) -> Type {
+        let Some(cast) = self.infer.ctx.casts().get(cast) else { return Type::Unknown };
+        let held = match cast.replaces() {
+            true => Type::Unknown,
+            false => match self.local(id, cast.span.start, depth + 1) {
+                Type::Unknown => return Type::Unknown,
+                held => held,
+            },
+        };
+        cast.entries.iter().fold(held, |ty, (entry, _)| self.infer.cast(ty, entry))
     }
 
     /// The declared type of value `index` of the assignment `stmt` to the local `id`, which gives it
@@ -359,6 +386,15 @@ impl<'a, 'b> Declared<'a, 'b> {
                 None => Type::Unknown,
             },
             _ => self.of(target),
+        }
+    }
+
+    /// `ty`, the declared type of the field that `expr` reads, without what the guards around the
+    /// read rule out. A field with no declared type stays unknown.
+    fn narrowed_field(&self, expr: &Expr, ty: Type) -> Type {
+        match ty.is_unknown() {
+            true => ty,
+            false => self.infer.field_narrowed(expr, ty),
         }
     }
 

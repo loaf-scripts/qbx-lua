@@ -4,13 +4,14 @@
 //! block, `if name then ... end` for the branch, and `name = name or 'none'` gives it a new one.
 //! `---@cast` lines change the type of a local from their line on.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use qbx_lua_analysis::scope::{FuncId, LocalId, Resolution, Resolved, MAIN_CHUNK};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
-use qbx_lua_syntax::{CommentKind, NumberValue, SmolStr, Span, Token, TokenKind};
-use rustc_hash::FxHashMap;
+use qbx_lua_syntax::{CommentKind, NumberValue, SmolStr, Span, Token};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::luacats::{parse_cast, CastEntry};
 use crate::types::Type;
@@ -65,6 +66,28 @@ impl Fact {
     /// values its annotations leave out.
     pub fn assume(&self, ty: &Type) -> Option<Type> {
         self.apply(ty).or_else(|| self.kind_type())
+    }
+
+    /// What the code the fact guards takes a value of `ty` to be when the fact holds for none of
+    /// them, as lua-language-server reads such code: `unknown` after `type(x) ~= 'table'` for a
+    /// table, or after `if x` for a value that is always `nil`; `nil` after `not x` or `x == nil`
+    /// for one that never is; and the kind of the literal after `x == 5` for a value that is never a
+    /// number. `None` keeps the type whole, as after `x ~= 'a'` for an `'a'`, or `x == 'c'` for an
+    /// `'a'|'b'`.
+    pub fn ruled_out(&self, ty: &Type) -> Option<Type> {
+        match self {
+            Fact::NotKind(_) | Fact::Truthy => Some(Type::Unknown),
+            Fact::Falsy | Fact::Is(Type::Nil) => Some(Type::Nil),
+            Fact::Is(value) => {
+                let kind = type_name(value)?;
+                let parts = match ty {
+                    Type::Union(parts) => &parts[..],
+                    one => std::slice::from_ref(one),
+                };
+                (!parts.iter().any(|part| type_name(part) == Some(kind))).then(|| value.widen())
+            }
+            _ => None,
+        }
     }
 
     /// The type of the values a `type` check, or each of several, lets through.
@@ -173,6 +196,8 @@ type Facts = Vec<(LocalId, Fact)>;
 pub const DECLARATION: u32 = 0;
 /// How many times a loop is walked at most to find what its locals hold at its start.
 const MAX_ROUNDS: usize = 4;
+/// How many keys a field that guards narrow is read through at most, as the two of `data.job.name`.
+const MAX_KEYS: usize = 4;
 
 /// Where a value of a local comes from.
 #[derive(Clone, Copy, Debug)]
@@ -186,6 +211,12 @@ pub enum Origin<'a> {
     Compound { stmt: &'a Stmt },
     /// `function name() end` for a local `name`.
     Function { stmt: &'a Stmt },
+    /// Any of the values that the assignments of a set give, as `Flow::others` lists their origins:
+    /// what code that runs at other times may have put in the local.
+    Others(u32),
+    /// The `---@cast` line of this number among `Casts`, which gives the local a value of the type
+    /// it names, or of the type the local has there with the types it adds or takes out.
+    Cast(u32),
 }
 
 /// One of the values a local may hold at a point of the code.
@@ -193,28 +224,105 @@ pub enum Origin<'a> {
 pub struct Version {
     /// Where it comes from, as an index into the origins of the file.
     pub origin: u32,
-    /// What the guards since then tell about it, each with where it starts to hold.
-    pub facts: Rc<[(u32, Fact)]>,
+    /// What the guards since then tell about it.
+    pub facts: FactList,
+}
+
+/// What the guards tell about a value, each with where it starts to hold. The list shares what it
+/// held before each guard added to it, so a guard adds in constant time and the ways that meet share
+/// what they hold in common.
+#[derive(Clone, Debug, Default)]
+pub struct FactList(Option<Rc<FactNode>>);
+
+#[derive(Debug)]
+struct FactNode {
+    at: u32,
+    fact: Fact,
+    /// How many facts the list holds with this one.
+    len: usize,
+    before: FactList,
+}
+
+impl FactList {
+    /// The list with `fact` added, holding from `at` on.
+    fn with(&self, at: u32, fact: Fact) -> Self {
+        FactList(Some(Rc::new(FactNode { at, fact, len: self.len() + 1, before: self.clone() })))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |node| node.len)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Whether `other` is this very list.
+    fn is(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        }
+    }
+
+    /// The list without the fact added last.
+    fn before(&self) -> &Self {
+        self.0.as_ref().map_or(self, |node| &node.before)
+    }
+
+    /// The facts, the one added last first.
+    fn latest(&self) -> impl Iterator<Item = &FactNode> {
+        std::iter::successors(self.0.as_deref(), |node| node.before.0.as_deref())
+    }
+
+    /// The facts in the order they were added, each with where it starts to hold.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &Fact)> {
+        let mut nodes: Vec<&FactNode> = self.latest().collect();
+        nodes.reverse();
+        nodes.into_iter().map(|node| (node.at, &node.fact))
+    }
+}
+
+impl PartialEq for FactList {
+    fn eq(&self, other: &Self) -> bool {
+        self.is(other)
+            || (self.len() == other.len()
+                && self.latest().zip(other.latest()).all(|(a, b)| a.at == b.at && a.fact == b.fact))
+    }
 }
 
 /// The values a local may hold.
 type Values = Rc<[Version]>;
 
-/// What the locals may hold at a point, for those that may hold more than the value of their
-/// declaration with nothing known about it.
-type State = FxHashMap<LocalId, Values>;
+/// The keys that a field of a local is read through, as `job` and `name` for `data.job.name`.
+type Keys = Box<[SmolStr]>;
 
 /// Which of the values given to the locals of a file may reach each point of its code, and what the
 /// guards on the way tell about them. A value reaches the code after the statement that assigns it,
 /// branches join where they meet, and a loop starts with what its runs before leave. Calls are
 /// taken to change no local, but a function runs any time after it is created: inside it, a local
-/// may also hold what the code after its creation and the other functions assign, and the code
-/// that creates it may find what it assigns from there on.
+/// may also hold what the code after its creation and the other functions assign, and once a
+/// function that assigns it is created, the code around may find what any function gives it,
+/// unless a runtime function that runs it later, as `SetTimeout` does, is given it. A call
+/// that yields, as `Wait(0)` does, lets that code run too, so after one the locals it may assign
+/// hold any value it gives them again.
+///
+/// The fields of locals that guards test or assignments set, as `self.target` or `data.job.name`,
+/// are narrowed like locals, an assignment giving one the value it stores, until something may
+/// change them: an assignment to the local or to a field of the same name of any table; a call that
+/// is given, or an assignment for a key that is not known to, the local, a table the field is read
+/// through, a local copied from one of them or a table built with them; a call that yields; or the
+/// start of a function, which runs later.
 #[derive(Debug)]
 pub struct Flow<'a> {
     origins: Vec<Origin<'a>>,
+    /// The origins of the values that each set of `Origin::Others` stands for, in order.
+    others: Vec<Rc<[u32]>>,
     /// The origin of the value each assignment gives a local, by the start of the name it assigns.
     written: FxHashMap<u32, u32>,
+    /// The origin of the value each assignment gives a field of a local, as `data.job.name = name`
+    /// does, by where its target starts.
+    stored: FxHashMap<u32, u32>,
     /// The origins of the values that assignments which read a local give it, in the order they are
     /// written, as `count = count + 1`.
     chained: FxHashMap<LocalId, Vec<u32>>,
@@ -227,25 +335,98 @@ pub struct Flow<'a> {
     /// the call returns.
     links: Vec<Vec<(LocalId, u32, usize)>>,
     link_of: FxHashMap<(LocalId, u32), usize>,
+    /// The fields that guards test, by the local they are read from, each with the keys after it and
+    /// the number it is tracked under, after those of the locals.
+    paths: FxHashMap<LocalId, Vec<(Keys, LocalId)>>,
 }
 
 impl<'a> Flow<'a> {
-    pub fn of(chunk: &'a Chunk, resolution: &Resolution) -> Self {
-        let mut origins = Origins { resolution, origins: vec![Origin::Declaration], written: FxHashMap::default() };
-        origins.visit_block(&chunk.block);
-        let no_facts: Rc<[(u32, Fact)]> = Rc::from([]);
+    pub fn of(chunk: &'a Chunk, resolution: &Resolution, casts: &Casts) -> Self {
+        let mut found = Origins { resolution, found: Vec::new() };
+        found.visit_block(&chunk.block);
+        let mut found = found.found;
+        // A `---@cast` line gives the local a value, as an assignment does.
+        let mut cast_values = Vec::new();
+        for (index, cast) in casts.iter().enumerate() {
+            let Some(local) = cast.local else { continue };
+            found.push((cast.span.start, Origin::Cast(index as u32), Target::None));
+            let reads = !cast.replaces();
+            let value =
+                CastValue { before: cast.before, local, origin: 0, at: cast.span.end, start: cast.span.start, reads };
+            cast_values.push(value);
+        }
+        // Origins are numbered in the order they are written.
+        found.sort_by_key(|(at, ..)| *at);
+        let mut origins = vec![Origin::Declaration];
+        let (mut written, mut stored) = (FxHashMap::default(), FxHashMap::default());
+        for (at, origin, target) in found {
+            let number = origins.len() as u32;
+            match target {
+                Target::Local(name) => {
+                    written.insert(name, number);
+                }
+                Target::Field(start) => {
+                    stored.insert(start, number);
+                }
+                Target::None => {}
+            }
+            if let Some(value) = cast_values.iter_mut().find(|value| value.start == at) {
+                value.origin = number;
+            }
+            origins.push(origin);
+        }
+        cast_values.sort_unstable_by_key(|value| value.before);
         let flow = Flow {
-            origins: origins.origins,
-            written: origins.written,
+            origins,
+            others: Vec::new(),
+            written,
+            stored,
             chained: FxHashMap::default(),
             points: FxHashMap::default(),
-            declared: Rc::from([Version { origin: DECLARATION, facts: no_facts.clone() }]),
+            declared: Rc::from([Version { origin: DECLARATION, facts: FactList::default() }]),
             links: Vec::new(),
             link_of: FxHashMap::default(),
+            paths: FxHashMap::default(),
         };
-        let mut walker = Walker::new(resolution, flow, no_facts);
+        let mut walker = Walker::new(chunk, resolution, flow, cast_values);
+        walker.frames[0].others = walker.others_of(MAIN_CHUNK);
         walker.block(&chunk.block);
-        walker.flow
+        let mut flow = walker.flow;
+        for (index, (root, keys)) in walker.paths.into_inner().into_iter().enumerate() {
+            flow.paths.entry(root).or_default().push((keys, walker.first_path + index as LocalId));
+        }
+        flow
+    }
+
+    /// The number that the field `expr` reads is tracked under, when guards test it.
+    pub fn path(&self, resolution: &Resolution, expr: &Expr) -> Option<LocalId> {
+        if self.paths.is_empty() {
+            return None;
+        }
+        let (root, keys) = field_path(resolution, expr)?;
+        self.path_of(root, &keys)
+    }
+
+    /// The number that the field `key` of the table `base` names or reads is tracked under, when
+    /// guards test it.
+    pub fn member_path(&self, resolution: &Resolution, base: &Expr, key: &str) -> Option<LocalId> {
+        if self.paths.is_empty() {
+            return None;
+        }
+        let (root, mut keys) = match &base.unparen().kind {
+            ExprKind::Name(name) => match resolution.resolve_at(name.span.start) {
+                Some(Resolved::Local(root)) => (root, Vec::new()),
+                _ => return None,
+            },
+            _ => field_path(resolution, base)?,
+        };
+        keys.push(SmolStr::new(key));
+        self.path_of(root, &keys)
+    }
+
+    fn path_of(&self, root: LocalId, keys: &[SmolStr]) -> Option<LocalId> {
+        let paths = self.paths.get(&root)?;
+        paths.iter().find(|(path, _)| **path == *keys).map(|(_, id)| *id)
     }
 
     /// What `local` may hold at `offset`.
@@ -259,6 +440,11 @@ impl<'a> Flow<'a> {
 
     pub fn origin(&self, origin: u32) -> Origin<'a> {
         self.origins.get(origin as usize).copied().unwrap_or(Origin::Declaration)
+    }
+
+    /// The origins of the values that the set `set` of `Origin::Others` stands for, in order.
+    pub fn others(&self, set: u32) -> &[u32] {
+        self.others.get(set as usize).map_or(&[], |origins| &origins[..])
     }
 
     /// The origins of the values that assignments which read `local` give it, in the order they are
@@ -277,8 +463,8 @@ impl<'a> Flow<'a> {
     /// declaration.
     pub fn facts(&self, local: LocalId, origin: u32, code: Span) -> impl Iterator<Item = &Fact> {
         let value = self.at(local, code.end).iter().find(|value| value.origin == origin);
-        let facts = value.map_or(&[][..], |value| &value.facts[..]);
-        facts.iter().filter(move |(at, _)| *at <= code.start).map(|(_, fact)| fact)
+        let facts = value.map(|value| value.facts.iter()).into_iter().flatten();
+        facts.filter(move |(at, _)| *at <= code.start).map(|(_, fact)| fact)
     }
 
     /// The locals that the call which gives `local` the value of `origin` gives values too, itself
@@ -290,19 +476,27 @@ impl<'a> Flow<'a> {
     }
 }
 
+/// What an origin gives a value to.
+enum Target {
+    /// The local whose name starts here.
+    Local(u32),
+    /// The field of a local whose target starts here, as `data.job` of `data.job = job`.
+    Field(u32),
+    None,
+}
+
 /// Finds the assignments to locals, which are the origins of the values they hold after their
-/// declaration.
+/// declaration, and those to the fields of locals.
 struct Origins<'a, 'r> {
     resolution: &'r Resolution,
-    origins: Vec<Origin<'a>>,
-    written: FxHashMap<u32, u32>,
+    /// Each origin, with where it is written and what it gives the value to.
+    found: Vec<(u32, Origin<'a>, Target)>,
 }
 
 impl<'a> Origins<'a, '_> {
     fn add(&mut self, name: &Name, origin: Origin<'a>) {
         if let Some(Resolved::Local(_)) = self.resolution.resolve_at(name.span.start) {
-            self.written.insert(name.span.start, self.origins.len() as u32);
-            self.origins.push(origin);
+            self.found.push((name.span.start, origin, Target::Local(name.span.start)));
         }
     }
 }
@@ -312,8 +506,13 @@ impl<'a> Visitor<'a> for Origins<'a, '_> {
         match &stmt.kind {
             StmtKind::Assign { targets, .. } => {
                 for (index, target) in targets.iter().enumerate() {
-                    if let ExprKind::Name(name) = &target.kind {
-                        self.add(name, Origin::Assignment { stmt, index });
+                    match &target.kind {
+                        ExprKind::Name(name) => self.add(name, Origin::Assignment { stmt, index }),
+                        _ if field_path(self.resolution, target).is_some() => {
+                            let at = target.span.start;
+                            self.found.push((at, Origin::Assignment { stmt, index }, Target::Field(at)));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -338,38 +537,76 @@ struct Write {
     origin: u32,
 }
 
+/// What the locals that changed since a point of the walk hold, with `Flow::declared` for one that
+/// holds no more than the value of its declaration with nothing known about it.
+type Delta = FxHashMap<LocalId, Values>;
+
 /// A function being walked.
 struct Frame {
     func: FuncId,
-    /// Where the loops around the code being walked start, outermost first.
-    loops: Vec<u32>,
+    /// Where the loops around the code being walked start, outermost first, each with the point of
+    /// the trail where it starts.
+    loops: Vec<(u32, usize)>,
     /// What the locals hold at the `break`s of each of those loops.
-    breaks: Vec<Vec<State>>,
+    breaks: Vec<Vec<Delta>>,
     /// The labels of the blocks around the code being walked, innermost last, each with where its
-    /// statement starts.
-    labels: Vec<Vec<(SmolStr, u32)>>,
+    /// statement starts, and each block with the point of the trail where it starts.
+    labels: Vec<(Vec<(SmolStr, u32)>, usize)>,
     /// Where the function being walked inside this one is created, or the outermost loop around
     /// that starts: the assignments of this function from there on may run before it does.
     created: u32,
+    /// The locals that code running while the function yields may assign, each with the origin of
+    /// the values that code gives it.
+    others: Vec<(LocalId, u32)>,
 }
 
 impl Frame {
     fn new(func: FuncId) -> Self {
-        Self { func, loops: Vec::new(), breaks: Vec::new(), labels: Vec::new(), created: 0 }
+        Self { func, loops: Vec::new(), breaks: Vec::new(), labels: Vec::new(), created: 0, others: Vec::new() }
     }
 }
 
-/// Walks the code of a file in the order it runs and records what its locals may hold.
+/// The value a `---@cast` line gives its local.
+#[derive(Clone, Copy)]
+struct CastValue {
+    /// Where the token after the line starts, before which the local takes the value.
+    before: u32,
+    local: LocalId,
+    origin: u32,
+    /// Where the line ends, from which the local holds the value.
+    at: u32,
+    /// Where the line starts.
+    start: u32,
+    /// Whether the type of the value depends on the one the local has there, as for `+T` and `-T`.
+    reads: bool,
+}
+
+/// The locals that hold a table read from another local, as `local child = self.child` does, each
+/// with the tables it was read from, as a local and the keys after it.
+type Aliases = FxHashMap<LocalId, Vec<(LocalId, Vec<SmolStr>)>>;
+
+/// Walks the code of a file in the order it runs and records what its locals may hold. It keeps what
+/// they hold where it is, with a trail of what each change replaced: the ways through an `if` or a
+/// loop go back along the trail and are joined by what they changed, so the locals they leave alone
+/// cost nothing.
 struct Walker<'a, 'r> {
     resolution: &'r Resolution,
     flow: Flow<'a>,
-    state: State,
+    tokens: &'a [Token],
+    /// The values the `---@cast` lines of the file give, by where the token after each line starts.
+    casts: Vec<CastValue>,
+    /// What the locals hold where the walk is, for those that may hold more than the value of their
+    /// declaration with nothing known about it.
+    state: FxHashMap<LocalId, Values>,
+    /// Each change to `state`, as the local and what it held before.
+    trail: Vec<(LocalId, Option<Values>)>,
+    /// The fields in `state`.
+    fields: FxHashSet<LocalId>,
     /// Whether the code being walked can run: not after a `return`, `break`, `goto` or `error()`.
     live: bool,
     /// Whether what the locals hold is recorded, which it is not while a loop is walked to find what
     /// its locals hold at its start.
     record: bool,
-    no_facts: Rc<[(u32, Fact)]>,
     frames: Vec<Frame>,
     /// Each function by where it starts.
     functions: FxHashMap<u32, FuncId>,
@@ -377,23 +614,45 @@ struct Walker<'a, 'r> {
     writes: FxHashMap<LocalId, Vec<Write>>,
     /// Where each assignment to a local starts, in order, with the local and the origin of the value.
     ordered: Vec<(u32, LocalId, u32)>,
+    /// The locals by where they are declared, in order.
+    declarations: Vec<(u32, LocalId)>,
     /// For each function, the locals declared outside it that are assigned again and that it, or a
     /// function in it, reads or assigns.
     captured: FxHashMap<FuncId, Vec<LocalId>>,
-    /// For each function, the values that it, or a function in it, gives the locals declared
-    /// outside it.
-    inner_writes: FxHashMap<FuncId, Vec<(LocalId, u32)>>,
-    /// What the locals hold at the `goto`s that jump ahead to a label, by where its statement starts.
-    gotos: FxHashMap<u32, Vec<State>>,
+    /// For each function, the locals declared outside it that it, or a function in it, assigns.
+    inner_writes: FxHashMap<FuncId, Vec<LocalId>>,
+    /// For each function, the locals it declares that the functions in it assign.
+    nested_writes: FxHashMap<FuncId, Vec<LocalId>>,
+    /// Where the assignments to each local in the function that declares it start, in order.
+    own_writes: FxHashMap<LocalId, Vec<u32>>,
+    /// The origins that stand for what code that runs at other times may give a local, by the local
+    /// and how many of the assignments in the function that declares it come before that code.
+    others: FxHashMap<(LocalId, usize), Option<u32>>,
+    /// The local and that number of each of those origins.
+    others_of: FxHashMap<u32, (LocalId, usize)>,
+    /// The calls that may yield, by where they start, in order, each with the function it is in.
+    yields: Vec<(u32, FuncId)>,
+    /// The functions that runtime functions are given to run later, by where they start.
+    deferred: FxHashSet<u32>,
+    aliases: Aliases,
+    /// What the locals hold at the `goto`s that jump ahead to a label, by where its statement starts,
+    /// as what changed since the block of the label started.
+    gotos: FxHashMap<u32, Vec<Delta>>,
     /// The locals that hold what `type`, or `math.type` with `true`, gives for another local, as
-    /// `local kind = type(value)` does.
-    kinds: FxHashMap<LocalId, (LocalId, bool)>,
+    /// `local kind = type(value)` does, with, for one that is assigned again, the origins of the
+    /// values it held there, which comparisons of the kind tell about only while it holds them.
+    kinds: FxHashMap<LocalId, (LocalId, bool, Option<Vec<u32>>)>,
     /// The locals that hold `type`, or with `true` `math.type`, as after `local type = type`.
     type_functions: FxHashMap<LocalId, bool>,
+    /// The fields that guards test, each as the local it is read from and the keys after it, tracked
+    /// under `first_path` and the numbers after it.
+    paths: RefCell<Vec<(LocalId, Keys)>>,
+    path_ids: RefCell<FxHashMap<(LocalId, Keys), LocalId>>,
+    first_path: LocalId,
 }
 
 impl<'a, 'r> Walker<'a, 'r> {
-    fn new(resolution: &'r Resolution, flow: Flow<'a>, no_facts: Rc<[(u32, Fact)]>) -> Self {
+    fn new(chunk: &'a Chunk, resolution: &'r Resolution, flow: Flow<'a>, casts: Vec<CastValue>) -> Self {
         let mut writes: FxHashMap<LocalId, Vec<Write>> = FxHashMap::default();
         let mut ordered = Vec::new();
         for (id, local) in resolution.locals.iter().enumerate() {
@@ -407,14 +666,20 @@ impl<'a, 'r> Walker<'a, 'r> {
                 ordered.push((write.span.start, id as LocalId, origin));
             }
         }
+        ordered.extend(casts.iter().map(|cast| (cast.start, cast.local, cast.origin)));
         ordered.sort_unstable();
+        let mut declarations: Vec<(u32, LocalId)> =
+            resolution.locals.iter().enumerate().map(|(id, local)| (local.decl.start, id as LocalId)).collect();
+        declarations.sort_unstable();
         // The functions between where a local is used and the function that declares it.
         let outside = |from: FuncId, decl: FuncId| {
             std::iter::successors(Some(from), |func| resolution.functions.get(*func as usize).and_then(|f| f.parent))
                 .take_while(move |func| *func != decl)
         };
         let mut captured: FxHashMap<FuncId, Vec<LocalId>> = FxHashMap::default();
-        let mut inner_writes: FxHashMap<FuncId, Vec<(LocalId, u32)>> = FxHashMap::default();
+        let mut inner_writes: FxHashMap<FuncId, Vec<LocalId>> = FxHashMap::default();
+        let mut nested_writes: FxHashMap<FuncId, Vec<LocalId>> = FxHashMap::default();
+        let mut own_writes: FxHashMap<LocalId, Vec<u32>> = FxHashMap::default();
         let mut locals: Vec<&LocalId> = writes.keys().collect();
         locals.sort_unstable();
         for id in locals {
@@ -429,12 +694,27 @@ impl<'a, 'r> Walker<'a, 'r> {
             }
             for write in &writes[id] {
                 for func in outside(write.func, local.func) {
-                    inner_writes.entry(func).or_default().push((*id, write.origin));
+                    let assigned = inner_writes.entry(func).or_default();
+                    if assigned.last() != Some(id) {
+                        assigned.push(*id);
+                    }
                 }
             }
+            if writes[id].iter().any(|write| write.func != local.func) {
+                nested_writes.entry(local.func).or_default().push(*id);
+            }
+            let mut own: Vec<u32> =
+                writes[id].iter().filter(|write| write.func == local.func).map(|write| write.start).collect();
+            own.sort_unstable();
+            own_writes.insert(*id, own);
         }
-        let functions = resolution.functions.iter().enumerate().skip(1);
+        let functions: FxHashMap<u32, FuncId> =
+            resolution.functions.iter().enumerate().skip(1).map(|(id, func)| (func.span.start, id as FuncId)).collect();
+        let yields = Yields::of(chunk, resolution, &functions);
+        let mut deferred = Deferred { resolution, out: FxHashSet::default() };
+        deferred.visit_block(&chunk.block);
         let mut flow = flow;
+        let mut chains: FxHashMap<LocalId, Vec<(u32, u32)>> = FxHashMap::default();
         for (local, writes) in &writes {
             let reads = |stmt: &Stmt| {
                 let refs = &resolution.local(*local).refs;
@@ -444,26 +724,226 @@ impl<'a, 'r> Walker<'a, 'r> {
                 Origin::Assignment { stmt, .. } | Origin::Compound { stmt } => reads(stmt),
                 _ => false,
             });
-            let mut origins: Vec<(u32, u32)> = chained.map(|write| (write.start, write.origin)).collect();
+            chains.entry(*local).or_default().extend(chained.map(|write| (write.start, write.origin)));
+        }
+        // `+T` and `-T` read the type the local has there.
+        for cast in casts.iter().filter(|cast| cast.reads) {
+            chains.entry(cast.local).or_default().push((cast.start, cast.origin));
+        }
+        for (local, mut origins) in chains {
             origins.sort_unstable();
-            flow.chained.insert(*local, origins.into_iter().map(|(_, origin)| origin).collect());
+            flow.chained.insert(local, origins.into_iter().map(|(_, origin)| origin).collect());
         }
         Self {
             resolution,
             flow,
-            state: State::default(),
+            tokens: &chunk.tokens,
+            casts,
+            state: FxHashMap::default(),
+            trail: Vec::new(),
+            fields: FxHashSet::default(),
             live: true,
             record: true,
-            no_facts,
             frames: vec![Frame::new(MAIN_CHUNK)],
-            functions: functions.map(|(id, func)| (func.span.start, id as FuncId)).collect(),
+            functions,
             writes,
             ordered,
+            declarations,
             captured,
             inner_writes,
+            nested_writes,
+            own_writes,
+            others: FxHashMap::default(),
+            others_of: FxHashMap::default(),
+            yields,
+            deferred: deferred.out,
+            aliases: Aliases::default(),
             gotos: FxHashMap::default(),
             kinds: FxHashMap::default(),
             type_functions: FxHashMap::default(),
+            paths: RefCell::default(),
+            path_ids: RefCell::default(),
+            first_path: resolution.locals.len() as LocalId,
+        }
+    }
+
+    /// The origin that stands for the values that code other than the function declaring `local`
+    /// gives it, with those that function gives it from `created` on: what it may hold in a function
+    /// created there, which may run any time later. `None` when there are none.
+    fn others(&mut self, local: LocalId, created: u32) -> Option<u32> {
+        let from = self.own_writes.get(&local)?.partition_point(|start| *start < created);
+        if let Some(origin) = self.others.get(&(local, from)) {
+            return *origin;
+        }
+        let decl = self.resolution.local(local).func;
+        let given = self.writes[&local].iter().filter(|write| write.func != decl || write.start >= created);
+        let mut origins: Vec<u32> = given.map(|write| write.origin).collect();
+        origins.sort_unstable();
+        let origin = (!origins.is_empty()).then(|| {
+            let origin = self.flow.origins.len() as u32;
+            self.flow.origins.push(Origin::Others(self.flow.others.len() as u32));
+            self.flow.others.push(origins.into());
+            self.others_of.insert(origin, (local, from));
+            origin
+        });
+        self.others.insert((local, from), origin);
+        origin
+    }
+
+    /// The locals that code running while the function `func` yields may assign, those it declares
+    /// that the functions in it assign, each with the origin of the values that code gives it.
+    fn others_of(&mut self, func: FuncId) -> Vec<(LocalId, u32)> {
+        let locals = self.nested_writes.get(&func).cloned().unwrap_or_default();
+        locals.into_iter().filter_map(|local| Some((local, self.others(local, u32::MAX)?))).collect()
+    }
+
+    /// `values` where the local may also hold any of the values that `others`, an origin of
+    /// `Walker::others`, stands for, with nothing known about them. The values among them are left
+    /// out, as are those of the same local that stand for no more.
+    fn with_others(&self, values: &Values, others: u32) -> Values {
+        let (local, from) = self.others_of[&others];
+        let Origin::Others(set) = self.flow.origin(others) else { return values.clone() };
+        let origins = self.flow.others(set);
+        let covered = |value: &Version| {
+            origins.binary_search(&value.origin).is_ok()
+                || self.others_of.get(&value.origin).is_some_and(|(of, after)| *of == local && *after >= from)
+        };
+        let fresh = |value: &Version| value.origin == others && value.facts.is_empty();
+        if values.iter().any(fresh) && !values.iter().any(|value| value.origin != others && covered(value)) {
+            return values.clone();
+        }
+        let kept = values.iter().filter(|value| !covered(value)).cloned();
+        kept.chain([Version { origin: others, facts: FactList::default() }]).collect()
+    }
+
+    /// Goes on after the call `call`, which lets the code that runs while it yields change what the
+    /// locals hold, when it may.
+    fn call_ended(&mut self, call: &Expr) {
+        let first = self.yields.partition_point(|(at, _)| *at < call.span.start);
+        if self.yields.get(first).is_some_and(|(at, _)| *at == call.span.start) {
+            let yielded = self.yielded(Delta::default());
+            self.apply(call.span.end, &yielded);
+        }
+    }
+
+    /// Whether a call in `code` that the function being walked makes may yield.
+    fn yields_in(&self, code: Span) -> bool {
+        let func = self.frames.last().map_or(MAIN_CHUNK, |frame| frame.func);
+        let first = self.yields.partition_point(|(at, _)| *at < code.start);
+        self.yields[first..].iter().take_while(|(at, _)| *at < code.end).any(|(_, of)| *of == func)
+    }
+
+    /// `delta`, once the function being walked yields: the locals that the code that runs meanwhile
+    /// may assign may hold what it gives them, and the fields of any table may hold anything.
+    fn yielded(&self, mut delta: Delta) -> Delta {
+        let others = self.frames.last().map_or(&[][..], |frame| &frame.others[..]);
+        for (local, origin) in others {
+            let values = self.with_others(&self.values_in(&delta, *local), *origin);
+            delta.insert(*local, values);
+        }
+        let fields: Vec<LocalId> =
+            self.fields.iter().copied().chain(delta.keys().copied().filter(|id| self.is_path(*id))).collect();
+        for field in fields {
+            delta.insert(field, self.flow.declared.clone());
+        }
+        delta
+    }
+
+    /// Notes that `local` holds what `value` gives it, which is a table read from another local when
+    /// it names one or reads a field of one, or holds those tables when it builds a table with them.
+    fn note_alias(&mut self, local: LocalId, value: &Expr) {
+        let mut tables = Vec::new();
+        tables_of(self.resolution, &self.aliases, value, &mut tables);
+        tables.retain(|(root, _)| *root != local);
+        if tables.is_empty() {
+            return;
+        }
+        let aliases = self.aliases.entry(local).or_default();
+        for table in tables {
+            if !aliases.contains(&table) {
+                aliases.push(table);
+            }
+        }
+    }
+
+    /// Whether `id` is the number of a field rather than of a local.
+    fn is_path(&self, id: LocalId) -> bool {
+        id >= self.first_path
+    }
+
+    /// The local that `id` is, or that the field it is the number of is read from.
+    fn root(&self, id: LocalId) -> LocalId {
+        match self.is_path(id) {
+            true => self.paths.borrow()[(id - self.first_path) as usize].0,
+            false => id,
+        }
+    }
+
+    /// The local `expr` names, or the number of the field of a local it reads.
+    fn place(&self, expr: &Expr) -> Option<LocalId> {
+        if let Some(local) = self.local(expr) {
+            return Some(local);
+        }
+        let (root, keys) = field_path(self.resolution, expr)?;
+        let key = (root, keys.into_boxed_slice());
+        if let Some(id) = self.path_ids.borrow().get(&key) {
+            return Some(*id);
+        }
+        let id = self.first_path + self.paths.borrow().len() as LocalId;
+        self.paths.borrow_mut().push(key.clone());
+        self.path_ids.borrow_mut().insert(key, id);
+        Some(id)
+    }
+
+    /// Forgets what the guards told about the fields that `changed` picks by the local they are
+    /// read from and the keys after it, from `at` on.
+    fn forget_fields(&mut self, at: u32, changed: impl Fn(LocalId, &[SmolStr]) -> bool) {
+        if self.fields.is_empty() {
+            return;
+        }
+        let paths = self.paths.borrow();
+        let fields = self.fields.iter().filter(|id| {
+            let (root, keys) = &paths[(**id - self.first_path) as usize];
+            changed(*root, keys)
+        });
+        let fields: Vec<LocalId> = fields.copied().collect();
+        drop(paths);
+        for id in fields {
+            self.set(id, at, self.flow.declared.clone());
+        }
+    }
+
+    /// Forgets what the guards told about the fields of the tables that `expr` names or reads, which
+    /// something it is given to may change, also through the locals they were copied to and the
+    /// tables built with them.
+    fn forget_fields_of(&mut self, expr: &Expr, at: u32) {
+        let mut tables = Vec::new();
+        tables_of(self.resolution, &self.aliases, expr, &mut tables);
+        if tables.is_empty() {
+            return;
+        }
+        self.forget_fields(at, |root, keys| {
+            let within = |(table, prefix): &(LocalId, Vec<SmolStr>)| {
+                root == *table && keys.len() > prefix.len() && keys.starts_with(prefix)
+            };
+            tables.iter().any(within)
+        });
+    }
+
+    /// Forgets what the guards told about the fields that an assignment to `target` may change: those
+    /// of the same name, read from any table, or for a key that is not known, those of the table and
+    /// of the tables it was copied from.
+    fn forget_assigned(&mut self, target: &Expr, at: u32) {
+        let key = match &target.unparen().kind {
+            ExprKind::Field { name, .. } => Some(name.text.clone()),
+            ExprKind::Index { base, index, .. } => match index.as_string() {
+                Some(key) => Some(SmolStr::new(key)),
+                None => return self.forget_fields_of(base, at),
+            },
+            _ => None,
+        };
+        if let Some(key) = key {
+            self.forget_fields(at, |_, keys| keys.contains(&key));
         }
     }
 
@@ -475,8 +955,14 @@ impl<'a, 'r> Walker<'a, 'r> {
         matches!(values, [value] if value.origin == DECLARATION && value.facts.is_empty())
     }
 
-    fn values(&self, state: &State, local: LocalId) -> Values {
-        state.get(&local).cloned().unwrap_or_else(|| self.flow.declared.clone())
+    /// What `local` holds where the walk is.
+    fn values(&self, local: LocalId) -> Values {
+        self.state.get(&local).cloned().unwrap_or_else(|| self.flow.declared.clone())
+    }
+
+    /// What `local` holds where the walk is, once the locals that `delta` tells about hold that.
+    fn values_in(&self, delta: &Delta, local: LocalId) -> Values {
+        delta.get(&local).cloned().unwrap_or_else(|| self.values(local))
     }
 
     /// Records that `local` may hold `values` from `at` on.
@@ -492,7 +978,7 @@ impl<'a, 'r> Walker<'a, 'r> {
         };
         match points.last_mut() {
             Some((last, held)) if *last == at => *held = values.clone(),
-            Some((_, held)) if held == values => {}
+            Some((_, held)) if same(held, values) => {}
             _ => points.push((at, values.clone())),
         }
     }
@@ -500,42 +986,87 @@ impl<'a, 'r> Walker<'a, 'r> {
     /// Makes `local` hold one of `values` from `at` on.
     fn set(&mut self, local: LocalId, at: u32, values: Values) {
         self.point(local, at, &values);
-        if Self::is_declared(&values) {
-            self.state.remove(&local);
-        } else {
-            self.state.insert(local, values);
+        self.replace(local, values);
+    }
+
+    /// Makes `local` hold one of `values`, with what it held before on the trail.
+    fn replace(&mut self, local: LocalId, values: Values) {
+        let old = match Self::is_declared(&values) {
+            true => self.state.remove(&local),
+            false => self.state.insert(local, values),
+        };
+        if old.is_none() && !self.state.contains_key(&local) {
+            return;
+        }
+        self.note_field(local);
+        self.trail.push((local, old));
+    }
+
+    /// Keeps `fields` telling whether the field `id` is in `state`.
+    fn note_field(&mut self, id: LocalId) {
+        if !self.is_path(id) {
+            return;
+        }
+        match self.state.contains_key(&id) {
+            true => self.fields.insert(id),
+            false => self.fields.remove(&id),
+        };
+    }
+
+    /// The point of the trail the walk is at.
+    fn mark(&self) -> usize {
+        self.trail.len()
+    }
+
+    /// Goes back along the trail to what the locals held at `mark`, from `at` on. Without `at` the
+    /// code after it is not walked from there.
+    fn rollback(&mut self, mark: usize, at: Option<u32>) {
+        let mut restored = Vec::new();
+        while self.trail.len() > mark {
+            let Some((local, old)) = self.trail.pop() else { break };
+            match old {
+                Some(values) => self.state.insert(local, values),
+                None => self.state.remove(&local),
+            };
+            self.note_field(local);
+            restored.push(local);
+        }
+        let Some(at) = at else { return };
+        restored.sort_unstable();
+        restored.dedup();
+        for local in restored {
+            let values = self.values(local);
+            self.point(local, at, &values);
         }
     }
 
-    /// Makes the locals hold what `state` says from `at` on.
-    fn switch(&mut self, at: u32, state: State) {
-        if self.record {
-            let old = &self.state;
-            let changed: Vec<LocalId> = old
-                .iter()
-                .filter(|(local, values)| state.get(local) != Some(values))
-                .map(|(local, _)| *local)
-                .chain(state.iter().filter(|(local, values)| old.get(local) != Some(values)).map(|(local, _)| *local))
-                .collect();
-            for local in changed {
-                let values = self.values(&state, local);
-                self.point(local, at, &values);
-            }
+    /// What the locals that changed since `mark` hold.
+    fn delta(&self, mark: usize) -> Delta {
+        let mut delta = Delta::default();
+        for (local, _) in &self.trail[mark..] {
+            delta.entry(*local).or_insert_with(|| self.values(*local));
         }
-        self.state = state;
+        delta
     }
 
-    /// `state` with what `facts` tell about its locals from `at` on.
-    fn with_facts(&self, mut state: State, facts: Facts, at: u32) -> State {
-        for (local, fact) in facts {
-            let values = self.values(&state, local);
-            let values = values.iter().map(|value| Version {
-                origin: value.origin,
-                facts: value.facts.iter().cloned().chain([(at, fact.clone())]).collect(),
-            });
-            state.insert(local, values.collect());
+    /// Makes the locals hold what `delta` tells from `at` on.
+    fn apply(&mut self, at: u32, delta: &Delta) {
+        for (local, values) in delta {
+            self.set(*local, at, values.clone());
         }
-        state
+    }
+
+    /// `delta` without what tells that a local holds what it holds where the walk is.
+    fn settled(&self, mut delta: Delta) -> Delta {
+        delta.retain(|local, values| !same(values, &self.values(*local)));
+        delta
+    }
+
+    /// `values` with `fact` holding for each of them from `at` on.
+    fn with_fact(values: &[Version], at: u32, fact: &Fact) -> Values {
+        let values =
+            values.iter().map(|value| Version { origin: value.origin, facts: value.facts.with(at, fact.clone()) });
+        values.collect()
     }
 
     /// Adds what `cond` being true, or false without `holds`, tells about the locals in it from `at`
@@ -543,48 +1074,51 @@ impl<'a, 'r> Walker<'a, 'r> {
     fn assume(&mut self, cond: &Expr, holds: bool, at: u32) {
         let mut facts = Facts::new();
         self.facts(cond, holds, &mut facts);
-        if !facts.is_empty() {
-            let state = self.with_facts(self.state.clone(), facts, at);
-            self.switch(at, state);
+        for (local, fact) in facts {
+            let values = Self::with_fact(&self.values(local), at, &fact);
+            self.set(local, at, values);
         }
     }
 
-    /// `state` with what `cond` being true, or false without `holds`, tells from `at` on.
-    fn assuming(&self, state: State, cond: &Expr, holds: bool, at: u32) -> State {
+    /// What changed since `mark`, with what `cond` being true, or false without `holds`, tells from
+    /// `at` on.
+    fn assuming(&self, mark: usize, cond: &Expr, holds: bool, at: u32) -> Delta {
+        let mut delta = self.delta(mark);
         let mut facts = Facts::new();
         self.facts(cond, holds, &mut facts);
-        self.with_facts(state, facts, at)
+        for (local, fact) in facts {
+            let values = Self::with_fact(&self.values_in(&delta, local), at, &fact);
+            delta.insert(local, values);
+        }
+        delta
     }
 
-    /// What the locals may hold where two ways meet that leave them `a` and `b`.
-    fn join(&self, a: &State, b: &State) -> State {
-        let mut out = State::default();
-        let declared = &self.flow.declared;
-        for (local, values) in a {
-            let joined = joined(values, b.get(local).unwrap_or(declared));
-            if !Self::is_declared(&joined) {
-                out.insert(*local, joined);
-            }
-        }
-        for (local, values) in b.iter().filter(|(local, _)| !a.contains_key(local)) {
-            let joined = joined(declared, values);
-            if !Self::is_declared(&joined) {
-                out.insert(*local, joined);
-            }
+    /// What the locals may hold where the ways in `ways` meet, each as what changed since the
+    /// locals held what they hold where the walk is.
+    fn joined_ways(&self, ways: &[Delta]) -> Delta {
+        let mut locals: Vec<LocalId> = ways.iter().flat_map(|way| way.keys().copied()).collect();
+        locals.sort_unstable();
+        locals.dedup();
+        let mut out = Delta::default();
+        for local in locals {
+            let held = self.values(local);
+            let mut values = ways.iter().map(|way| way.get(&local).unwrap_or(&held));
+            let Some(first) = values.next() else { continue };
+            out.insert(local, values.fold(first.clone(), |all, values| joined(&all, values)));
         }
         out
     }
 
-    /// Goes on after a statement, from what the ways out of it leave, joined at `at`. With none, the
-    /// code after it does not run.
-    fn leave(&mut self, at: u32, ways: Vec<State>) {
-        let mut ways = ways.into_iter();
-        let Some(first) = ways.next() else {
+    /// Goes on after a statement, from what the ways out of it leave, joined at `at`, each as what
+    /// changed since the locals held what they hold where the walk is. With none, the code after it
+    /// does not run.
+    fn leave(&mut self, at: u32, ways: Vec<Delta>) {
+        if ways.is_empty() {
             self.live = false;
             return;
-        };
-        let joined = ways.fold(first, |joined, way| self.join(&joined, &way));
-        self.switch(at, joined);
+        }
+        let joined = self.joined_ways(&ways);
+        self.apply(at, &joined);
         self.live = true;
     }
 
@@ -600,12 +1134,34 @@ impl<'a, 'r> Walker<'a, 'r> {
             StmtKind::Label(name) => Some((name.text.clone(), stmt.span.start)),
             _ => None,
         });
-        let labels = labels.collect();
+        let labels = (labels.collect(), self.mark());
         self.frame().labels.push(labels);
         for (index, stmt) in block.stmts.iter().enumerate() {
+            self.cast(stmt.span.start);
             self.stmt(stmt, block, index);
         }
+        // A `---@cast` line after the last statement holds for what runs after the block.
+        let next = match block.stmts.is_empty() {
+            true => block.span.start,
+            false => {
+                let next = self.tokens.partition_point(|token| token.span.start < block.span.end);
+                self.tokens.get(next).map_or(u32::MAX, |token| token.span.start)
+            }
+        };
+        self.cast(next);
         self.frame().labels.pop();
+    }
+
+    /// Gives the locals that the `---@cast` lines right before the token starting at `before` name
+    /// the values those lines give them.
+    fn cast(&mut self, before: u32) {
+        let first = self.casts.partition_point(|cast| cast.before < before);
+        let count = self.casts[first..].iter().take_while(|cast| cast.before == before).count();
+        for index in first..first + count {
+            let CastValue { local, origin, at, .. } = self.casts[index];
+            self.set(local, at, Rc::from([Version { origin, facts: FactList::default() }]));
+            self.forget_fields(at, |root, _| root == local);
+        }
     }
 
     /// Forgets what the locals that `block` declares hold, as they are gone after it.
@@ -618,7 +1174,7 @@ impl<'a, 'r> Walker<'a, 'r> {
             };
             for name in names {
                 if let Some(Resolved::Local(id)) = self.resolution.resolve_at(name.span.start) {
-                    self.state.remove(&id);
+                    self.replace(id, self.flow.declared.clone());
                 }
             }
         }
@@ -635,10 +1191,14 @@ impl<'a, 'r> Walker<'a, 'r> {
                     self.note_kinds(names, exprs);
                 }
                 // A local declared again, as in each run of a loop, holds the value of its declaration.
-                for name in names {
+                for (index, name) in names.iter().enumerate() {
                     if let Some(Resolved::Local(id)) = self.resolution.resolve_at(name.name.span.start) {
                         if self.state.contains_key(&id) {
                             self.set(id, stmt.span.end, self.flow.declared.clone());
+                        }
+                        self.forget_fields(stmt.span.end, |root, _| root == id);
+                        if let Some(value) = exprs.get(index) {
+                            self.note_alias(id, value);
                         }
                     }
                 }
@@ -653,8 +1213,12 @@ impl<'a, 'r> Walker<'a, 'r> {
             }
             StmtKind::Function { name, func } => {
                 self.function(func);
-                if name.path.is_empty() && name.method.is_none() {
-                    self.assigned(&name.base, stmt.span.end);
+                match name.method.as_ref().or(name.path.last()) {
+                    Some(key) => {
+                        let key = key.text.clone();
+                        self.forget_fields(stmt.span.end, |_, keys| keys.contains(&key));
+                    }
+                    None => self.assigned(&name.base, stmt.span.end),
                 }
             }
             StmtKind::Assign { targets, exprs } => {
@@ -668,9 +1232,18 @@ impl<'a, 'r> Walker<'a, 'r> {
                 });
                 let names: Vec<Option<(&Name, u32)>> = names.collect();
                 self.link(&names, exprs);
-                for target in targets {
-                    if let ExprKind::Name(name) = &target.kind {
-                        self.assigned(name, stmt.span.end);
+                for (index, target) in targets.iter().enumerate() {
+                    match &target.kind {
+                        ExprKind::Name(name) => {
+                            self.assigned(name, stmt.span.end);
+                            if let (Some(local), Some(value)) = (self.local(target), exprs.get(index)) {
+                                self.note_alias(local, value);
+                            }
+                        }
+                        _ => {
+                            self.forget_assigned(target, stmt.span.end);
+                            self.store(target, stmt.span.end);
+                        }
                     }
                 }
             }
@@ -678,7 +1251,10 @@ impl<'a, 'r> Walker<'a, 'r> {
                 self.visit_expr(expr);
                 match &target.kind {
                     ExprKind::Name(name) => self.assigned(name, stmt.span.end),
-                    _ => self.visit_expr(target),
+                    _ => {
+                        self.visit_expr(target);
+                        self.forget_assigned(target, stmt.span.end);
+                    }
                 }
             }
             StmtKind::Expr(expr) => {
@@ -697,25 +1273,25 @@ impl<'a, 'r> Walker<'a, 'r> {
             StmtKind::Do(body) => self.block(body),
             // It runs when its block ends, which changes nothing for the code after it.
             StmtKind::Defer(body) => {
-                let (state, live) = (self.state.clone(), self.live);
+                let (mark, live) = (self.mark(), self.live);
                 self.block(body);
-                self.switch(stmt.span.end, state);
+                self.rollback(mark, Some(stmt.span.end));
                 self.live = live;
             }
             StmtKind::If { branches, else_block } => self.if_stmt(stmt, branches, else_block.as_ref()),
             StmtKind::While { cond, body } => {
-                let reached = self.live;
-                let start = self.loop_start(stmt, |walker| walker.while_run(stmt, cond, body).1);
-                self.switch(cond.span.start, start);
-                let (ways, _) = self.while_run(stmt, cond, body);
+                let (reached, mark) = (self.live, self.mark());
+                self.loop_start(stmt, cond.span.start, mark, |walker| walker.while_run(stmt, cond, body, mark).1);
+                let (ways, _) = self.while_run(stmt, cond, body, mark);
+                self.rollback(mark, Some(stmt.span.end));
                 self.leave(stmt.span.end, ways);
                 self.live &= reached;
             }
             StmtKind::Repeat { body, cond } => {
-                let reached = self.live;
-                let start = self.loop_start(stmt, |walker| walker.repeat_run(stmt, body, cond).1);
-                self.switch(body.span.start, start);
-                let (ways, _) = self.repeat_run(stmt, body, cond);
+                let (reached, mark) = (self.live, self.mark());
+                self.loop_start(stmt, body.span.start, mark, |walker| walker.repeat_run(stmt, body, cond, mark).1);
+                let (ways, _) = self.repeat_run(stmt, body, cond, mark);
+                self.rollback(mark, Some(stmt.span.end));
                 self.leave(stmt.span.end, ways);
                 self.live &= reached;
             }
@@ -732,10 +1308,11 @@ impl<'a, 'r> Walker<'a, 'r> {
                 self.live = false;
             }
             StmtKind::Break => {
-                if self.live {
-                    let state = self.state.clone();
+                let mark = self.frames.last().and_then(|frame| frame.loops.last()).map(|(_, mark)| *mark);
+                if let Some(mark) = mark.filter(|_| self.live) {
+                    let delta = self.delta(mark);
                     if let Some(breaks) = self.frame().breaks.last_mut() {
-                        breaks.push(state);
+                        breaks.push(delta);
                     }
                 }
                 self.live = false;
@@ -756,105 +1333,166 @@ impl<'a, 'r> Walker<'a, 'r> {
             if self.is_reassigned(id) {
                 continue;
             }
-            // `local kind = type(value)` tells nothing about what is assigned to `value` later.
-            if let Some(checked) = self.type_call(expr).filter(|(checked, _)| !self.is_reassigned(*checked)) {
-                self.kinds.insert(id, checked);
+            // `local kind = type(value)` tells nothing about what is assigned to `value` later, or
+            // by another function.
+            let unchanged =
+                |(checked, _): &(LocalId, bool)| !self.is_path(*checked) && !self.assigned_elsewhere(*checked);
+            if let Some((checked, numbers)) = self.type_call(expr).filter(unchanged) {
+                let held = self.is_reassigned(checked).then(|| origins(&self.values(checked)));
+                self.kinds.insert(id, (checked, numbers, held));
             } else if let Some(numbers) = self.type_function(expr) {
                 self.type_functions.insert(id, numbers);
             }
         }
     }
 
+    /// Makes the field of a local that `target` names hold the value an assignment gives it from `at`
+    /// on.
+    fn store(&mut self, target: &Expr, at: u32) {
+        let Some(origin) = self.flow.stored.get(&target.span.start).copied() else { return };
+        let Some(field) = self.place(target) else { return };
+        self.set(field, at, Rc::from([Version { origin, facts: FactList::default() }]));
+    }
+
     /// Makes the local whose name `name` assigns hold the value it is given from `at` on.
     fn assigned(&mut self, name: &Name, at: u32) {
         let Some(Resolved::Local(id)) = self.resolution.resolve_at(name.span.start) else { return };
         let Some(origin) = self.flow.written_at(name.span.start) else { return };
-        let values: Values = Rc::from([Version { origin, facts: self.no_facts.clone() }]);
+        let values: Values = Rc::from([Version { origin, facts: FactList::default() }]);
         self.set(id, at, values);
+        self.forget_fields(at, |root, _| root == id);
     }
 
     fn if_stmt(&mut self, stmt: &'a Stmt, branches: &'a [IfBranch], else_block: Option<&'a Block>) {
         let reached = self.live;
         let else_start = else_block.map(|block| block.span.start.min(stmt.span.end));
-        let mut failed = self.state.clone();
+        let mark = self.mark();
         let mut ways = Vec::new();
         for (index, branch) in branches.iter().enumerate() {
             // The conditions before it failed for the condition of an `elseif` too.
-            self.switch(branch.keyword_span.end, failed);
             self.live = reached;
             self.visit_expr(&branch.cond);
-            let tested = self.state.clone();
+            let tested = self.mark();
             // Measured between the keywords so half-typed code inside the branch still counts.
             self.assume(&branch.cond, true, branch.cond.span.end);
             self.block(&branch.block);
             if self.live {
-                ways.push(self.state.clone());
+                ways.push(self.delta(mark));
             }
             let next = branches.get(index + 1).map(|branch| branch.keyword_span.end);
             let at = next.or(else_start).unwrap_or(stmt.span.end);
-            failed = self.assuming(tested, &branch.cond, false, at);
+            self.rollback(tested, Some(at));
+            self.assume(&branch.cond, false, at);
         }
         match else_block {
             Some(block) => {
-                self.switch(else_start.unwrap_or(block.span.start), failed);
                 self.live = reached;
                 self.block(block);
                 if self.live {
-                    ways.push(self.state.clone());
+                    ways.push(self.delta(mark));
                 }
             }
-            None if reached => ways.push(failed),
+            None if reached => ways.push(self.delta(mark)),
             None => {}
         }
+        self.rollback(mark, Some(stmt.span.end));
         self.leave(stmt.span.end, ways);
     }
 
-    /// What the locals hold at the start of each run of the loop `stmt`, of which `run` walks one
-    /// from what they hold at its start, giving what they hold to start it again.
-    fn loop_start(&mut self, stmt: &Stmt, run: impl Fn(&mut Self) -> Option<State>) -> State {
-        let entry = self.within(stmt, self.state.clone());
+    /// Makes the locals hold, from `at` on, what they hold at the start of each run of the loop
+    /// `stmt`, of which `run` walks one from what they hold at its start, giving what changed since
+    /// `mark` where it starts again.
+    fn loop_start(&mut self, stmt: &Stmt, at: u32, mark: usize, run: impl Fn(&mut Self) -> Option<Delta>) {
+        let entry = self.entry(stmt);
         let first = self.ordered.partition_point(|(start, ..)| *start < stmt.span.start);
-        if !self.ordered.get(first).is_some_and(|(start, ..)| *start < stmt.span.end) {
-            return entry;
+        let assigns = self.ordered.get(first).is_some_and(|(start, ..)| *start < stmt.span.end);
+        let yields = self.yields_in(stmt.span);
+        if !assigns && !yields {
+            return self.apply(at, &entry);
         }
         // Inside a loop being walked to find what its locals hold at its start, the loops in it start
         // with any value they give, which keeps loops inside loops from multiplying the walks.
         if !self.record {
-            return self.widened(stmt.span, entry);
+            let mut widened = self.widened(stmt.span, entry);
+            if yields {
+                widened = self.yielded(widened);
+            }
+            return self.apply(at, &widened);
         }
-        let (record, state, live) = (self.record, self.state.clone(), self.live);
+        let live = self.live;
         self.record = false;
-        let mut start = entry;
+        let mut start = self.settled(entry);
         for round in 1..=MAX_ROUNDS {
-            self.state = start.clone();
+            self.apply(at, &start);
             self.live = true;
-            let next = match run(self) {
-                Some(again) => self.join(&start, &self.within(stmt, again)),
+            let again = run(self);
+            self.rollback(mark, None);
+            let next = match again {
+                Some(again) => {
+                    let ways = [start.clone(), self.within(stmt, again)];
+                    self.settled(self.joined_ways(&ways))
+                }
                 None => start.clone(),
             };
-            if next == start {
+            if same_deltas(&next, &start) {
                 break;
             }
             start = next;
             if round == MAX_ROUNDS {
-                start = self.widened(stmt.span, start);
+                start = self.settled(self.widened(stmt.span, start));
             }
         }
-        (self.record, self.state, self.live) = (record, state, live);
-        start
+        (self.record, self.live) = (true, live);
+        self.apply(at, &start);
     }
 
-    /// `state` without the locals that the loop `stmt` declares, which each of its runs declares
+    /// What the loop `stmt` starts with: the locals it declares, which each of its runs declares
+    /// again, hold the value of their declaration, and the fields it may change before it starts
+    /// again are forgotten.
+    fn entry(&self, stmt: &Stmt) -> Delta {
+        let span = stmt.span;
+        let mut entry = Delta::default();
+        let first = self.declarations.partition_point(|(start, _)| *start < span.start);
+        let inside = self.declarations[first..].iter().take_while(|(start, _)| *start <= span.end);
+        for (_, local) in inside.filter(|(start, local)| span.contains(*start) && self.state.contains_key(local)) {
+            entry.insert(*local, self.flow.declared.clone());
+        }
+        if self.fields.is_empty() {
+            return entry;
+        }
+        let mut changes = Changes {
+            resolution: self.resolution,
+            aliases: &self.aliases,
+            locals: Vec::new(),
+            keys: Vec::new(),
+            tables: Vec::new(),
+        };
+        visit::walk_stmt(&mut changes, stmt);
+        let paths = self.paths.borrow();
+        for id in &self.fields {
+            let (root, keys) = &paths[(*id - self.first_path) as usize];
+            if span.contains(self.resolution.local(*root).decl.start) || changes.changes(*root, keys) {
+                entry.insert(*id, self.flow.declared.clone());
+            }
+        }
+        entry
+    }
+
+    /// `delta` without the locals that the loop `stmt` declares, which each of its runs declares
     /// again.
-    fn within(&self, stmt: &Stmt, mut state: State) -> State {
-        state.retain(|local, _| !stmt.span.contains(self.resolution.local(*local).decl.start));
-        state
+    fn within(&self, stmt: &Stmt, mut delta: Delta) -> Delta {
+        for (local, values) in delta.iter_mut() {
+            if stmt.span.contains(self.resolution.local(self.root(*local)).decl.start) {
+                *values = self.flow.declared.clone();
+            }
+        }
+        delta
     }
 
-    /// `state` where the locals that `code` assigns may hold any value it gives them, with nothing
+    /// `delta` where the locals that `code` assigns may hold any value it gives them, with nothing
     /// known about them, as at the start of a loop when walking it again has not settled what they
     /// hold. Those that `code` declares are left out.
-    fn widened(&self, code: Span, mut state: State) -> State {
+    fn widened(&self, code: Span, mut delta: Delta) -> Delta {
         let first = self.ordered.partition_point(|(start, ..)| *start < code.start);
         let inside = self.ordered[first..].iter().take_while(|(start, ..)| *start < code.end);
         let mut given: FxHashMap<LocalId, Vec<u32>> = FxHashMap::default();
@@ -864,56 +1502,54 @@ impl<'a, 'r> Walker<'a, 'r> {
             given.entry(*local).or_default().push(*origin);
         }
         for (local, origins) in given {
-            let values = self.values(&state, local);
-            state.insert(local, self.unknown(&values, origins));
+            let values = self.values_in(&delta, local);
+            delta.insert(local, self.unknown(&values, origins));
         }
-        state
-    }
-
-    /// `values` and those that `origins` may give again, with nothing known about these.
-    fn given(&self, values: &[Version], origins: impl IntoIterator<Item = u32>) -> Values {
-        let mut out = values.to_vec();
-        for origin in origins {
-            let fresh = Version { origin, facts: self.no_facts.clone() };
-            match out.iter_mut().find(|value| value.origin == origin) {
-                Some(value) => *value = fresh,
-                None => out.push(fresh),
-            }
-        }
-        out.into()
+        delta
     }
 
     /// `values` and those of `origins`, with nothing known about any of them.
     fn unknown(&self, values: &[Version], origins: impl IntoIterator<Item = u32>) -> Values {
         let mut out: Vec<Version> =
-            values.iter().map(|value| Version { origin: value.origin, facts: self.no_facts.clone() }).collect();
+            values.iter().map(|value| Version { origin: value.origin, facts: FactList::default() }).collect();
         for origin in origins {
             if !out.iter().any(|value| value.origin == origin) {
-                out.push(Version { origin, facts: self.no_facts.clone() });
+                out.push(Version { origin, facts: FactList::default() });
             }
         }
         out.into()
     }
 
-    /// Walks one run of a `while` loop from what the locals hold at its start: what they hold where
-    /// the loop ends, and where it starts again.
-    fn while_run(&mut self, stmt: &'a Stmt, cond: &'a Expr, body: &'a Block) -> (Vec<State>, Option<State>) {
+    /// Walks one run of a `while` loop from what the locals hold at its start: what changed since
+    /// `mark` where the loop ends, and where it starts again.
+    fn while_run(
+        &mut self,
+        stmt: &'a Stmt,
+        cond: &'a Expr,
+        body: &'a Block,
+        mark: usize,
+    ) -> (Vec<Delta>, Option<Delta>) {
         let reached = self.live;
         self.visit_expr(cond);
-        let tested = self.state.clone();
+        let ended = reached && !matches!(cond.unparen().kind, ExprKind::True);
+        let ended = ended.then(|| self.assuming(mark, cond, false, stmt.span.end));
         self.assume(cond, true, cond.span.end);
-        let mut ways = self.loop_body(stmt, body);
-        let again = self.live.then(|| self.state.clone());
-        if reached && !matches!(cond.unparen().kind, ExprKind::True) {
-            ways.push(self.assuming(tested, cond, false, stmt.span.end));
-        }
+        let mut ways = self.loop_body(stmt, body, mark);
+        let again = self.live.then(|| self.delta(mark));
+        ways.extend(ended);
         (ways, again)
     }
 
-    /// Walks one run of a `repeat` loop from what the locals hold at its start: what they hold where
-    /// the loop ends, and where it starts again.
-    fn repeat_run(&mut self, stmt: &'a Stmt, body: &'a Block, cond: &'a Expr) -> (Vec<State>, Option<State>) {
-        self.frame().loops.push(stmt.span.start);
+    /// Walks one run of a `repeat` loop from what the locals hold at its start: what changed since
+    /// `mark` where the loop ends, and where it starts again.
+    fn repeat_run(
+        &mut self,
+        stmt: &'a Stmt,
+        body: &'a Block,
+        cond: &'a Expr,
+        mark: usize,
+    ) -> (Vec<Delta>, Option<Delta>) {
+        self.frame().loops.push((stmt.span.start, mark));
         self.frame().breaks.push(Vec::new());
         self.statements(body);
         let mut ways = self.frame().breaks.pop().unwrap_or_default();
@@ -921,41 +1557,40 @@ impl<'a, 'r> Walker<'a, 'r> {
         // The locals of the body are still there in the condition.
         self.visit_expr(cond);
         self.forget(body);
-        let tested = self.state.clone();
         let mut again = None;
         if self.live {
             if !matches!(cond.unparen().kind, ExprKind::True) {
-                again = Some(self.assuming(tested.clone(), cond, false, body.span.start));
+                again = Some(self.assuming(mark, cond, false, body.span.start));
             }
             if !matches!(cond.unparen().kind, ExprKind::False | ExprKind::Nil) {
-                ways.push(self.assuming(tested, cond, true, stmt.span.end));
+                ways.push(self.assuming(mark, cond, true, stmt.span.end));
             }
         }
         (ways, again)
     }
 
     fn for_loop(&mut self, stmt: &'a Stmt, body: &'a Block) {
-        let reached = self.live;
-        let start = self.loop_start(stmt, |walker| walker.for_run(stmt, body).1);
-        self.switch(body.span.start, start);
-        let (ways, _) = self.for_run(stmt, body);
+        let (reached, mark) = (self.live, self.mark());
+        self.loop_start(stmt, body.span.start, mark, |walker| walker.for_run(stmt, body, mark).1);
+        let (ways, _) = self.for_run(stmt, body, mark);
+        self.rollback(mark, Some(stmt.span.end));
         self.leave(stmt.span.end, ways);
         self.live &= reached;
     }
 
-    /// Walks one run of a `for` loop from what the locals hold at its start: what they hold where the
-    /// loop ends, and where it starts again.
-    fn for_run(&mut self, stmt: &'a Stmt, body: &'a Block) -> (Vec<State>, Option<State>) {
-        let start = self.within(stmt, self.state.clone());
-        let mut ways = self.loop_body(stmt, body);
+    /// Walks one run of a `for` loop from what the locals hold at its start: what changed since
+    /// `mark` where the loop ends, and where it starts again.
+    fn for_run(&mut self, stmt: &'a Stmt, body: &'a Block, mark: usize) -> (Vec<Delta>, Option<Delta>) {
+        let start = self.within(stmt, self.delta(mark));
+        let mut ways = self.loop_body(stmt, body, mark);
         // It ends where a run would start, when what it goes through runs out.
         ways.push(start);
-        (ways, self.live.then(|| self.state.clone()))
+        (ways, self.live.then(|| self.delta(mark)))
     }
 
-    /// Walks the body of the loop `stmt`, giving what the locals hold at its `break`s.
-    fn loop_body(&mut self, stmt: &Stmt, body: &'a Block) -> Vec<State> {
-        self.frame().loops.push(stmt.span.start);
+    /// Walks the body of the loop `stmt`, giving what changed since `mark` at its `break`s.
+    fn loop_body(&mut self, stmt: &Stmt, body: &'a Block, mark: usize) -> Vec<Delta> {
+        self.frame().loops.push((stmt.span.start, mark));
         self.frame().breaks.push(Vec::new());
         self.block(body);
         let ways = self.frame().breaks.pop().unwrap_or_default();
@@ -968,27 +1603,38 @@ impl<'a, 'r> Walker<'a, 'r> {
             return;
         }
         let labels = &self.frames.last().expect("the main chunk is always walked").labels;
-        let target = labels.iter().rev().find_map(|labels| labels.iter().find(|(label, _)| *label == name.text));
+        let target = labels.iter().rev().find_map(|(labels, mark)| {
+            labels.iter().find(|(label, _)| *label == name.text).map(|(_, at)| (*at, *mark))
+        });
         // A `goto` back to a label is handled at the label.
-        if let Some((_, at)) = target.filter(|(_, at)| *at > stmt.span.start) {
-            let state = self.state.clone();
-            self.gotos.entry(*at).or_default().push(state);
+        if let Some((at, mark)) = target.filter(|(at, _)| *at > stmt.span.start) {
+            let delta = self.delta(mark);
+            self.gotos.entry(at).or_default().push(delta);
         }
     }
 
     /// Goes on at a label from the code before it and the `goto`s that jump ahead to it. A `goto`
     /// after it may jump back to it, where the locals assigned since may hold any value given there.
     fn label(&mut self, stmt: &Stmt, name: &Name, block: &Block, index: usize) {
+        let mark = self.frames.last().and_then(|frame| frame.labels.last()).map_or(0, |(_, mark)| *mark);
         let jumps = self.gotos.remove(&stmt.span.start).unwrap_or_default();
-        let mut ways = self.live.then(|| self.state.clone()).into_iter().chain(jumps);
-        let Some(first) = ways.next() else { return };
-        let mut joined = ways.fold(first, |joined, way| self.join(&joined, &way));
+        let ways: Vec<Delta> = self.live.then(|| self.delta(mark)).into_iter().chain(jumps).collect();
+        if ways.is_empty() {
+            return;
+        }
+        self.rollback(mark, Some(stmt.span.start));
+        let mut joined = self.joined_ways(&ways);
         let mut jumps = Jumps { name: &name.text, found: false };
         block.stmts[index + 1..].iter().for_each(|stmt| jumps.visit_stmt(stmt));
         if jumps.found {
             joined = self.widened(Span::new(stmt.span.start, block.span.end), joined);
+            let fields: Vec<LocalId> =
+                self.fields.iter().copied().chain(joined.keys().copied().filter(|id| self.is_path(*id))).collect();
+            for field in fields {
+                joined.insert(field, self.flow.declared.clone());
+            }
         }
-        self.switch(stmt.span.start, joined);
+        self.apply(stmt.span.start, &joined);
         self.live = true;
     }
 
@@ -1000,34 +1646,46 @@ impl<'a, 'r> Walker<'a, 'r> {
         let Some(id) = self.functions.get(&func.span.start).copied() else {
             return self.block(&func.body);
         };
-        let (outer, live) = (self.state.clone(), self.live);
+        let (mark, live) = (self.mark(), self.live);
         // While a loop is walked to find what its locals hold at its start, nothing a function holds
         // changes that.
         if self.record {
             self.walk_function(id, func);
         }
-        let mut after = outer;
-        for (local, origin) in self.inner_writes.get(&id).into_iter().flatten() {
-            let values = self.values(&after, *local);
-            after.insert(*local, self.given(&values, [*origin]));
+        self.rollback(mark, Some(func.span.end));
+        // A function that a runtime function is given to run later, as `SetTimeout` is, gives the
+        // locals nothing before the code that creates it yields.
+        if !self.deferred.contains(&func.span.start) {
+            for local in self.inner_writes.get(&id).cloned().unwrap_or_default() {
+                if let Some(others) = self.others(local, u32::MAX) {
+                    let values = self.with_others(&self.values(local), others);
+                    self.set(local, func.span.end, values);
+                }
+            }
         }
-        self.switch(func.span.end, after);
         self.live = live;
     }
 
     fn walk_function(&mut self, id: FuncId, func: &'a FuncBody) {
         let frame = self.frame();
-        frame.created = frame.loops.first().map_or(func.span.start, |start| (*start).min(func.span.start));
-        let mut entry = self.state.clone();
-        for local in self.captured.get(&id).into_iter().flatten() {
-            let decl = self.resolution.local(*local).func;
+        frame.created = frame.loops.first().map_or(func.span.start, |(start, _)| (*start).min(func.span.start));
+        let at = func.params_span.end;
+        let mut others = self.others_of(id);
+        for local in self.captured.get(&id).cloned().unwrap_or_default() {
+            let decl = self.resolution.local(local).func;
             let created = self.frames.iter().rev().find(|frame| frame.func == decl).map_or(0, |frame| frame.created);
-            let later = self.writes[local].iter().filter(|write| write.func != decl || write.start >= created);
-            let values = self.values(&entry, *local);
-            entry.insert(*local, self.given(&values, later.map(|write| write.origin)));
+            if let Some(origin) = self.others(local, created) {
+                let values = self.with_others(&self.values(local), origin);
+                self.set(local, at, values);
+                others.push((local, origin));
+            }
         }
-        self.frames.push(Frame::new(id));
-        self.switch(func.params_span.end, entry);
+        // It runs later, when its fields may hold anything.
+        let fields: Vec<LocalId> = self.fields.iter().copied().collect();
+        for field in fields {
+            self.set(field, at, self.flow.declared.clone());
+        }
+        self.frames.push(Frame { others, ..Frame::new(id) });
         self.live = true;
         self.block(&func.body);
         self.frames.pop();
@@ -1055,8 +1713,36 @@ impl<'a, 'r> Walker<'a, 'r> {
         }
     }
 
+    /// Adds that the local and fields that `expr` reads a field, index or call from hold a value, as
+    /// `data` and `data.job` do in `data.job.name` and `data.job:get()`.
+    fn reads(&self, expr: &Expr, out: &mut Facts) {
+        if let Some(local) = self.read_from(expr) {
+            out.push((local, Fact::Truthy));
+        }
+        let mut expr = expr.unparen();
+        loop {
+            let base = match &expr.kind {
+                ExprKind::Field { base, .. } | ExprKind::Index { base, .. } | ExprKind::MethodCall { base, .. } => base,
+                ExprKind::Call { callee, .. } if !matches!(callee.kind, ExprKind::Name(_)) => callee,
+                _ => return,
+            };
+            expr = base.unparen();
+            if !matches!(expr.kind, ExprKind::Name(_)) && field_path(self.resolution, expr).is_some() {
+                out.extend(self.place(expr).map(|field| (field, Fact::Truthy)));
+            }
+        }
+    }
+
     fn is_reassigned(&self, local: LocalId) -> bool {
         self.writes.contains_key(&local)
+    }
+
+    /// Whether a function other than the one being walked assigns `local`, which it may do at any
+    /// time.
+    fn assigned_elsewhere(&self, local: LocalId) -> bool {
+        let func = self.frames.last().map_or(MAIN_CHUNK, |frame| frame.func);
+        let writes = self.writes.get(&local).map_or(&[][..], Vec::as_slice);
+        writes.iter().any(|write| write.func != func)
     }
 
     fn is_global(&self, name: &Name) -> bool {
@@ -1068,7 +1754,7 @@ impl<'a, 'r> Walker<'a, 'r> {
         let ExprKind::Call { callee, args, .. } = &expr.unparen().kind else { return None };
         let [arg] = args.as_slice() else { return None };
         let numbers = self.type_function(callee)?;
-        Some((self.local(arg)?, numbers))
+        Some((self.place(arg)?, numbers))
     }
 
     /// Whether `expr` is the global `type` (`false`) or `math.type` (`true`), or a local that holds
@@ -1093,7 +1779,14 @@ impl<'a, 'r> Walker<'a, 'r> {
     fn kind_check(&self, side: &Expr, other: &Expr) -> Option<(LocalId, &'static str)> {
         let name = other.unparen().as_string()?;
         let (local, numbers) = match &side.unparen().kind {
-            ExprKind::Name(_) => *self.kinds.get(&self.local(side)?)?,
+            ExprKind::Name(_) => {
+                let (local, numbers, held) = self.kinds.get(&self.local(side)?)?;
+                // Assigned since, the local holds another value than the one whose kind it tells.
+                if held.as_ref().is_some_and(|held| *held != origins(&self.values(*local))) {
+                    return None;
+                }
+                (*local, *numbers)
+            }
             _ => self.type_call(side)?,
         };
         let names: &[&'static str] = if numbers { &NUMBER_NAMES } else { &TYPE_NAMES };
@@ -1107,6 +1800,12 @@ impl<'a, 'r> Walker<'a, 'r> {
             ExprKind::Name(_) => {
                 if let Some(local) = self.local(cond) {
                     out.push((local, if holds { Fact::Truthy } else { Fact::Falsy }));
+                }
+            }
+            ExprKind::Field { .. } | ExprKind::Index { .. } if field_path(self.resolution, cond).is_some() => {
+                out.extend(self.place(cond).map(|field| (field, if holds { Fact::Truthy } else { Fact::Falsy })));
+                if holds {
+                    self.reads(cond, out);
                 }
             }
             ExprKind::Unary { op: UnOp::Not, expr } => self.facts(expr, !holds, out),
@@ -1123,9 +1822,10 @@ impl<'a, 'r> Walker<'a, 'r> {
             ExprKind::Binary { op: BinOp::Or | BinOp::And, lhs, rhs, .. } => self.either(lhs, rhs, holds, out),
             ExprKind::Binary { op: op @ (BinOp::Eq | BinOp::Ne), lhs, rhs, .. } => {
                 let equal = (*op == BinOp::Eq) == holds;
-                let compared = match (self.local(lhs), literal(rhs)) {
-                    (Some(local), Some(value)) => Some((local, value)),
-                    _ => self.local(rhs).zip(literal(lhs)),
+                let compared = match (literal(rhs), literal(lhs)) {
+                    (Some(value), _) => self.place(lhs).zip(Some(value)),
+                    (None, Some(value)) => self.place(rhs).zip(Some(value)),
+                    (None, None) => None,
                 };
                 if let Some((local, value)) = compared {
                     out.push((local, if equal { Fact::Is(value) } else { Fact::IsNot(value) }));
@@ -1135,20 +1835,14 @@ impl<'a, 'r> Walker<'a, 'r> {
                 }
                 // `data?.job == 'police'` and `data?.job ~= nil` read a value from `data`.
                 for (side, other) in [(lhs, rhs), (rhs, lhs)] {
-                    if let (Some(local), Some(value)) = (self.read_from(side), literal(other)) {
-                        if equal != (value == Type::Nil) {
-                            out.push((local, Fact::Truthy));
-                        }
+                    if literal(other).is_some_and(|value| equal != (value == Type::Nil)) {
+                        self.reads(side, out);
                     }
                 }
             }
             // `data?.job`, `data.job`, `data[key]` and `data:get()` are only true when `data` holds a
             // value: `?.` gives `nil` for a `nil` one, and the others raise an error.
-            _ if holds => {
-                if let Some(local) = self.read_from(cond) {
-                    out.push((local, Fact::Truthy));
-                }
-            }
+            _ if holds => self.reads(cond, out),
             _ => {}
         }
     }
@@ -1210,21 +1904,390 @@ impl<'a> Visitor<'a> for Walker<'a, '_> {
             // `b` of `a and b` only runs when `a` is true, and `b` of `a or b` when it is false.
             ExprKind::Binary { op: op @ (BinOp::And | BinOp::Or), lhs, rhs, .. } => {
                 self.visit_expr(lhs);
-                let before = self.state.clone();
+                let mark = self.mark();
                 self.assume(lhs, *op == BinOp::And, rhs.span.start);
                 self.visit_expr(rhs);
-                let after = self.join(&before, &self.state);
-                self.switch(rhs.span.end, after);
+                let after = self.delta(mark);
+                self.rollback(mark, Some(rhs.span.end));
+                let joined = self.joined_ways(&[Delta::default(), after]);
+                self.apply(rhs.span.end, &joined);
+            }
+            // What a call is given, it may change the fields of, and one that yields lets other code
+            // run.
+            ExprKind::Call { args, .. } => {
+                visit::walk_expr(self, expr);
+                args.iter().for_each(|arg| self.forget_fields_of(arg, expr.span.end));
+                self.call_ended(expr);
+            }
+            ExprKind::MethodCall { base, args, .. } => {
+                visit::walk_expr(self, expr);
+                for given in std::iter::once(&**base).chain(args) {
+                    self.forget_fields_of(given, expr.span.end);
+                }
+                self.call_ended(expr);
             }
             _ => visit::walk_expr(self, expr),
         }
     }
 }
 
+/// Whether a call of the function at `path` yields, and so lets other code run, as the `fivem` rules
+/// read it: `Wait`, `Citizen.Wait`, `Citizen.Await` and `coroutine.yield`, and those read as
+/// `await`, such as `lib.callback.await` and `MySQL.query.await`.
+fn is_yield_path(path: &str) -> bool {
+    let last = path.rsplit('.').next().unwrap_or(path);
+    matches!(path, "Wait" | "Citizen.Wait" | "Citizen.Await" | "coroutine.yield") || last.eq_ignore_ascii_case("await")
+}
+
+/// Whether the runtime function at `path` runs the functions it is given later, once the code that
+/// calls it yields, as a timeout, a thread or a handler does.
+fn defers_path(path: &str) -> bool {
+    matches!(
+        path,
+        "SetTimeout"
+            | "Citizen.SetTimeout"
+            | "CreateThread"
+            | "Citizen.CreateThread"
+            | "AddEventHandler"
+            | "RegisterNetEvent"
+            | "RegisterServerEvent"
+            | "RegisterCommand"
+            | "RegisterNUICallback"
+            | "AddStateBagChangeHandler"
+            | "exports"
+    )
+}
+
+/// Finds the functions written as arguments of the calls of runtime functions that run them later,
+/// as `defers_path` picks them.
+struct Deferred<'r> {
+    resolution: &'r Resolution,
+    out: FxHashSet<u32>,
+}
+
+impl<'ast> Visitor<'ast> for Deferred<'_> {
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        if let ExprKind::Call { callee, args, .. } = &expr.kind {
+            let mut root = callee.unparen();
+            while let ExprKind::Field { base, .. } = &root.kind {
+                root = base.unparen();
+            }
+            let global = matches!(&root.kind, ExprKind::Name(name)
+                if matches!(self.resolution.resolve_at(name.span.start), Some(Resolved::Global(_))));
+            if global && callee.dotted_path().as_deref().is_some_and(defers_path) {
+                for arg in args {
+                    if let ExprKind::Function(func) = &arg.unparen().kind {
+                        self.out.insert(func.span.start);
+                    }
+                }
+            }
+        }
+        visit::walk_expr(self, expr);
+    }
+}
+
+/// What a call calls, as far as telling whether it may yield goes.
+enum Callee {
+    Yields,
+    Local(LocalId),
+    Path(String),
+    Other,
+}
+
+/// Finds the calls of a file that may yield: those `is_yield_path` picks, and those of the functions
+/// of the file that make such a call.
+struct Yields<'r> {
+    resolution: &'r Resolution,
+    functions: &'r FxHashMap<u32, FuncId>,
+    /// The function being visited.
+    func: FuncId,
+    /// The functions of the file, by the local they are given to.
+    locals: FxHashMap<LocalId, Vec<FuncId>>,
+    /// The functions of the file, by the path of the global or field they are given to.
+    paths: FxHashMap<String, Vec<FuncId>>,
+    /// Each call, with where it starts, the function it is in, and what it calls.
+    calls: Vec<(u32, FuncId, Callee)>,
+}
+
+impl<'r> Yields<'r> {
+    /// The calls of `chunk` that may yield, by where they start, in order, each with the function it
+    /// is in.
+    fn of(chunk: &Chunk, resolution: &'r Resolution, functions: &'r FxHashMap<u32, FuncId>) -> Vec<(u32, FuncId)> {
+        let mut finder = Yields {
+            resolution,
+            functions,
+            func: MAIN_CHUNK,
+            locals: FxHashMap::default(),
+            paths: FxHashMap::default(),
+            calls: Vec::new(),
+        };
+        finder.visit_block(&chunk.block);
+        let mut yielding: FxHashSet<FuncId> = FxHashSet::default();
+        loop {
+            let found = yielding.len();
+            for (_, func, callee) in &finder.calls {
+                if finder.yields(callee, &yielding) {
+                    yielding.insert(*func);
+                }
+            }
+            if yielding.len() == found {
+                break;
+            }
+        }
+        let calls = finder.calls.iter().filter(|(_, _, callee)| finder.yields(callee, &yielding));
+        let mut calls: Vec<(u32, FuncId)> = calls.map(|(at, func, _)| (*at, *func)).collect();
+        calls.sort_unstable();
+        calls
+    }
+
+    /// Whether a call of `callee` may yield, when the functions of the file in `yielding` do.
+    fn yields(&self, callee: &Callee, yielding: &FxHashSet<FuncId>) -> bool {
+        let funcs = match callee {
+            Callee::Yields => return true,
+            Callee::Local(local) => self.locals.get(local),
+            Callee::Path(path) => self.paths.get(path),
+            Callee::Other => None,
+        };
+        funcs.is_some_and(|funcs| funcs.iter().any(|func| yielding.contains(func)))
+    }
+
+    fn local(&self, name: &Name) -> Option<LocalId> {
+        match self.resolution.resolve_at(name.span.start) {
+            Some(Resolved::Local(local)) => Some(local),
+            _ => None,
+        }
+    }
+
+    /// The local that `expr` names.
+    fn local_of(&self, expr: &Expr) -> Option<LocalId> {
+        match &expr.unparen().kind {
+            ExprKind::Name(name) => self.local(name),
+            _ => None,
+        }
+    }
+
+    /// Notes that the local `local`, or else the global or field at `path`, is given `value`, when
+    /// that is a function.
+    fn given(&mut self, local: Option<LocalId>, path: Option<String>, value: &Expr) {
+        let ExprKind::Function(func) = &value.unparen().kind else { return };
+        let Some(func) = self.functions.get(&func.span.start).copied() else { return };
+        match (local, path) {
+            (Some(local), _) => self.locals.entry(local).or_default().push(func),
+            (None, Some(path)) => self.paths.entry(path).or_default().push(func),
+            (None, None) => {}
+        }
+    }
+
+    fn callee(&self, callee: &Expr) -> Callee {
+        let callee = callee.unparen();
+        let path = callee.dotted_path();
+        let awaits = matches!(&callee.kind, ExprKind::Field { name, .. } if name.text.eq_ignore_ascii_case("await"));
+        if awaits || path.as_deref().is_some_and(is_yield_path) {
+            return Callee::Yields;
+        }
+        match self.local_of(callee) {
+            Some(local) => Callee::Local(local),
+            None => path.map_or(Callee::Other, Callee::Path),
+        }
+    }
+}
+
+impl<'ast> Visitor<'ast> for Yields<'_> {
+    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        match &stmt.kind {
+            StmtKind::LocalFunction { name, func } => {
+                if let (Some(local), Some(func)) = (self.local(name), self.functions.get(&func.span.start)) {
+                    self.locals.entry(local).or_default().push(*func);
+                }
+            }
+            StmtKind::Local { names, exprs, .. } => {
+                for (name, value) in names.iter().zip(exprs) {
+                    self.given(self.local(&name.name), None, value);
+                }
+            }
+            StmtKind::Function { name, func } => {
+                if let Some(func) = self.functions.get(&func.span.start).copied() {
+                    match self.local(&name.base).filter(|_| name.path.is_empty() && name.method.is_none()) {
+                        Some(local) => self.locals.entry(local).or_default().push(func),
+                        None => {
+                            let names = std::iter::once(&name.base).chain(&name.path).chain(&name.method);
+                            let path: Vec<&str> = names.map(|name| name.text.as_str()).collect();
+                            self.paths.entry(path.join(".")).or_default().push(func);
+                        }
+                    }
+                }
+            }
+            StmtKind::Assign { targets, exprs } => {
+                for (target, value) in targets.iter().zip(exprs) {
+                    self.given(self.local_of(target), target.dotted_path(), value);
+                }
+            }
+            _ => {}
+        }
+        visit::walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        let callee = match &expr.kind {
+            ExprKind::Call { callee, .. } => Some(self.callee(callee)),
+            ExprKind::MethodCall { base, method, .. } => Some(match method.text.eq_ignore_ascii_case("await") {
+                true => Callee::Yields,
+                false => {
+                    base.dotted_path().map_or(Callee::Other, |path| Callee::Path(format!("{path}.{}", method.text)))
+                }
+            }),
+            _ => None,
+        };
+        if let Some(callee) = callee {
+            self.calls.push((expr.span.start, self.func, callee));
+        }
+        visit::walk_expr(self, expr);
+    }
+
+    fn visit_func_body(&mut self, func: &'ast FuncBody) {
+        let outer = self.func;
+        self.func = self.functions.get(&func.span.start).copied().unwrap_or(outer);
+        visit::walk_func_body(self, func);
+        self.func = outer;
+    }
+}
+
+/// Adds the tables that `expr` names or reads to `out`, each as a local and the keys after it, with
+/// those that the locals it reads from were read from, and for a table it builds, those of the
+/// values in it.
+fn tables_of(resolution: &Resolution, aliases: &Aliases, expr: &Expr, out: &mut Vec<(LocalId, Vec<SmolStr>)>) {
+    let expr = expr.unparen();
+    if let ExprKind::Table(fields) = &expr.kind {
+        for field in fields {
+            match field {
+                TableField::Positional(value) | TableField::Named { value, .. } | TableField::Keyed { value, .. } => {
+                    tables_of(resolution, aliases, value, out);
+                }
+                TableField::SetMember(_) => {}
+            }
+        }
+        return;
+    }
+    let table = match &expr.kind {
+        ExprKind::Name(name) => match resolution.resolve_at(name.span.start) {
+            Some(Resolved::Local(local)) => Some((local, Vec::new())),
+            _ => None,
+        },
+        _ => field_path(resolution, expr),
+    };
+    let Some((root, keys)) = table else { return };
+    for (alias, prefix) in aliases.get(&root).into_iter().flatten() {
+        out.push((*alias, prefix.iter().chain(&keys).cloned().collect()));
+    }
+    out.push((root, keys));
+}
+
+/// What the code of a loop may change before it starts again: the locals and the fields of each name
+/// it assigns, and the fields of the tables it gives calls or assigns keys of that are not known.
+struct Changes<'r> {
+    resolution: &'r Resolution,
+    aliases: &'r Aliases,
+    locals: Vec<LocalId>,
+    keys: Vec<SmolStr>,
+    tables: Vec<(LocalId, Vec<SmolStr>)>,
+}
+
+impl Changes<'_> {
+    fn changes(&self, root: LocalId, keys: &[SmolStr]) -> bool {
+        self.locals.contains(&root)
+            || keys.iter().any(|key| self.keys.contains(key))
+            || self
+                .tables
+                .iter()
+                .any(|(table, prefix)| *table == root && keys.len() > prefix.len() && keys.starts_with(prefix))
+    }
+
+    /// Notes that the fields of the tables `expr` names or reads may change.
+    fn table(&mut self, expr: &Expr) {
+        tables_of(self.resolution, self.aliases, expr, &mut self.tables);
+    }
+
+    fn assigned(&mut self, target: &Expr) {
+        match &target.unparen().kind {
+            ExprKind::Name(name) => {
+                if let Some(Resolved::Local(id)) = self.resolution.resolve_at(name.span.start) {
+                    self.locals.push(id);
+                }
+            }
+            ExprKind::Field { name, .. } => self.keys.push(name.text.clone()),
+            ExprKind::Index { base, index, .. } => match index.as_string() {
+                Some(key) => self.keys.push(SmolStr::new(key)),
+                None => self.table(base),
+            },
+            _ => {}
+        }
+    }
+}
+
+impl<'ast> Visitor<'ast> for Changes<'_> {
+    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        match &stmt.kind {
+            StmtKind::Assign { targets, .. } => targets.iter().for_each(|target| self.assigned(target)),
+            StmtKind::CompoundAssign { target, .. } => self.assigned(target),
+            StmtKind::Function { name, .. } => match name.method.as_ref().or(name.path.last()) {
+                Some(key) => self.keys.push(key.text.clone()),
+                None => self.assigned(&Expr { kind: ExprKind::Name(name.base.clone()), span: name.base.span }),
+            },
+            _ => {}
+        }
+        visit::walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        match &expr.kind {
+            ExprKind::Call { args, .. } => args.iter().for_each(|arg| self.table(arg)),
+            ExprKind::MethodCall { base, args, .. } => {
+                self.table(base);
+                args.iter().for_each(|arg| self.table(arg));
+            }
+            _ => {}
+        }
+        visit::walk_expr(self, expr);
+    }
+
+    // A function in the loop changes nothing until it is called.
+    fn visit_func_body(&mut self, _: &'ast FuncBody) {}
+}
+
+/// The local that `expr` reads a field from and the keys it reads through, as `data` and `job`,
+/// `name` for `data.job.name` or `data["job"].name`, for at most `MAX_KEYS` keys written out.
+pub fn field_path(resolution: &Resolution, expr: &Expr) -> Option<(LocalId, Vec<SmolStr>)> {
+    let mut keys = Vec::new();
+    let mut expr = expr.unparen();
+    loop {
+        match &expr.kind {
+            ExprKind::Field { base, name, .. } => {
+                keys.push(name.text.clone());
+                expr = base.unparen();
+            }
+            ExprKind::Index { base, index, .. } => {
+                keys.push(SmolStr::new(index.as_string()?));
+                expr = base.unparen();
+            }
+            ExprKind::Name(name) if !keys.is_empty() && keys.len() <= MAX_KEYS => {
+                let Some(Resolved::Local(root)) = resolution.resolve_at(name.span.start) else { return None };
+                keys.reverse();
+                return Some((root, keys));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Where each of `values` comes from.
+fn origins(values: &Values) -> Vec<u32> {
+    values.iter().map(|value| value.origin).collect()
+}
+
 /// What a local may hold where two ways meet that leave it `a` and `b`: the values of both, each
 /// with the facts that hold on both ways.
 fn joined(a: &Values, b: &Values) -> Values {
-    if a == b {
+    if same(a, b) {
         return a.clone();
     }
     let mut out: Vec<Version> = a
@@ -1240,11 +2303,38 @@ fn joined(a: &Values, b: &Values) -> Values {
 
 /// The facts of `a` that `b` has too, each from where it starts to hold in `a`, so that the start of
 /// a loop settles once the facts its runs keep stop changing.
-fn shared(a: &Rc<[(u32, Fact)]>, b: &Rc<[(u32, Fact)]>) -> Rc<[(u32, Fact)]> {
-    if a == b {
+fn shared(a: &FactList, b: &FactList) -> FactList {
+    if a.is(b) {
         return a.clone();
     }
-    a.iter().filter(|(_, fact)| b.iter().any(|(_, other)| other == fact)).cloned().collect()
+    // What both were given before they parted.
+    let (mut common, mut other) = (a, b);
+    while common.len() > other.len() {
+        common = common.before();
+    }
+    while other.len() > common.len() {
+        other = other.before();
+    }
+    while !common.is(other) {
+        (common, other) = (common.before(), other.before());
+    }
+    let added: Vec<&FactNode> = a.latest().take(a.len() - common.len()).collect();
+    let kept: Vec<&FactNode> =
+        added.iter().copied().filter(|node| b.latest().any(|other| other.fact == node.fact)).collect();
+    if kept.len() == added.len() {
+        return a.clone();
+    }
+    kept.iter().rev().fold(common.clone(), |list, node| list.with(node.at, node.fact.clone()))
+}
+
+/// Whether `a` and `b` hold the same values.
+fn same(a: &Values, b: &Values) -> bool {
+    Rc::ptr_eq(a, b) || a == b
+}
+
+/// Whether `a` and `b` tell the same changes.
+fn same_deltas(a: &Delta, b: &Delta) -> bool {
+    a.len() == b.len() && a.iter().all(|(local, values)| b.get(local).is_some_and(|other| same(values, other)))
 }
 
 /// Finds a `goto` to a label in the code after it, which jumps back to it.
@@ -1287,10 +2377,20 @@ pub struct Cast {
     pub local: Option<LocalId>,
     /// What each entry does, with where its type is written.
     pub entries: Vec<(CastEntry, Span)>,
-    /// The code it holds in: from its line to the end of the block the statement after it is in,
-    /// or to the end of the statement that next assigns the local. One on the last line of an `if`
-    /// branch holds from the end of the `if`, and one on the last line of another block nowhere.
+    /// The comment it is written in.
     pub span: Span,
+    /// Where the token after it starts: that of the statement it gives the local its value before,
+    /// or the `end`, `else`, `elseif` or `until` of the block it ends.
+    pub before: u32,
+}
+
+impl Cast {
+    /// Whether it gives its local a type of its own, rather than adding types to or taking them out
+    /// of the one the local has there: an entry that names a type replaces what the ones before it
+    /// leave.
+    pub fn replaces(&self) -> bool {
+        self.entries.iter().any(|(entry, _)| matches!(entry, CastEntry::Replace(_)))
+    }
 }
 
 /// The `---@cast` lines of a file.
@@ -1301,6 +2401,7 @@ pub struct Casts {
 
 impl Casts {
     pub fn of(source: &str, chunk: &Chunk, resolution: &Resolution) -> Self {
+        let tokens = &chunk.tokens;
         let mut casts = Vec::new();
         for comment in chunk.comments.iter().filter(|comment| comment.kind == CommentKind::Line) {
             let text = comment.content.text(source);
@@ -1312,51 +2413,15 @@ impl Casts {
             }
             let base = comment.content.end - line.len() as u32;
             let entries = cast.entries.into_iter();
+            let next = tokens.partition_point(|token| token.span.start < comment.span.end);
             casts.push(Cast {
                 local: resolution.lookup_local_at(cast.name, comment.span.start),
                 entries: entries
                     .map(|(entry, at)| (entry, Span::new(base + at.start as u32, base + at.end as u32)))
                     .collect(),
-                span: Span::empty(comment.span.end),
+                span: comment.span,
+                before: tokens.get(next).map_or(u32::MAX, |token| token.span.start),
             });
-        }
-        if casts.is_empty() {
-            return Self::default();
-        }
-        let mut locals: Vec<LocalId> = casts.iter().filter_map(|cast| cast.local).collect();
-        locals.sort_unstable();
-        locals.dedup();
-        let writes = |local: LocalId| resolution.local(local).refs.iter().filter(|r| r.write).map(|r| r.span.start);
-        let mut reach = Reach {
-            tokens: &chunk.tokens,
-            statements: Vec::new(),
-            branch_ends: FxHashMap::default(),
-            writes: locals.iter().flat_map(|local| writes(*local)).map(|at| (at, u32::MAX)).collect(),
-        };
-        reach.writes.sort_unstable();
-        reach.visit_block(&chunk.block);
-        reach.statements.sort_unstable();
-        // For each local, where each write to it starts, with the earliest end of a statement that
-        // assigns it from that write on.
-        let mut assigned = FxHashMap::default();
-        for local in locals {
-            let mut ends: Vec<(u32, u32)> = writes(local).map(|at| (at, reach.end_of_write(at))).collect();
-            ends.sort_unstable();
-            let mut earliest = u32::MAX;
-            for (_, end) in ends.iter_mut().rev() {
-                earliest = earliest.min(*end);
-                *end = earliest;
-            }
-            assigned.insert(local, ends);
-        }
-        for cast in &mut casts {
-            let line_end = cast.span.start;
-            let Some((start, end)) = reach.from(line_end) else { continue };
-            let reassigned = cast.local.and_then(|local| {
-                let ends: &Vec<(u32, u32)> = &assigned[&local];
-                ends.get(ends.partition_point(|(at, _)| *at <= line_end)).map(|(_, end)| *end)
-            });
-            cast.span = Span::new(start, end.min(reassigned.unwrap_or(u32::MAX)).max(start));
         }
         Self { casts }
     }
@@ -1365,72 +2430,7 @@ impl Casts {
         self.casts.iter()
     }
 
-    /// The casts of `local` that hold at `offset`, in the order of their lines.
-    pub fn at(&self, local: LocalId, offset: u32) -> impl Iterator<Item = &Cast> {
-        self.casts.iter().filter(move |cast| cast.local == Some(local) && cast.span.contains(offset))
-    }
-}
-
-/// Finds where the casts of a file stop holding.
-struct Reach<'a> {
-    tokens: &'a [Token],
-    /// Where each statement starts, with the end of the block it is in.
-    statements: Vec<(u32, u32)>,
-    /// Where each `elseif`, `else` and `end` of an `if` starts, with the end of that `if`.
-    branch_ends: FxHashMap<u32, u32>,
-    /// Where each write to the local of a cast starts, in order, with the end of the innermost
-    /// statement it is in.
-    writes: Vec<(u32, u32)>,
-}
-
-impl Reach<'_> {
-    /// Where a cast whose line ends at `at` starts holding, and the end of the block it holds to:
-    /// that of the statement after it. After the last statement of an `if` branch, a cast holds
-    /// from the end of the `if`, as code types what the branch leaves that way, and after that of
-    /// another block, such as a function or loop body, nowhere.
-    fn from(&self, at: u32) -> Option<(u32, u32)> {
-        let next = self.tokens.get(self.tokens.partition_point(|token| token.span.start < at))?;
-        if let Some(end) = self.branch_ends.get(&next.span.start) {
-            return self.from(*end);
-        }
-        if matches!(next.kind, TokenKind::End | TokenKind::Until | TokenKind::Eof) {
-            return None;
-        }
-        let next = self.statements.partition_point(|(start, _)| *start < at);
-        self.statements.get(next).map(|(_, end)| (at, *end))
-    }
-
-    /// The end of the innermost statement that the write starting at `at` is in.
-    fn end_of_write(&self, at: u32) -> u32 {
-        let index = self.writes.partition_point(|(start, _)| *start < at);
-        self.writes.get(index).map_or(u32::MAX, |(_, end)| *end)
-    }
-}
-
-impl<'ast> Visitor<'ast> for Reach<'_> {
-    fn visit_block(&mut self, block: &'ast Block) {
-        self.statements.extend(block.stmts.iter().map(|stmt| (stmt.span.start, block.span.end)));
-        visit::walk_block(self, block);
-    }
-
-    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
-        // Statements are visited before those inside them, so the innermost one is seen last.
-        let first = self.writes.partition_point(|(at, _)| *at < stmt.span.start);
-        let after = self.writes.partition_point(|(at, _)| *at < stmt.span.end);
-        for (_, end) in &mut self.writes[first..after] {
-            *end = stmt.span.end;
-        }
-        if let StmtKind::If { branches, else_block } = &stmt.kind {
-            let tokens = self.tokens;
-            let before = |offset: u32| tokens[..tokens.partition_point(|token| token.span.start < offset)].last();
-            let elseifs = branches.iter().skip(1).map(|branch| branch.keyword_span.start);
-            let keyword = else_block.as_ref().and_then(|block| before(block.span.start));
-            let keyword = keyword.filter(|token| token.kind == TokenKind::Else).map(|token| token.span.start);
-            let end = before(stmt.span.end).filter(|token| token.kind == TokenKind::End);
-            for start in elseifs.chain(keyword).chain(end.map(|token| token.span.start)) {
-                self.branch_ends.insert(start, stmt.span.end);
-            }
-        }
-        visit::walk_stmt(self, stmt);
+    pub fn get(&self, index: u32) -> Option<&Cast> {
+        self.casts.get(index as usize)
     }
 }

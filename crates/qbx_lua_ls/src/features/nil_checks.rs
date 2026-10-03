@@ -10,31 +10,31 @@
 //! As for `impossible-comparison`, only declared types count, whatever declares them: an
 //! annotation of the local, or the `@return` or `@field` of a function, class or stub. The type is
 //! that of the values that may reach the read, as the guards and casts around it leave them, also
-//! for a local that is assigned again. Guards that leave no value of it keep it whole, but a `nil` or
-//! `false` that they rule out stays out: `round` is no `nil` in
-//! `round and (round == true or i < round)`, whatever else it holds. The rest is left alone:
+//! for a local that is assigned again. Where guards leave no value of it, the read has the type the
+//! code they guard takes it to be, as lua-language-server reads it: `nil` inside `if not count then`
+//! for a `number`, which holds no value that may be missing, or the whole type after a comparison
+//! with a literal, but a `nil` or `false` that they rule out stays out: `round` is no `nil` in
+//! `round and (round == true or i < round)`, whatever else it holds.
 //!
-//! - Fields and the values of calls, which guards do not narrow.
+//! Like TypeScript for a value that may be `undefined`, every read is reported, also after one that
+//! would raise the error first, and only a guard on the local itself checks it: one on another value
+//! of the same call tells nothing about it, unless the function declares the sets of values it
+//! returns, as `@return nil | (integer, vector3)` does. The rest is left alone:
+//!
+//! - Fields, as in lua-language-server, and the values of calls. A local that takes the value of a
+//!   field has the type that the guards on the field leave.
 //! - A value whose type is not declared, as `name = name or 'none'` gives, and the missing value of
 //!   `local name` before something gives it one.
-//! - A value that a guard on another value of the same call covers, as `err` of
-//!   `local fn, err = load(code)` after `if not fn then`: annotations declare such values one by one.
-//! - What a call gives for `source` alone, as `ESX.GetPlayerFromId(source)`: lookups of the player
-//!   whose event or callback runs only miss one that has just left.
-//! - Reads after one that always runs before them, which raises the error first, and reads after
-//!   one reported in the same function, which points at the same missing check.
 
-use qbx_lua_analysis::scope::{FuncId, LocalId, LocalKind, Resolved};
+use qbx_lua_analysis::scope::{LocalKind, Resolved};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
-use rustc_hash::FxHashSet;
 
 use super::arguments::{candidates, expected, mismatch, param_for, signatures, takes_nil};
 use super::class_tables::Classes;
 use super::comparisons::Declared;
-use crate::infer::{Decl, Infer};
-use crate::narrow::Version;
+use crate::infer::Infer;
 use crate::types::{FunType, Param, Type};
 
 /// What `need-check-nil` finds in a file, each with the message naming the type.
@@ -47,16 +47,7 @@ pub struct UncheckedNils {
 
 /// The reads and arguments of locals that may hold a missing value there.
 pub fn unchecked_nils(infer: &Infer, chunk: &Chunk) -> UncheckedNils {
-    let mut finder = Finder {
-        infer,
-        declared: Declared::new(infer),
-        checked: Vec::new(),
-        sometimes: 0,
-        until: chunk.block.span.end,
-        reported: FxHashSet::default(),
-        out: Vec::new(),
-        passed: Vec::new(),
-    };
+    let mut finder = Finder { infer, declared: Declared::new(infer), out: Vec::new(), passed: Vec::new() };
     finder.visit_block(&chunk.block);
     UncheckedNils { reads: finder.out, arguments: finder.passed }
 }
@@ -64,17 +55,6 @@ pub fn unchecked_nils(infer: &Infer, chunk: &Chunk) -> UncheckedNils {
 struct Finder<'a, 'b> {
     infer: &'a Infer<'b>,
     declared: Declared<'a, 'b>,
-    /// The locals that a reported read showed to hold a value, each with the code that runs after it.
-    checked: Vec<(LocalId, Span)>,
-    /// How many of the parts around the expression being visited only run sometimes: the right
-    /// sides of `and` and `or`, the conditions of `elseif`, and that of a `repeat` whose body can
-    /// `break` out of it.
-    sometimes: u32,
-    /// Where the code that a read in the statement being visited runs before ends: at the end of
-    /// its block, or at a label a `goto` can reach without the read.
-    until: u32,
-    /// The locals reported so far, each with the function the read is in.
-    reported: FxHashSet<(LocalId, FuncId)>,
     out: Vec<(Span, String)>,
     /// The arguments reported, apart from the reads.
     passed: Vec<(Span, String)>,
@@ -92,46 +72,15 @@ impl Finder<'_, '_> {
         let ExprKind::Name(name) = &operand.unparen().kind else { return };
         let ctx = self.infer.ctx;
         let Some(Resolved::Local(id)) = ctx.resolution.resolve_at(name.span.start) else { return };
-        let local = ctx.resolution.local(id);
-        let at = name.span.start;
         // `self` is the value a method is called on.
-        if local.kind == LocalKind::ImplicitSelf {
+        if ctx.resolution.local(id).kind == LocalKind::ImplicitSelf {
             return;
         }
-        if self.checked.iter().any(|(checked, span)| *checked == id && span.contains(at)) {
-            return;
-        }
-        // `local vehicle, coords = lib.getClosestVehicle(...)` declares both as optional, and the
-        // guard on `vehicle` is the check for `coords` as well, while it holds that value.
-        let flow = ctx.flow();
-        let covered = |value: &&Version| {
-            let linked = flow.linked(id, value.origin).unwrap_or_default();
-            linked
-                .iter()
-                .any(|(other, origin, _)| *other != id && flow.facts(*other, *origin, Span::empty(at)).next().is_some())
-        };
-        let values = flow.at(id, at);
-        let covered: Vec<u32> = values.iter().filter(covered).map(|value| value.origin).collect();
-        if covered.len() == values.len() {
-            return;
-        }
-        let keep = |origin: u32| !covered.contains(&origin);
-        let ty = self.declared.of_values(operand.unparen(), id, &keep);
-        let reaches = |value: &Type| !self.declared.rules_out_of(id, at, value, &keep);
+        let at = name.span.start;
+        let ty = self.declared.of(operand.unparen());
+        let reaches = |value: &Type| !self.declared.rules_out(id, at, value);
         let missing = missing_value(&self.infer.expand_aliases(&ty, 0), reaches);
         let Some(missing) = missing.filter(|missing| param.is_none() || *missing == "nil") else { return };
-        let assigned = local.refs.iter().any(|r| r.write);
-        if !assigned && self.is_lookup_of_source(id) {
-            return;
-        }
-        let func = local.refs.iter().find(|r| r.span.start == at).map_or(local.func, |r| r.func);
-        if !self.reported.insert((id, func)) {
-            return;
-        }
-        // A call passes the missing value on, which raises no error there.
-        if self.sometimes == 0 && !assigned && param.is_none() {
-            self.checked.push((id, Span::new(name.span.end, self.until.max(name.span.end))));
-        }
         match param {
             Some(param) => self.passed.push((
                 name.span,
@@ -181,44 +130,6 @@ impl Finder<'_, '_> {
         matches!(self.infer.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Local(_)))
             && missing_value(&self.infer.expand_aliases(&self.declared.of(arg), 0), |_| true) == Some("nil")
     }
-
-    fn sometimes(&mut self, visit: impl FnOnce(&mut Self)) {
-        self.sometimes += 1;
-        visit(self);
-        self.sometimes -= 1;
-    }
-
-    /// Whether `id` holds what a call gives for `source` alone, as after
-    /// `local player = exports.qbx_core:GetPlayer(src)` with `local src = source`.
-    fn is_lookup_of_source(&self, id: LocalId) -> bool {
-        let Some(value) = self.value_of(id) else { return false };
-        match &value.unparen().kind {
-            ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => {
-                matches!(args.as_slice(), [arg] if self.is_source(arg))
-            }
-            _ => false,
-        }
-    }
-
-    /// Whether `expr` is `source`, or a local that is never assigned again and holds it.
-    fn is_source(&self, expr: &Expr) -> bool {
-        let ExprKind::Name(name) = &expr.unparen().kind else { return false };
-        if name.text == "source" {
-            return true;
-        }
-        let ctx = self.infer.ctx;
-        let Some(Resolved::Local(id)) = ctx.resolution.resolve_at(name.span.start) else { return false };
-        !ctx.resolution.local(id).refs.iter().any(|r| r.write) && self.value_of(id).is_some_and(|v| self.is_source(v))
-    }
-
-    /// The value that the `local` statement declaring `id` gives it: the expression in its
-    /// position, or the call that ends the list.
-    fn value_of(&self, id: LocalId) -> Option<&Expr> {
-        let ctx = self.infer.ctx;
-        let Some(Decl::Local { stmt, index }) = ctx.decl(ctx.resolution.local(id).decl.start) else { return None };
-        let StmtKind::Local { exprs, in_unpack: false, .. } = &stmt.kind else { return None };
-        exprs.get(*index).or_else(|| exprs.last().filter(|last| last.is_call()))
-    }
 }
 
 /// What `ty` allows that raises the error and `reaches` the read: `nil`, or else `false`. `None` when
@@ -265,30 +176,7 @@ fn needs_value(op: BinOp) -> bool {
     )
 }
 
-/// Whether `block`, the body of a loop, has a `break` that leaves that loop.
-fn breaks(block: &Block) -> bool {
-    block.stmts.iter().any(|stmt| match &stmt.kind {
-        StmtKind::Break => true,
-        StmtKind::Do(body) => breaks(body),
-        StmtKind::If { branches, else_block } => {
-            branches.iter().any(|branch| breaks(&branch.block)) || else_block.as_ref().is_some_and(breaks)
-        }
-        _ => false,
-    })
-}
-
 impl<'c> Visitor<'c> for Finder<'_, '_> {
-    fn visit_block(&mut self, block: &'c Block) {
-        // A block, a function body included, runs apart from the statement around it.
-        let outer = (std::mem::take(&mut self.sometimes), self.until);
-        for (index, stmt) in block.stmts.iter().enumerate() {
-            let label = block.stmts[index + 1..].iter().find(|next| matches!(next.kind, StmtKind::Label(_)));
-            self.until = label.map_or(block.span.end, |label| label.span.start);
-            self.visit_stmt(stmt);
-        }
-        (self.sometimes, self.until) = outer;
-    }
-
     fn visit_stmt(&mut self, stmt: &'c Stmt) {
         match &stmt.kind {
             // Storing a value under a `nil` key raises an error, while reading one gives `nil`.
@@ -304,31 +192,6 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
                 for bound in [Some(start), Some(limit), step.as_ref()].into_iter().flatten() {
                     self.check(bound);
                 }
-            }
-            // Only the first condition of an `if` always runs.
-            StmtKind::If { branches, else_block } => {
-                for (index, branch) in branches.iter().enumerate() {
-                    if index == 0 {
-                        self.visit_expr(&branch.cond);
-                    } else {
-                        self.sometimes(|finder| finder.visit_expr(&branch.cond));
-                    }
-                    self.visit_block(&branch.block);
-                }
-                if let Some(block) = else_block {
-                    self.visit_block(block);
-                }
-                return;
-            }
-            // A `break` leaves the loop without running the condition.
-            StmtKind::Repeat { body, cond } => {
-                self.visit_block(body);
-                if breaks(body) {
-                    self.sometimes(|finder| finder.visit_expr(cond));
-                } else {
-                    self.visit_expr(cond);
-                }
-                return;
             }
             _ => {}
         }
@@ -346,12 +209,6 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
             ExprKind::Binary { op, lhs, rhs, .. } if needs_value(*op) => {
                 self.check(lhs);
                 self.check(rhs);
-            }
-            // The right side of `and` and `or` only runs for some values of the left one.
-            ExprKind::Binary { op: BinOp::And | BinOp::Or, lhs, rhs, .. } => {
-                self.visit_expr(lhs);
-                self.sometimes(|finder| finder.visit_expr(rhs));
-                return;
             }
             _ => {}
         }

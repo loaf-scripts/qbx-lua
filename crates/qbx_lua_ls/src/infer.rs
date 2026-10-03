@@ -198,7 +198,7 @@ impl<'a> FileContext<'a> {
     /// Which values the locals of the file may hold at each point, and what the conditions tell about
     /// them.
     pub fn flow(&self) -> &Flow<'a> {
-        self.flow.get_or_init(|| Flow::of(self.chunk, self.resolution))
+        self.flow.get_or_init(|| Flow::of(self.chunk, self.resolution, self.casts()))
     }
 
     /// The `---@cast` lines of the file.
@@ -522,6 +522,12 @@ pub struct Infer<'a> {
     /// local and the origin of the value.
     origins: RefCell<FxHashMap<(LocalId, u32), Type>>,
     origins_in_progress: RefCell<FxHashSet<(LocalId, u32)>>,
+    /// The types of the values that each set of `Origin::Others` of a local stands for, each once,
+    /// by the local and the origin of the set.
+    others: RefCell<SetTypes>,
+    /// The types of the values that assignments store in the fields of locals, by their origin.
+    stored: RefCell<FxHashMap<u32, Type>>,
+    storing: RefCell<FxHashSet<u32>>,
     /// The sets of values returned by the call of each `local a, b = f()` statement read so far,
     /// by the start of the statement.
     linked_sets: RefCell<FxHashMap<u32, Option<ReturnSets>>>,
@@ -578,6 +584,9 @@ impl<'a> Infer<'a> {
             in_progress: RefCell::new(FxHashSet::default()),
             origins: RefCell::new(FxHashMap::default()),
             origins_in_progress: RefCell::new(FxHashSet::default()),
+            others: RefCell::new(FxHashMap::default()),
+            stored: RefCell::new(FxHashMap::default()),
+            storing: RefCell::new(FxHashSet::default()),
             linked_sets: RefCell::new(FxHashMap::default()),
             fallbacks: RefCell::new(FxHashMap::default()),
             following: RefCell::new(FxHashSet::default()),
@@ -709,8 +718,8 @@ impl<'a> Infer<'a> {
             ExprKind::Function(func) => Type::Fun(Arc::new(self.fun_type(func, None, false))),
             ExprKind::Name(name) => self.name(name),
             ExprKind::Paren(inner) => self.expr(inner),
-            ExprKind::Field { base, name, .. } => self.member_type(base, name),
-            ExprKind::Index { base, index, .. } => self.index_expr(base, index),
+            ExprKind::Field { base, name, .. } => self.field_narrowed(expr, self.member_type(base, name)),
+            ExprKind::Index { base, index, .. } => self.field_narrowed(expr, self.index_expr(base, index)),
             ExprKind::Table(fields) => self.table(fields),
             ExprKind::Binary { op, lhs, rhs, .. } => self.binary(*op, lhs, rhs),
             ExprKind::Unary { op, expr } => self.unary(*op, expr),
@@ -766,15 +775,29 @@ impl<'a> Infer<'a> {
                 return self.with_metatables(id, offset, given);
             }
         }
-        let origin = |origin| self.origin_type(id, origin).map(|ty| self.with_metatables(id, offset, ty));
+        let origin = |origin| self.origin_bases(id, origin).map(|bases| self.with_metatables_all(id, offset, bases));
         self.narrowed_with(id, offset, &origin, false)
     }
 
     /// The type of a local where it is read at `offset`, as `local_type_at` gives it, or `unknown`
     /// when a value of unknown type may reach the read.
     pub fn known_local_type_at(&self, id: LocalId, offset: u32) -> Type {
-        let origin = |origin| self.origin_type(id, origin).map(|ty| self.with_metatables(id, offset, ty));
+        let origin = |origin| self.origin_bases(id, origin).map(|bases| self.with_metatables_all(id, offset, bases));
         self.narrowed_with(id, offset, &origin, true)
+    }
+
+    /// `bases`, the types of values of the local `id`, with what the `setmetatable` calls on the local
+    /// make of them where it is read at `offset`.
+    fn with_metatables_all(&self, id: LocalId, offset: u32, bases: Bases) -> Bases {
+        if !self.ctx.set_metatables.contains_key(&id) {
+            return bases;
+        }
+        match bases {
+            Bases::One(ty) => Bases::One(self.with_metatables(id, offset, ty)),
+            Bases::Set(types) => {
+                Bases::Set(types.iter().map(|ty| self.with_metatables(id, offset, ty.clone())).collect())
+            }
+        }
     }
 
     /// `ty`, the type of the local `id`, with what the `setmetatable` calls on the local make of it
@@ -820,105 +843,167 @@ impl<'a> Infer<'a> {
 
     /// The type of the local `id` where it is read at `offset`: the union of the values that may
     /// reach the read, each of the type `origin` gives for where it comes from (`None` while that is
-    /// being found, as for a loop that assigns the local from what it held before), as the casts
-    /// before the read change it and without what the guards since then rule out. A value that the
-    /// guards rule out entirely is left out, unless they rule out every value: like `if not name`
-    /// for a `string`, or `action ~= "open" and action ~= "close"` for an `"open"|"close"`, such code
-    /// handles values the annotations leave out, or never runs. With `strict`, a value of unknown
-    /// type leaves the local unknown, unless a cast replaces its type.
-    pub fn narrowed_with(&self, id: LocalId, offset: u32, origin: &dyn Fn(u32) -> Option<Type>, strict: bool) -> Type {
-        let casts: Vec<&Cast> = self.ctx.casts().at(id, offset).collect();
-        let replaced = casts.iter().any(|cast| replaces(cast));
+    /// being found, as for a loop that assigns the local from what it held before), its declaration,
+    /// an assignment or a `---@cast` line, without what the guards since then rule out. A value that the
+    /// guards rule out entirely is left out. When they rule out every value, the code they guard
+    /// handles values the annotations leave out, or never runs, and it takes the local to be what
+    /// `Fact::ruled_out` reads from the guard that rules out the last of them, as lua-language-server
+    /// does: `nil` inside `if not name` for a `string`, `unknown` inside `if type(list) ~= 'table'`
+    /// for a `number[]`. After a comparison with a literal, as `action ~= "open" and action ~= "close"`
+    /// for an `"open"|"close"`, it stays whole. With `strict`, a value of unknown type leaves the
+    /// local unknown.
+    pub fn narrowed_with(&self, id: LocalId, offset: u32, origin: &dyn Fn(u32) -> Option<Bases>, strict: bool) -> Type {
         let values = self.ctx.flow().at(id, offset);
         // `local name` declares no value that the values assigned later have to make room for.
         let unset = values.len() > 1 && self.is_unset(id);
-        let (mut whole, mut kept) = (Vec::new(), Vec::new());
+        let (mut whole, mut kept, mut taken) = (Vec::new(), Vec::new(), Some(Vec::new()));
         for value in values.iter().filter(|value| !(unset && value.origin == DECLARATION)) {
-            let Some(base) = origin(value.origin) else { continue };
-            if strict && !replaced && base.is_unknown() {
-                return Type::Unknown;
+            let Some(bases) = origin(value.origin) else { continue };
+            for base in bases.iter() {
+                if strict && base.is_unknown() {
+                    return Type::Unknown;
+                }
+                let (ty, left) = self.version_type(id, offset, value, base.clone());
+                match left {
+                    Ok(left) => kept.push(left),
+                    Err(Some(as_is)) => taken.iter_mut().for_each(|taken| taken.push(as_is.clone())),
+                    Err(None) => taken = None,
+                }
+                whole.push(ty);
             }
-            let (ty, narrowed) = self.version_type(id, offset, value, base, &casts);
-            kept.extend(narrowed);
-            whole.push(ty);
         }
-        merge_versions(if kept.is_empty() { whole } else { kept })
+        let types = match (kept.is_empty(), taken) {
+            (false, _) => kept,
+            (true, Some(taken)) if !taken.is_empty() => taken,
+            _ => whole,
+        };
+        merge_versions(types)
     }
 
     /// What `value` of the local `id` is where it is read at `offset`: `base`, the type of where it
-    /// comes from, as `casts` change it, and that without what the guards after the last cast rule
-    /// out, or `None` when they rule out all of it. A guard that takes effect before a cast tells
-    /// nothing about the type the cast gives, but `+T` and `-T` change the type that the guards
-    /// around their line leave, as `---@cast items +number[]` inside `if items then` does, for as
-    /// long as those guards hold.
+    /// comes from, and what `facts_left` leaves of that after the guards since.
     fn version_type(
         &self,
         id: LocalId,
         offset: u32,
         value: &Version,
         base: Type,
-        casts: &[&Cast],
-    ) -> (Type, Option<Type>) {
-        let facts = |from: u32, to: u32| {
-            value.facts.iter().filter(move |(at, _)| from <= *at && *at <= to).map(|(_, fact)| fact)
-        };
+    ) -> (Type, Result<Type, Option<Type>>) {
         let mut ty = base;
-        if value.origin == DECLARATION && !casts.first().is_some_and(|cast| replaces(cast)) {
-            let code = casts.first().map_or(Span::empty(offset), |cast| Span::new(cast.span.start, offset));
-            ty = self.linked_type(id, code).unwrap_or(ty);
+        if value.origin == DECLARATION {
+            ty = self.linked_type(id, Span::empty(offset)).unwrap_or(ty);
         }
-        let mut since = 0;
-        for cast in casts {
-            if !replaces(cast) {
-                ty = self.facts_applied(&ty, facts(since, cast.span.start)).unwrap_or(ty);
-            }
-            ty = cast.entries.iter().fold(ty, |ty, (entry, _)| self.cast(ty, entry));
-            since = cast.span.start;
-        }
-        let narrowed = self.facts_applied(&ty, facts(since, u32::MAX));
-        (ty, narrowed)
+        let left = self.facts_left(&ty, value.facts.iter().map(|(_, fact)| fact));
+        (ty, left)
     }
 
-    /// `ty` without what `facts` rule out, or `None` when they rule out every value of it. An alias
-    /// such as `Name = string|nil` is narrowed through what it stands for, and a type the facts leave
-    /// whole stays as it is written.
-    fn facts_applied<'f>(&self, ty: &Type, facts: impl Iterator<Item = &'f Fact>) -> Option<Type> {
+    /// `ty` without what `facts` rule out, or when they rule out every value of it, the type that the
+    /// code they guard takes the value to be then, as `Fact::ruled_out` reads it from the guard that
+    /// rules out the last of them, if it gives one. An alias such as `Name = string|nil` is narrowed
+    /// through what it stands for, and a type the facts leave whole stays as it is written.
+    fn facts_left<'f>(&self, ty: &Type, facts: impl Iterator<Item = &'f Fact>) -> Result<Type, Option<Type>> {
         let mut facts = facts.peekable();
         if facts.peek().is_none() {
-            return Some(ty.clone());
+            return Ok(ty.clone());
         }
         let declared = self.expand_aliases(ty, 0);
-        match facts.try_fold(declared.clone(), |narrowed, fact| fact.assume(&narrowed))? {
-            narrowed if narrowed != declared => Some(narrowed),
-            _ => Some(ty.clone()),
+        let mut narrowed = declared.clone();
+        while let Some(fact) = facts.next() {
+            match fact.assume(&narrowed) {
+                Some(left) => narrowed = left,
+                // The guards after it tell about what the code takes the value to be.
+                None => {
+                    let taken = fact.ruled_out(&narrowed);
+                    return Err(taken.and_then(|taken| facts.try_fold(taken, |ty, fact| fact.assume(&ty))));
+                }
+            }
         }
+        Ok(if narrowed != declared { narrowed } else { ty.clone() })
     }
 
-    /// Whether the guards after the last cast that holds where `id` is read at `offset` rule out
-    /// `value` for each value of the local that may be it, `origin` giving the types as for
-    /// `narrowed_with`, also where they rule out every value of its type, which `narrowed_with`
-    /// keeps whole then: `round` is no `nil` in `round and (round == true or i < round)`, whatever
-    /// else it holds.
-    pub fn rules_out_with(&self, id: LocalId, offset: u32, value: &Type, origin: &dyn Fn(u32) -> Option<Type>) -> bool {
-        let casts: Vec<&Cast> = self.ctx.casts().at(id, offset).collect();
-        let since = casts.last().map_or(0, |cast| cast.span.start);
+    /// `ty`, the type of the field of a local that `expr` reads, as `self.target` or `data.job`,
+    /// with what the assignments to it and the guards around the read tell.
+    pub fn field_narrowed(&self, expr: &Expr, ty: Type) -> Type {
+        let flow = self.ctx.flow();
+        let Some(field) = flow.path(self.ctx.resolution, expr) else { return ty };
+        self.path_narrowed(field, expr.span.start, ty)
+    }
+
+    /// `ty`, the type of the field `key` read from `base`, as `field_narrowed` gives it.
+    pub fn member_narrowed(&self, base: &Expr, key: &str, ty: Type) -> Type {
+        let flow = self.ctx.flow();
+        let Some(field) = flow.member_path(self.ctx.resolution, base, key) else { return ty };
+        self.path_narrowed(field, base.span.start, ty)
+    }
+
+    /// `ty`, the type of the field tracked as `field`, where it is read at `offset`: for each value
+    /// that may reach the read, `ty`, or the part of it that the assignment which gives the value
+    /// stores, without what the guards since rule out.
+    fn path_narrowed(&self, field: LocalId, offset: u32, ty: Type) -> Type {
+        let values = self.ctx.flow().at(field, offset);
+        let types = values.iter().map(|value| {
+            let base = match value.origin {
+                DECLARATION => ty.clone(),
+                origin => self.bounded(&ty, &self.stored_value(origin)),
+            };
+            let facts = value.facts.iter().filter(|(at, _)| *at <= offset).map(|(_, fact)| fact);
+            match self.facts_left(&base, facts) {
+                Ok(left) | Err(Some(left)) => left,
+                Err(None) => base,
+            }
+        });
+        merge_versions(types.collect())
+    }
+
+    /// The type of the value that the assignment of `origin` stores in a field, or `unknown` while
+    /// it is being found, as in `data.count = data.count + 1` in a loop.
+    fn stored_value(&self, origin: u32) -> Type {
+        if let Some(ty) = self.stored.borrow().get(&origin) {
+            return ty.clone();
+        }
+        let Origin::Assignment { stmt, index } = self.ctx.flow().origin(origin) else { return Type::Unknown };
+        let StmtKind::Assign { exprs, .. } = &stmt.kind else { return Type::Unknown };
+        if !self.storing.borrow_mut().insert(origin) {
+            return Type::Unknown;
+        }
+        let ty = assigned_value(exprs, index, |expr| self.expr(expr), |expr| self.expr_multi(expr));
+        self.storing.borrow_mut().remove(&origin);
+        self.stored.borrow_mut().insert(origin, ty.clone());
+        ty
+    }
+
+    /// Whether the guards where `id` is read at `offset` rule out `value` for each value of the local
+    /// that may be it, `origin` giving the types as for
+    /// `narrowed_with`, also where they rule out every value of its type and `narrowed_with` keeps
+    /// it whole: `round` is no `nil` in `round and (round == true or i < round)`, whatever else it
+    /// holds.
+    pub fn rules_out_with(
+        &self,
+        id: LocalId,
+        offset: u32,
+        value: &Type,
+        origin: &dyn Fn(u32) -> Option<Bases>,
+    ) -> bool {
         let holds = |ty: &Type| match self.expand_aliases(ty, 0) {
             Type::Union(parts) => parts.contains(value),
             one => one == *value,
         };
         self.ctx.flow().at(id, offset).iter().all(|version| {
-            let Some(base) = origin(version.origin) else { return true };
-            let (ty, narrowed) = self.version_type(id, offset, version, base, &casts);
-            if !holds(&ty) && !narrowed.as_ref().is_some_and(holds) {
+            let Some(bases) = origin(version.origin) else { return true };
+            let may_be = |base: &Type| {
+                let (ty, left) = self.version_type(id, offset, version, base.clone());
+                holds(&ty) || matches!(&left, Ok(left) | Err(Some(left)) if holds(left))
+            };
+            if !bases.iter().any(may_be) {
                 return true;
             }
-            let mut facts = version.facts.iter().filter(|(at, _)| *at >= since).map(|(_, fact)| fact);
+            let mut facts = version.facts.iter().map(|(_, fact)| fact);
             facts.try_fold(value.clone(), |left, fact| fact.assume(&left)).is_none_or(|left| left != *value)
         })
     }
 
     /// `ty` as one entry of a `---@cast` line changes it.
-    fn cast(&self, ty: Type, entry: &CastEntry) -> Type {
+    pub fn cast(&self, ty: Type, entry: &CastEntry) -> Type {
         match entry {
             CastEntry::Replace(cast) => cast.clone(),
             // Adding to a type nothing tells leaves a value that may still be anything else, as
@@ -1155,7 +1240,58 @@ impl<'a> Infer<'a> {
                 }
                 _ => Type::Unknown,
             },
+            // A `---@cast` line gives the type it names, or adds to the type the local has there or
+            // takes from it.
+            Origin::Cast(cast) => {
+                let Some(cast) = self.ctx.casts().get(cast) else { return Type::Unknown };
+                let held = match replaces(cast) {
+                    true => Type::Unknown,
+                    false => self.local_type_at(id, cast.span.start),
+                };
+                cast.entries.iter().fold(held, |ty, (entry, _)| self.cast(ty, entry))
+            }
+            Origin::Others(_) => match self.origin_bases(id, origin) {
+                Some(bases) => merge_versions(bases.iter().cloned().collect()),
+                None => Type::Unknown,
+            },
         }
+    }
+
+    /// The types of the values that `origin` gives the local `id`: that of its value, or for a set
+    /// of `Origin::Others` those of the values in it, each once. `None` while they are being found.
+    pub fn origin_bases(&self, id: LocalId, origin: u32) -> Option<Bases> {
+        let flow = self.ctx.flow();
+        let Origin::Others(set) = flow.origin(origin) else { return self.origin_type(id, origin).map(Bases::One) };
+        if let Some(types) = self.others.borrow().get(&(id, origin)) {
+            return Some(Bases::Set(types.clone()));
+        }
+        let given = flow.others(set).iter().map(|origin| self.other_origin_type(id, *origin));
+        let (types, complete) = distinct_bases(given);
+        if complete {
+            self.others.borrow_mut().insert((id, origin), types.clone());
+        }
+        (!types.is_empty()).then_some(Bases::Set(types))
+    }
+
+    /// The type of the value that `origin` gives the local `id` as code that runs at other times sees
+    /// it, as `origin_type` finds it. A table constructor that a `---@type` line gives again to a
+    /// local declared outside any function with one is that local's own table there: the line types
+    /// the table where it is given, as lua-language-server reads it, while code elsewhere may fill
+    /// the local's table with other values.
+    fn other_origin_type(&self, id: LocalId, origin: u32) -> Option<Type> {
+        if let Origin::Assignment { stmt, index } = self.ctx.flow().origin(origin) {
+            let doc = self.ctx.doc_at(stmt.span.start);
+            let typed = doc.type_at(index).is_some() && doc.declared_class().is_none();
+            if let StmtKind::Assign { exprs, .. } = &stmt.kind {
+                if typed && exprs.get(index).and_then(table_fields).is_some() {
+                    let declared = self.declaration_type(id);
+                    if self.is_own_table(id, &declared) {
+                        return Some(declared);
+                    }
+                }
+            }
+        }
+        self.origin_type(id, origin)
     }
 
     /// The type that the declaration of the local `id` gives it. One that is assigned again keeps the
@@ -3802,6 +3938,40 @@ pub fn assigned_value(
             _ => Type::Nil,
         },
     }
+}
+
+/// The types of the values that each set of `Origin::Others` of a local stands for, each once, by
+/// the local and the origin of the set.
+pub type SetTypes = FxHashMap<(LocalId, u32), Rc<[Type]>>;
+
+/// The types of the values that one of the values a local may hold stands for: that of where it
+/// comes from, or for a set of `Origin::Others` those of the values in it, each once.
+pub enum Bases {
+    One(Type),
+    Set(Rc<[Type]>),
+}
+
+impl Bases {
+    pub fn iter(&self) -> std::slice::Iter<'_, Type> {
+        match self {
+            Bases::One(ty) => std::slice::from_ref(ty).iter(),
+            Bases::Set(types) => types.iter(),
+        }
+    }
+}
+
+/// The types that `given` finds, each once, and whether it found each, rather than leaving out one
+/// that is being found.
+pub fn distinct_bases(given: impl Iterator<Item = Option<Type>>) -> (Rc<[Type]>, bool) {
+    let (mut types, mut complete) = (Vec::new(), true);
+    for ty in given {
+        match ty {
+            Some(ty) if !types.contains(&ty) => types.push(ty),
+            Some(_) => {}
+            None => complete = false,
+        }
+    }
+    (types.into(), complete)
 }
 
 /// The union of the types of the values a local may hold. A literal gives way to its kind when

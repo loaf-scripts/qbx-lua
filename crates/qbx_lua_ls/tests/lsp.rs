@@ -2253,6 +2253,58 @@ print(read, clear, waitReady, setReady)
 }
 
 #[test]
+fn a_type_line_on_a_reassignment_types_the_value_it_assigns() {
+    let mut client = Client::start(fixture_root());
+    let text = "---@alias Test.Data { job: string }
+
+local points = {}
+local function reset()
+    ---@type vector2[]
+    points = { vec(1.0, 2.0) }
+    print(points) -- typed
+end
+local function draw()
+    for i = 1, #points do
+        points[i] = vec(points[i].x, points[i].y, 3.0)
+        local corner = points[i]
+        print(points, corner.z) -- drawn
+    end
+end
+
+local cached = nil
+RegisterNetEvent('test:cached', function(data)
+    ---@type Test.Data
+    cached = data
+end)
+local holder = {}
+RegisterNetEvent('test:holder', function(data)
+    ---@type Test.Data
+    holder = data
+end)
+local function read()
+    return cached, holder -- read
+end
+print(reset, draw, read)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("points) -- typed", "local points: vector2[]"),
+        // Code that runs at other times may fill the local's own table with other values.
+        ("points, corner.z) -- drawn", "local points: table"),
+        ("corner = points", "local corner: unknown"),
+        // A local declared without a type, or with a table that is given a value of no known type,
+        // has the type the line gives.
+        ("cached, holder -- read", "local cached: Test.Data"),
+        ("holder -- read", "job: string"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    assert_eq!(findings(&mut client, CLIENT, &["undefined-field"]), []);
+}
+
+#[test]
 fn locals_that_are_assigned_again_are_checked_with_what_reaches_them() {
     let mut client = Client::start(fixture_root());
     let text = "\
@@ -2305,6 +2357,359 @@ wants(mixed)
         ],
         "a local that is assigned again has the declared types of the values that reach it, and none when \
          one of them has none"
+    );
+}
+
+#[test]
+fn calls_that_yield_let_other_code_change_locals() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type 'pending'|'done'
+local status = 'pending'
+RegisterNetEvent('probe:done', function() status = 'done' end)
+---@type 'idle'|'busy'
+local mode = 'idle'
+AddEventHandler('probe:busy', function() mode = 'busy' end)
+local function sleep(ms) Wait(ms) end
+
+CreateThread(function()
+    if status == 'pending' then
+        while status ~= 'done' do Wait(0) end
+    end
+    if mode ~= 'idle' then return end
+    Wait(5000)
+    if mode == 'busy' then return end
+    sleep(10)
+    if mode == 'busy' then return end
+    local result = lib.callback.await('probe:get')
+    if mode == 'busy' then return end
+    print(result)
+    if mode == 'busy' then return end
+end)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("impossible-comparison".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["impossible-comparison"]),
+        [finding("mode == 'busy' then return end\nend)", "Comparing `\"idle\"` with `\"busy\"` is always false")],
+        "`Wait`, a function of the file that waits and `await` let the handlers run, while `print` does not"
+    );
+}
+
+#[test]
+fn functions_that_runtime_functions_run_later_leave_the_narrowing_alone() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type table?
+local buffer
+---@type table?
+local other
+
+function Log(arg)
+    if not buffer then
+        buffer = {}
+        SetTimeout(500, function() buffer = nil end)
+    end
+    buffer[1] = arg
+    if not other then other = {} end
+    pcall(function() other = nil end)
+    other[1] = arg
+end
+
+function Later(arg)
+    if buffer then
+        Wait(0)
+        buffer[2] = arg
+    end
+end
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("need-check-nil".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [
+            finding("other[1]", "`other` may be nil: its type here is `table?`"),
+            finding("buffer[2]", "`buffer` may be nil: its type here is `table?`"),
+        ],
+        "`SetTimeout` runs its function once the code yields, while `pcall` runs it right away"
+    );
+}
+
+#[test]
+fn assignments_narrow_the_fields_of_locals() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Entry
+---@field length? number
+---@field radius number
+---@field vehicle? integer
+
+---@param n number
+local function needsNumber(n) end
+
+---@param entry Probe.Entry
+local function add(entry)
+    entry.length = entry.length or entry.radius * 2
+    needsNumber(entry.length)
+    entry.vehicle = GetGameTimer()
+    needsNumber(entry.vehicle)
+end
+
+---@param entry Probe.Entry
+local function later(entry)
+    entry.length = 5
+    CreateThread(function() needsNumber(entry.length) end)
+    Wait(0)
+    needsNumber(entry.length)
+end
+print(add, later)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str| {
+        let message = "Cannot assign `number?` to parameter `n` of type `number`";
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [finding("function() needsNumber(entry.length)"), finding("needsNumber(entry.length)\nend")],
+        "a field holds the value assigned to it until a function that runs later, or a yield, may find another"
+    );
+}
+
+#[test]
+fn locals_that_hold_what_type_gives_narrow_values_assigned_before_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param s string
+local function needsString(s) end
+---@return string|number
+local function either() return 1 end
+
+---@param value string|number
+local function show(value)
+    value = value or 'none'
+    local kind = type(value)
+    if kind == 'string' then needsString(value) end
+    local before = type(value)
+    value = either()
+    if before == 'string' then needsString(value) end
+end
+print(show)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str| {
+        let message = "Cannot assign `string|number` to parameter `s` of type `string`";
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [finding("before == 'string'")],
+        "`type(value)` tells about the value the local holds until it is assigned again"
+    );
+}
+
+#[test]
+fn many_functions_that_assign_the_same_locals_stay_fast() {
+    let mut client = Client::start(fixture_root());
+    // Each handler may run while any other has assigned the locals, and the guards in each tell about
+    // all of what the others give.
+    let mut text =
+        "---@return string?\nlocal function maybe() end\nlocal busy = false\nlocal current = maybe()\n".to_string();
+    text.push_str(
+        &"AddEventHandler('probe', function()\n    if busy then return end\n    busy = true\n    current = maybe()\n    \
+          busy = false\nend)\n"
+            .repeat(600),
+    );
+    text.push_str("print(busy, current) -- last\n");
+    client.open_with(CLIENT, &text);
+    let started = Instant::now();
+    for (needle, expected) in
+        [("busy, current) -- last", "busy: boolean\n"), ("current) -- last", "current: string?\n")]
+    {
+        let (line, character) = pos(&text, needle, 0);
+        let hover = client.hover_text(CLIENT, line, character);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+}
+
+#[test]
+fn guards_narrow_the_fields_of_locals_until_something_may_change_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Job
+---@field name string
+---@field grade integer?
+
+---@class Probe.Data
+---@field job Probe.Job?
+---@field label string?
+---@field mode 'a'|'b'|nil
+
+---@param data Probe.Data
+---@param other Probe.Data
+---@param key string
+local function check(data, other, key)
+    if data.job then
+        print(data.job) -- held
+        print(data.job.grade) -- deeper
+        local job = data.job
+        print(job) -- copied
+    end
+    print(data.job) -- after
+    if data.job and data.job.grade then
+        print(data.job.grade) -- both
+    end
+    if data.label then
+        other.label = nil
+        print(data.label) -- same name
+    end
+    if data.label then
+        reset(data)
+        print(data.label) -- passed
+    end
+    if data.label then
+        data.label:upper()
+        print(data.label) -- method of the field
+    end
+    if data.mode == 'a' then
+        print(data.mode) -- compared
+        data = other
+        print(data.mode) -- local assigned
+    end
+    if data['label'] then
+        print(data['label']) -- index
+    end
+    if data.label then
+        CreateThread(function()
+            print(data.label) -- later
+        end)
+    end
+    if data.label then
+        for _ = 1, 2 do
+            print(data.label) -- loop
+            data.label = nil
+        end
+    end
+    if data.job and data.job.grade then
+        local job = data.job
+        reset(job)
+        print(data.job.grade) -- copy passed
+    end
+    if data.label then
+        local copy = data
+        copy[key] = nil
+        print(data.label) -- key not known
+    end
+    if data.label then
+        local list = {}
+        list[#list + 1] = data.label
+        print(data.label) -- other table
+    end
+    if data.label then
+        clear({ data })
+        print(data.label) -- in a table
+    end
+    if data.label then
+        local list = { data }
+        clear(list)
+        print(data.label) -- in a local table
+    end
+    if data.label then
+        Wait(0)
+        print(data.label) -- waited
+    end
+end
+check()
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("job) -- held", "Probe.Job {"),
+        ("grade) -- deeper", "grade: integer?\n"),
+        ("job) -- copied", "local job: Probe.Job {"),
+        ("job) -- after", "Probe.Job? {"),
+        ("grade) -- both", "grade: integer\n"),
+        // An assignment to a field of that name may be one to this field, through another name.
+        ("label) -- same name", "label: string?\n"),
+        // A call that is given the table may change its fields.
+        ("label) -- passed", "label: string?\n"),
+        ("label) -- method of the field", "label: string\n"),
+        ("mode) -- compared", "mode: \"a\"\n"),
+        ("mode) -- local assigned", "mode: \"a\"|\"b\"|nil\n"),
+        ("label']) -- index", "label: string\n"),
+        // A function runs later, when the field may hold anything.
+        ("label) -- later", "label: string?\n"),
+        // The loop starts again after the field is assigned.
+        ("label) -- loop", "label: string?\n"),
+        // A call that is given a copy of the table, or a table built with it, may change its fields,
+        // as may an assignment to a key of the copy that is not known.
+        ("grade) -- copy passed", "grade: integer?\n"),
+        ("label) -- key not known", "label: string?\n"),
+        ("label) -- other table", "label: string\n"),
+        ("label) -- in a table", "label: string?\n"),
+        ("label) -- in a local table", "label: string?\n"),
+        // Other code runs while the call yields.
+        ("label) -- waited", "label: string?\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn checks_read_the_fields_that_guards_narrow() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Slot
+---@field label string?
+---@field mode 'a'|'b'|nil
+---@field spots vector3|vector3[]
+
+---@param slot Probe.Slot
+local function show(slot)
+    if type(slot.spots) ~= 'table' then
+        slot.spots = { slot.spots }
+    end
+    if slot.label then
+        local label = slot.label
+        print(label:upper())
+    end
+    local plain = slot.label
+    print(plain:upper())
+    if slot.mode == 'a' then
+        if slot.mode == 'b' then return end
+    end
+    print(slot.label:upper())
+end
+show()
+";
+    client.open_with(CLIENT, text);
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "need-check-nil": "warning" } } } } }),
+    );
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil", "impossible-comparison", "missing-fields"]),
+        [
+            (
+                "need-check-nil".to_string(),
+                line("plain:upper"),
+                "`plain` may be nil: its type here is `string?`".to_string()
+            ),
+            (
+                "impossible-comparison".to_string(),
+                line("slot.mode == 'b'"),
+                "Comparing `\"a\"` with `\"b\"` is always false".to_string()
+            ),
+        ],
+        "a local takes the type a guard narrows a field to, fields themselves are not checked for nil, and a          field is given values of its declared type"
     );
 }
 
@@ -2627,6 +3032,90 @@ check()
 }
 
 #[test]
+fn guards_that_rule_out_every_declared_value_read_as_lua_language_server_does() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param entities number[]
+local function plain(entities)
+    if type(entities) ~= 'table' then
+        print(entities) -- plain branch
+        entities = { entities }
+    end
+    print(entities) -- plain after
+end
+
+---@param entities number[] | number
+local function either(entities)
+    if type(entities) ~= 'table' then
+        print(entities) -- either branch
+        entities = { entities }
+        print(entities) -- either assigned
+    end
+    print(entities) -- either after
+end
+
+---@param entities number[] | number
+local function checked(entities)
+    if type(entities) == 'number' then
+        print(entities) -- checked branch
+        entities = { entities }
+    end
+    print(entities) -- checked after
+end
+
+---@param count number
+---@param name string
+---@param both number|string
+---@param missing nil
+---@param action 'open'|'close'
+local function guards(count, name, both, missing, action)
+    if not count then print(count) end -- not
+    if count == nil then print(count) end -- equal nil
+    if count ~= nil then print(count) else print(count) end -- else of not nil
+    if count == false then print(count) end -- false
+    if name == 5 then print(name) end -- integer
+    if count == 'x' then print(count) end -- string
+    if type(both) ~= 'number' and type(both) ~= 'string' then print(both) end -- neither kind
+    if missing then print(missing) end -- truthy nil
+    if action ~= 'open' and action ~= 'close' then print(action) end -- other literal
+end
+print(plain, either, checked, guards)
+";
+    client.open_with(CLIENT, text);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["assign-type-mismatch"]),
+        [],
+        "a `number[]` that is not a table is unknown, which `{{ entities }}` stores without a mismatch"
+    );
+    for (needle, expected) in [
+        ("entities) -- plain branch", "entities: unknown\n"),
+        ("entities) -- plain after", "entities: number[]\n"),
+        ("entities) -- either branch", "entities: number\n"),
+        ("entities) -- either assigned", "entities: number[]\n"),
+        ("entities) -- either after", "entities: number[]\n"),
+        ("entities) -- checked branch", "entities: number\n"),
+        ("entities) -- checked after", "entities: number[]\n"),
+        // A check for a missing value leaves `nil`...
+        ("count) end -- not", "count: nil\n"),
+        ("count) end -- equal nil", "count: nil\n"),
+        ("count) end -- else of not nil", "count: nil\n"),
+        // ...a comparison with a literal of another kind leaves that kind...
+        ("count) end -- false", "count: boolean\n"),
+        ("name) end -- integer", "name: integer\n"),
+        ("count) end -- string", "count: string\n"),
+        // ...and a check that the value is not of its kind, or holds a value, leaves nothing known.
+        ("both) end -- neither kind", "both: unknown\n"),
+        ("missing) end -- truthy nil", "missing: unknown\n"),
+        // Other comparisons with literals keep the declared type.
+        ("action) end -- other literal", "action: \"open\"|\"close\"\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn casts_change_the_type_of_a_local_from_their_line_on() {
     let mut client = Client::start(fixture_root());
     let text = "\
@@ -2735,19 +3224,20 @@ print(loose) -- removed from unknown
         ("other) -- without nil", "other: string|integer\n"),
         ("other) -- added and removed", "other: string|boolean\n"),
         ("scoped) -- in block", "scoped: integer\n"),
-        // A cast ends with its block...
-        ("scoped) -- after block", "scoped: string|integer|nil\n"),
-        // ...and once the local is assigned again, which gives it the type of its new value.
+        // A cast gives the local a value, as an assignment does: where the ways meet, it joins what
+        // the others leave, here the `nil` that skips the `if`...
+        ("scoped) -- after block", "scoped: integer?\n"),
+        // ...and the local holds it until it is assigned again.
         ("changed:upper()", "changed: string\n"),
         ("changed) -- reassigned", "changed: string\n"),
         ("guarded) -- cast over guard", "guarded: integer\n"),
         ("guarded) -- guard over cast", "guarded: string\n"),
-        // On the last line of an `if` branch, a cast types what the branch leaves for the code
-        // after the `if`, but not for its other branches...
-        ("converted) -- after branch", "converted: string\n"),
-        ("nested) -- after nested branch", "nested: integer\n"),
+        // On the last line of an `if` branch, a cast types what the branch leaves for the code after
+        // the `if`, beside what the other ways leave, but not for its other branches.
+        ("converted) -- after branch", "converted: string?\n"),
+        ("nested) -- after nested branch", "nested: integer|string|nil\n"),
         ("branched) -- next branch", "branched: \"a\"\n"),
-        // ...and on that of another block, it holds nowhere.
+        // A loop may run no time, and a function runs on its own.
         ("looped) -- after loop", "looped: string|integer|nil\n"),
         ("called) -- after function", "called: string|integer|nil\n"),
         // A line with no type keeps the guards before it.
@@ -2763,6 +3253,51 @@ print(loose) -- removed from unknown
         ("loose) -- added to unknown", "loose: string|unknown\n"),
         ("loose) -- guarded unknown", "loose: string|unknown\n"),
         ("loose) -- removed from unknown", "loose: unknown\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn casts_follow_the_ways_the_code_runs() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return string|number
+local function get() end
+
+local value = get()
+if math.random() > 0.5 then
+    ---@cast value string
+    print(value) -- branch
+end
+print(value) -- joined
+local only = get()
+if math.random() > 0.5 then
+    ---@cast only string
+else
+    return
+end
+print(only) -- only way
+local block = get()
+do
+    ---@cast block number
+end
+print(block) -- after do
+local added = get()
+if math.random() > 0.5 then
+    ---@cast added +boolean
+end
+print(added) -- added on one way
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("value) -- branch", "value: string\n"),
+        ("value) -- joined", "value: string|number\n"),
+        ("only) -- only way", "only: string\n"),
+        ("block) -- after do", "block: number\n"),
+        ("added) -- added on one way", "added: string|number|boolean\n"),
     ] {
         let (l, c) = pos(text, needle, 0);
         let hover = client.hover_text(CLIENT, l, c);
@@ -2799,11 +3334,12 @@ print(skipped) -- after the label
     client.open_with(CLIENT, text);
     for (needle, expected) in [
         ("items) -- added", "items: string[]|true|number[]\n"),
-        ("items) -- removed", "items: string[]\n"),
-        ("items) -- outside guards", "items: string[]|boolean|integer|nil\n"),
+        // The `number[]` that the branch before adds is one of the values after it.
+        ("items) -- removed", "items: string[]|number[]\n"),
+        ("items) -- outside guards", "items: string[]|number[]|true|false|integer\n"),
         ("skipped) -- before the label", "skipped: string[]|true|number\n"),
-        // The `goto` reaches the label without the guard.
-        ("skipped) -- after the label", "skipped: string[]|boolean|number|nil\n"),
+        // The `goto` reaches the label without the guard or the cast.
+        ("skipped) -- after the label", "skipped: string[]|true|number|false|nil\n"),
     ] {
         let (l, c) = pos(text, needle, 0);
         let hover = client.hover_text(CLIENT, l, c);
@@ -4261,6 +4797,9 @@ local function GetHolder() end
 ---@return vector3? coords
 local function GetClosest() end
 
+---@return nil | (number, vector3)
+local function GetNearest() end
+
 ---@return string?
 local function GetName() end
 
@@ -4333,6 +4872,9 @@ local function handle(id, label, done, list, state)
     local vehicle, coords = GetClosest()
     if not vehicle then return end
     print(coords.x)
+    local nearest, spot = GetNearest()
+    if not nearest then return end
+    print(spot.x)
     print(guarded.job:upper())
     print(GetHolder().name)
     local quiet = GetHolder()
@@ -4348,6 +4890,8 @@ handle(1)
         findings(&mut client, CLIENT, &["need-check-nil"]),
         [
             finding("holder.name", "`holder` may be nil: its type here is `Probe.Holder?`"),
+            // Every read is reported, also after one that would raise the error first.
+            finding("holder.job", "`holder` may be nil: its type here is `Probe.Holder?`"),
             finding("label:upper", "`label` may be nil: its type here is `string?`"),
             finding("done()", "`done` may be nil: its type here is `(fun())?`"),
             finding("#list", "`list` may be nil: its type here is `string[]?`"),
@@ -4355,10 +4899,12 @@ handle(1)
             finding("amount + 1", "`amount` may be nil: its type here is `number?`"),
             finding("seen[key]", "`key` may be nil: its type here is `Probe.Holder?`"),
             finding("print(branch.name)", "`branch` may be nil: its type here is `Probe.Holder?`"),
-            // The read inside the `if` does not always run.
             finding("return branch.name", "`branch` may be nil: its type here is `Probe.Holder?`"),
             finding("print(always.name)", "`always` may be nil: its type here is `Probe.Holder?`"),
+            finding("return always.job", "`always` may be nil: its type here is `Probe.Holder?`"),
             finding("print(twice.name)", "`twice` may be nil: its type here is `Probe.Holder?`"),
+            finding("print(twice.name)", "`twice` may be nil: its type here is `Probe.Holder?`"),
+            finding("count > 0", "`count` may be nil: its type here is `number?`"),
             finding("count > 0", "`count` may be nil: its type here is `number?`"),
             finding("1, limit", "`limit` may be nil: its type here is `number?`"),
             // The cast is of the whole concatenation.
@@ -4367,9 +4913,12 @@ handle(1)
             // The `break` leaves the loop without running the condition.
             finding("return looped", "`looped` may be nil: its type here is `string?`"),
             finding("until ended", "`ended` may be nil: its type here is `string?`"),
+            // A guard on `vehicle` tells nothing about `coords`, unless the function declares the sets
+            // of values it returns, as `GetNearest` does.
+            finding("coords.x", "`coords` may be nil: its type here is `vector3?`"),
         ],
-        "reads that guards, casts, an earlier read or a guarded value of the same call cover are left alone, \
-         and so are reads after one reported in the same function, fields and the values of calls"
+        "every read that no guard or cast covers is reported, while fields and the values of calls are left \
+         alone"
     );
     client.notify(
         "workspace/didChangeConfiguration",
@@ -4487,17 +5036,18 @@ show()
             finding("again.name", "`again` may be nil: its type here is `Probe.Box?`"),
             // The loop gives it `nil` before it starts again.
             finding("looped.name", "`looped` may be nil: its type here is `Probe.Box?`"),
-            // The guard on `other` covers the value of the call, not the one assigned after it.
+            // A guard on another value of the same call tells nothing about it.
+            finding("fn()", "`fn` may be nil: its type here is `function?`"),
+            finding("spot.name", "`spot` may be nil: its type here is `Probe.Box?`"),
             finding("place.name", "`place` may be nil: its type here is `Probe.Box?`"),
         ],
         "the values that reach a read of a local that is assigned again are checked; one that a guard, \
-         `or`, a cast or a guarded value of the same call covers, one of no known type, and the missing \
-         value of `local later`, are left alone"
+         `or` or a cast covers, one of no known type, and the missing value of `local later`, are left alone"
     );
 }
 
 #[test]
-fn nil_checks_leave_alone_values_the_code_relies_on() {
+fn nil_checks_count_lookups_of_source_like_other_calls() {
     let mut client = Client::start(fixture_root());
     let text = "\
 ---@class Probe.Member
@@ -4543,10 +5093,12 @@ first()
         [
             // A local declared outside any function is checked like any other.
             finding("print(shared.name)", "`shared` may be nil: its type here is `Probe.Member?`"),
+            finding("print(member.name)", "`member` may be nil: its type here is `Probe.Member?`"),
+            finding("print(same.name)", "`same` may be nil: its type here is `Probe.Member?`"),
             finding("print(other.name)", "`other` may be nil: its type here is `Probe.Member?`"),
             finding("print(slot.name)", "`slot` may be nil: its type here is `Probe.Member?`"),
         ],
-        "what a call gives for `source` alone is left alone"
+        "what a call gives for `source` counts as its function declares it"
     );
 }
 
@@ -4557,11 +5109,13 @@ fn nil_checks_leave_alone_missing_values_the_guards_rule_out() {
 ---@param round? boolean
 ---@param mode? 'open'|'close'
 ---@param label? string
-local function scale(round, mode, label)
+---@param count number
+local function scale(round, mode, label, count)
     local i = 0
     print(round and (round == true or i < round))
     if mode and mode ~= 'open' and mode ~= 'close' then print(mode:upper()) end
     if label ~= 'x' and label ~= 'y' then print(label:upper()) end
+    if not count then print(count.value) end
 end
 scale()
 ";
@@ -4570,14 +5124,15 @@ scale()
         "workspace/didChangeConfiguration",
         json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "need-check-nil": "warning" } } } } }),
     );
+    let finding = |needle: &str, message: &str| {
+        ("need-check-nil".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
     assert_eq!(
         findings(&mut client, CLIENT, &["need-check-nil"]),
-        [(
-            "need-check-nil".to_string(),
-            pos(text, "label:upper", 0).0 as u64,
-            "`label` may be nil: its type here is `string?`".to_string()
-        )],
-        "guards that rule out every value of the type keep it whole, but not the `nil` they rule out"
+        [finding("label:upper", "`label` may be nil: its type here is `string?`")],
+        "comparisons with literals that rule out every value of the type keep it whole, but not the `nil` \
+         they rule out, and a check for a missing value that rules out every value leaves only `nil`, as \
+         lua-language-server reads it, which is no value that may be missing"
     );
 }
 
@@ -4661,9 +5216,10 @@ run()
             finding("greet(missing)", &passed("missing")),
             finding("Box:put(stored)", &passed("stored")),
             finding("print(read.name)", "`read` may be nil: its type here is `Probe.Target?`"),
+            finding("greet(read)", &passed("read")),
         ],
         "parameters that are optional or take nil, any value or a generic, overloads that take nil, guards, \
-         earlier reads, natives, arguments of another type and suppressed `param-type-mismatch` are left alone"
+         natives, arguments of another type and suppressed `param-type-mismatch` are left alone"
     );
 }
 
@@ -6659,7 +7215,10 @@ end
 function Holder:set(item)
     self.item = item
 end
-print(Machine.state, Machine.ratio, Machine.cleared, Machine.named, Machine.handler, Machine.reason, Holder.new().item, Machine.size)
+-- A function runs later, when the fields may hold any of their values.
+function Show()
+    print(Machine.state, Machine.ratio, Machine.cleared, Machine.named, Machine.handler, Machine.reason, Holder.new().item, Machine.size)
+end
 ";
     client.open_with(CLIENT, text);
     let print = pos(text, "print(", 0).0;

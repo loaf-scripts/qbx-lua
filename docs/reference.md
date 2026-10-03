@@ -688,7 +688,8 @@ that the other arguments declare: `value` is a `Player` in
 local has the types of the values it is declared with or assigned that may reach the comparison,
 so `local state = GetState()` is checked like the call, and inside a
 [type guard](../crates/qbx_lua_ls/README.md#type-guards) the type the guard narrows it to: the right
-side of `class ~= 13 or class ~= 14` only runs when `class` is `13`, so it is always true. A
+side of `class ~= 13 or class ~= 14` only runs when `class` is `13`, so it is always true. Guards
+narrow the [fields](../crates/qbx_lua_ls/README.md#fields) of locals the same way. A
 literal stored in a local counts by its kind only: `local mode = 'dev'` is a setting to change, so
 `mode == 'prod'` passes, while `mode == false` is still reported as a `string` compared with
 `false`. A value assigned to a local with a `---@type` or `@param` keeps the parts of that type it
@@ -764,8 +765,11 @@ local function GetName() end
 
 local name = GetName()
 print(name:upper()) -- `name` may be nil: its type here is `string?`
-print(name:lower()) -- the read above raises the error first
+print(name:lower()) -- `name` may be nil: its type here is `string?`
 ```
+
+As TypeScript does for a value that may be `undefined`, every such read is reported, also after one
+that would raise the error first, until a guard or cast rules the missing value out.
 
 A local may hold `nil` when its declared type allows it: its `---@type` or `@param`, the
 `@return` or `@field` of the function or class its value comes from, or for a parameter of a
@@ -775,9 +779,11 @@ resources included. `false`, as in `false|string`, counts as well. The
 type first, so `if not name then return end`, `if name then`, `name and name:upper()`,
 `assert(name)` and `---@cast name -?` all check it, as does a condition that reads from it, such as
 `if player?.job then` for `player`. `?.`, `?[` and `?:` give `nil` for a missing value and are not
-reported. Guards that together rule out every value of the type, as
-`round and (round == true or i < round)` does for a `boolean?`, keep the type whole, but the `nil`
-that `round and` rules out stays out.
+reported. Where guards together rule out every value of the type, the read has the type that the
+[type guards](../crates/qbx_lua_ls/README.md#type-guards) give such code. Inside
+`if not count then`, a `number` is `nil`, which holds no value that may be missing and is not
+reported, as in lua-language-server. After `round and (round == true or i < round)`, a `boolean?`
+keeps its type, but the `nil` that `round and` rules out stays out.
 
 A local that may hold `nil` is reported as well where a call passes it for a parameter that does not
 take `nil`, in every signature the call may use as `param-type-mismatch` reads them. A parameter
@@ -796,36 +802,31 @@ greet(player) -- `player` may be nil, which parameter `target` of type `Player` 
 lua-language-server reports such an argument as a `param-type-mismatch`, so a
 `---@diagnostic disable` comment for that rule silences it too.
 
+Only a guard on the local itself checks it. After
+`local vehicle, coords = lib.getClosestVehicle(pos)` and `if not vehicle then return end`, `coords`
+is still reported where it is declared `vector3?`, unless the function declares the
+[sets of values](../crates/qbx_lua_ls/README.md#sets-of-returned-values) it returns, as
+`@return nil | (integer, vector3)` does. A lookup such as `ESX.GetPlayerFromId(source)` that is
+declared to return `xPlayer?` counts like any other call.
+
 Only clear cases count, and the rest is left alone:
 
-- Fields and the values of calls, which guards do not narrow:
-  `if self.target then self.target:kill() end` would be reported otherwise.
+- Fields, which lua-language-server leaves alone too, and the values of calls. A local that takes
+  the value of a field has the type the guards around it leave of the field, so
+  `local job = data.job` inside `if data.job then` holds a value; see
+  [fields](../crates/qbx_lua_ls/README.md#fields).
 - A local that one of the values that may reach the read leaves without a declared type, as
   `name = name or 'none'` does, unless a `---@cast name T` types it. A local that is assigned again
   is checked with the values that reach the read, as described for
   [locals that are assigned again](../crates/qbx_lua_ls/README.md#locals-that-are-assigned-again),
   and `local name` declares no missing value: only the values given later count.
-- A value of a call that a guard on another of its values covers. After
-  `local vehicle, coords = lib.getClosestVehicle(pos)` and `if not vehicle then return end`,
-  `coords` is not reported: annotations declare such values one by one, rather than as
-  [sets of values](../crates/qbx_lua_ls/README.md#sets-of-returned-values).
-- What a call gives for `source` alone, or for a local that holds it, as
-  `ESX.GetPlayerFromId(source)` or `exports.qbx_core:GetPlayer(src)` after `local src = source`:
-  lookups of the player whose event or callback runs only miss one that has just left.
-  `ESX.GetPlayerFromId(target)` is reported.
-- Reads after one reported in the same function, which points at the same missing check.
-- Reads after one that always runs before them. Once `name:upper()` has run without an error,
-  `name` held a value, so the reads after it in its block are not reported, including those in
-  functions defined there. A read inside an `if` branch, on the right of `and` and `or`, or in the
-  condition of a `repeat` loop that a `break` can leave, does not count for the code after it.
 
 Guards only narrow the code after them, so a read inside a function defined before the guard is
 reported, as `return name:upper()` is in a `local function` above `if not name then return end`:
 the function may run before the guard does. lua-language-server reports it as well.
 
 Unlike lua-language-server, qbx-lua-ls also checks arithmetic, concatenation, `#`, `<`, `<=`, `>`,
-`>=` and `for` bounds, leaves alone the lookups of `source` above, and reports a local once per
-function rather than at every read.
+`>=` and `for` bounds.
 
 ## Events, exports, and locales
 

@@ -14,7 +14,7 @@ use crate::index::{
 };
 use crate::indexer::{described_values, render_doc};
 use crate::infer::{Decl, Infer, MemberInfo};
-use crate::locate::locate;
+use crate::locate::{locate, MemberAccess};
 use crate::luacats::{applies_on, own_type, type_name_at};
 use crate::types::{CallbackRole, DescribedValue, Type};
 use crate::workspace::Workspace;
@@ -62,7 +62,11 @@ pub fn target_at(infer: &Infer, doc: &Document, offset: u32) -> Option<Target> {
     if let Some(access) = located.member {
         let owner = infer.expr(access.base());
         let name = access.name(&doc.text)?;
-        let info = infer.member(&owner, &name.text)?;
+        let mut info = infer.member(&owner, &name.text)?;
+        // What the guards around a field of a local leave of it, as `self.target` inside `if self.target then`.
+        if !matches!(access, MemberAccess::Method { .. }) {
+            info.ty = infer.member_narrowed(access.base(), &name.text, info.ty);
+        }
         return Some(Target::Member { info, owner, span: name.span });
     }
     if let Some((func_name, segment)) = located.func_name.filter(|(_, segment)| *segment > 0) {
