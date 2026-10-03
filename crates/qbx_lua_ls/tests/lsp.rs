@@ -4369,14 +4369,131 @@ handle(1)
             finding("until ended", "`ended` may be nil: its type here is `string?`"),
         ],
         "reads that guards, casts, an earlier read or a guarded value of the same call cover are left alone, \
-         and so are reads after one reported in the same function, locals assigned again, fields and the \
-         values of calls"
+         and so are reads after one reported in the same function, fields and the values of calls"
     );
     client.notify(
         "workspace/didChangeConfiguration",
         json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "need-check-nil": "off" } } } } }),
     );
     assert!(findings(&mut client, CLIENT, &["need-check-nil"]).is_empty(), "the rule can be turned off");
+}
+
+#[test]
+fn reads_of_locals_that_are_assigned_again_are_checked_for_nil() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Box
+---@field name string
+
+---@return Probe.Box?
+local function find() end
+---@return Probe.Box
+local function make() end
+---@param code string
+---@return function?, string?
+local function compile(code) end
+---@return Probe.Box?, Probe.Box?
+local function locate() end
+local function untyped() return GetSomething() end
+
+---@param label string?
+local function show(label)
+    if not label then
+        label = untyped()
+    end
+    print(label:upper())
+end
+
+---@param id integer
+---@param input string
+local function run(id, input)
+    local before = find()
+    print(before.name)
+    before = make()
+    local swapped = make()
+    if id > 1 then
+        swapped = find()
+    end
+    print(swapped.name)
+    local fixed = find()
+    if not fixed then
+        fixed = make()
+    end
+    print(fixed.name)
+    local again = find()
+    if not again then
+        return
+    end
+    again = find()
+    print(again.name)
+    local looped = make()
+    while id > 2 do
+        print(looped.name)
+        looped = nil
+    end
+    local fallback = find()
+    fallback = fallback or make()
+    print(fallback.name)
+    local cast = make()
+    cast = find() --[[@as Probe.Box]]
+    print(cast.name)
+    local later
+    if id > 3 then
+        later = make()
+    end
+    print(later.name)
+    local fn, err = compile('return ' .. input)
+    if err then
+        fn, err = compile(input)
+    end
+    if err then
+        return
+    end
+    fn()
+    local vehicle, spot = locate()
+    if not vehicle then
+        return
+    end
+    if id > 4 then
+        spot = make()
+    end
+    print(spot.name)
+    local other, place = locate()
+    if not other then
+        return
+    end
+    if id > 5 then
+        place = find()
+    end
+    print(place.name)
+end
+run(1, '')
+show()
+";
+    client.open_with(CLIENT, text);
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "need-check-nil": "warning" } } } } }),
+    );
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("need-check-nil".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [
+            finding("before.name", "`before` may be nil: its type here is `Probe.Box?`"),
+            // One way gives it a value that may be missing.
+            finding("swapped.name", "`swapped` may be nil: its type here is `Probe.Box?`"),
+            // The guard told about the value it held before.
+            finding("again.name", "`again` may be nil: its type here is `Probe.Box?`"),
+            // The loop gives it `nil` before it starts again.
+            finding("looped.name", "`looped` may be nil: its type here is `Probe.Box?`"),
+            // The guard on `other` covers the value of the call, not the one assigned after it.
+            finding("place.name", "`place` may be nil: its type here is `Probe.Box?`"),
+        ],
+        "the values that reach a read of a local that is assigned again are checked; one that a guard, \
+         `or`, a cast or a guarded value of the same call covers, one of no known type, and the missing \
+         value of `local later`, are left alone"
+    );
 }
 
 #[test]

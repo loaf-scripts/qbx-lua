@@ -9,13 +9,14 @@
 //!
 //! As for `impossible-comparison`, only declared types count, whatever declares them: an
 //! annotation of the local, or the `@return` or `@field` of a function, class or stub. The type is
-//! the one the guards and casts around the read leave. Guards that leave no value of it keep it whole,
-//! but a `nil` or `false` that they rule out stays out: `round` is no `nil` in
+//! that of the values that may reach the read, as the guards and casts around it leave them, also
+//! for a local that is assigned again. Guards that leave no value of it keep it whole, but a `nil` or
+//! `false` that they rule out stays out: `round` is no `nil` in
 //! `round and (round == true or i < round)`, whatever else it holds. The rest is left alone:
 //!
 //! - Fields and the values of calls, which guards do not narrow.
-//! - Locals that are assigned again, unless a `---@cast` types them: a guard tells nothing about
-//!   the value an assignment replaces, and `name = name or 'none'` is how code fills in a `nil`.
+//! - A value whose type is not declared, as `name = name or 'none'` gives, and the missing value of
+//!   `local name` before something gives it one.
 //! - A value that a guard on another value of the same call covers, as `err` of
 //!   `local fn, err = load(code)` after `if not fn then`: annotations declare such values one by one.
 //! - What a call gives for `source` alone, as `ESX.GetPlayerFromId(source)`: lookups of the player
@@ -33,7 +34,6 @@ use super::arguments::{candidates, expected, mismatch, param_for, signatures, ta
 use super::class_tables::Classes;
 use super::comparisons::Declared;
 use crate::infer::{Decl, Infer};
-use crate::luacats::CastEntry;
 use crate::narrow::Version;
 use crate::types::{FunType, Param, Type};
 
@@ -101,33 +101,26 @@ impl Finder<'_, '_> {
         if self.checked.iter().any(|(checked, span)| *checked == id && span.contains(at)) {
             return;
         }
-        let assigned = local.refs.iter().any(|r| r.write);
-        let typed = || {
-            self.infer
-                .ctx
-                .casts()
-                .at(id, at)
-                .any(|cast| cast.entries.iter().any(|(entry, _)| matches!(entry, CastEntry::Replace(_))))
-        };
-        if assigned && !typed() {
-            return;
-        }
-        let ty = self.declared.of(operand.unparen());
-        let reaches = |value: &Type| !self.declared.rules_out(id, at, value);
-        let missing = missing_value(&self.infer.expand_aliases(&ty, 0), reaches);
-        let Some(missing) = missing.filter(|missing| param.is_none() || *missing == "nil") else { return };
         // `local vehicle, coords = lib.getClosestVehicle(...)` declares both as optional, and the
-        // guard on `vehicle` is the check for `coords` as well.
+        // guard on `vehicle` is the check for `coords` as well, while it holds that value.
         let flow = ctx.flow();
-        let covered = |value: &Version| {
+        let covered = |value: &&Version| {
             let linked = flow.linked(id, value.origin).unwrap_or_default();
             linked
                 .iter()
                 .any(|(other, origin, _)| *other != id && flow.facts(*other, *origin, Span::empty(at)).next().is_some())
         };
-        if flow.at(id, at).iter().all(covered) {
+        let values = flow.at(id, at);
+        let covered: Vec<u32> = values.iter().filter(covered).map(|value| value.origin).collect();
+        if covered.len() == values.len() {
             return;
         }
+        let keep = |origin: u32| !covered.contains(&origin);
+        let ty = self.declared.of_values(operand.unparen(), id, &keep);
+        let reaches = |value: &Type| !self.declared.rules_out_of(id, at, value, &keep);
+        let missing = missing_value(&self.infer.expand_aliases(&ty, 0), reaches);
+        let Some(missing) = missing.filter(|missing| param.is_none() || *missing == "nil") else { return };
+        let assigned = local.refs.iter().any(|r| r.write);
         if !assigned && self.is_lookup_of_source(id) {
             return;
         }

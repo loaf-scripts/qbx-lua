@@ -800,8 +800,11 @@ Only clear cases count, and the rest is left alone:
 
 - Fields and the values of calls, which guards do not narrow:
   `if self.target then self.target:kill() end` would be reported otherwise.
-- A local that is assigned again after its declaration, unless a `---@cast name T` types it.
-  `name = name or 'none'` is how code fills in a missing value.
+- A local that one of the values that may reach the read leaves without a declared type, as
+  `name = name or 'none'` does, unless a `---@cast name T` types it. A local that is assigned again
+  is checked with the values that reach the read, as described for
+  [locals that are assigned again](../crates/qbx_lua_ls/README.md#locals-that-are-assigned-again),
+  and `local name` declares no missing value: only the values given later count.
 - A value of a call that a guard on another of its values covers. After
   `local vehicle, coords = lib.getClosestVehicle(pos)` and `if not vehicle then return end`,
   `coords` is not reported: annotations declare such values one by one, rather than as

@@ -158,10 +158,21 @@ impl<'a, 'b> Declared<'a, 'b> {
         self.local(id, offset, 0)
     }
 
+    /// The type of `expr`, which reads the local `id`, as `of` gives it from only the values that may
+    /// reach the read whose origins `keep` picks.
+    pub fn of_values(&self, expr: &Expr, id: LocalId, keep: &dyn Fn(u32) -> bool) -> Type {
+        if let Some(cast) = self.cast(expr) {
+            return cast;
+        }
+        let origin = |origin| keep(origin).then(|| self.origin(id, origin, 0)).flatten();
+        self.infer.narrowed_with(id, expr.span.start, &origin, true)
+    }
+
     /// Whether the guards where the local `id` is read at `offset` rule out `value` for each of the
-    /// values that may reach the read and be it.
-    pub fn rules_out(&self, id: LocalId, offset: u32, value: &Type) -> bool {
-        self.infer.rules_out_with(id, offset, value, &|origin| self.origin(id, origin, 0))
+    /// values that may reach the read and be it, of those whose origins `keep` picks.
+    pub fn rules_out_of(&self, id: LocalId, offset: u32, value: &Type, keep: &dyn Fn(u32) -> bool) -> bool {
+        let origin = |origin| keep(origin).then(|| self.origin(id, origin, 0)).flatten();
+        self.infer.rules_out_with(id, offset, value, &origin)
     }
 
     /// The declared type of the value that `origin` gives the local `id`, or `None` while it is
@@ -225,8 +236,16 @@ impl<'a, 'b> Declared<'a, 'b> {
         let value = assigned_value(exprs, index, single, multi);
         match self.infer.annotation(id) {
             // A value with no declared type, as `name or 'none'`, still tells which parts of the
-            // annotation it may be.
-            Some(_) if value.is_unknown() => self.infer.origin_type(id, origin).unwrap_or_default(),
+            // annotation it may be, but one of no known type at all, as `untyped()` gives, is
+            // not declared to be any of them.
+            Some(_) if value.is_unknown() => {
+                let inferred =
+                    assigned_value(exprs, index, |expr| self.infer.expr(expr), |expr| self.infer.expr_multi(expr));
+                match inferred.is_unknown() {
+                    true => Type::Unknown,
+                    false => self.infer.origin_type(id, origin).unwrap_or_default(),
+                }
+            }
             Some(declared) => self.infer.bounded(&declared, &value),
             None => value,
         }
