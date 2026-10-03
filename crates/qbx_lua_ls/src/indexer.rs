@@ -15,7 +15,7 @@ use crate::index::{
     AliasDef, ClassDef, Element, EnumTable, EventDef, EventFamily, EventKind, FileId, FileIndex, Index, Member,
     Metatable, NuiCallbackDef, Read, Symbol, SymbolKind,
 };
-use crate::infer::{metatable_args, table_elements, table_fields, FileContext, Infer};
+use crate::infer::{metatable_args, table_elements, table_fields, Decl, FileContext, Infer};
 use crate::luacats::{own_type, parse_doc_lines, DocGroup};
 use crate::types::{CallbackRole, DescribedValue, FunType, Param, Type};
 
@@ -176,6 +176,16 @@ pub fn is_state_bag(expr: &Expr) -> bool {
         ExprKind::Field { name, .. } => name.text == "state",
         ExprKind::Name(name) => name.text == "GlobalState",
         _ => false,
+    }
+}
+
+/// The name that a path of fields like `a.b["c"]` starts from.
+fn path_root(expr: &Expr) -> Option<&Name> {
+    match &expr.kind {
+        ExprKind::Name(name) => Some(name),
+        ExprKind::Field { base, .. } => path_root(base),
+        ExprKind::Index { base, index, .. } if index.as_string().is_some() => path_root(base),
+        _ => None,
     }
 }
 
@@ -703,6 +713,9 @@ impl<'a> Indexer<'a> {
                 None => SmolStr::new(format!("{owner}.{}", segment.text)),
             };
         }
+        if !self.is_global(&name.base) && !self.owns(&name.base, &owner, injected) {
+            return;
+        }
         self.push_member(owner, symbol, injected, Some(stmt.span.start));
     }
 
@@ -777,6 +790,10 @@ impl<'a> Indexer<'a> {
             }
         };
         let class_table = matches!(&base.kind, ExprKind::Name(root) if self.is_class_table(root));
+        let injected = typed_as_class && !class_table;
+        if !self.root_is_global(base) && !path_root(base).is_some_and(|root| self.owns(root, &owner, injected)) {
+            return;
+        }
         let nested = format!("{owner}.{}", name.text);
         let mut symbol = self.value_symbol(name, value, stmt.span.start, position, &nested, 1);
         if symbol.kind == SymbolKind::Variable {
@@ -788,7 +805,37 @@ impl<'a> Indexer<'a> {
                 self.out.typed_exports.push(self.out.members.len() as u32);
             }
         }
-        self.push_member(owner, symbol, typed_as_class && !class_table, Some(stmt.span.start));
+        self.push_member(owner, symbol, injected, Some(stmt.span.start));
+    }
+
+    /// Whether a field set through a path from the local `root` is one of `owner`, the table the
+    /// path names: through `self` in a method, the table a `---@class` annotation declares, a table
+    /// that a local declares at the top of the file, or the instance a constructor makes in a local,
+    /// as in `local self = setmetatable({}, Child)` or before `setmetatable(made, Child)`.
+    /// `injected` tells whether the path holds a value typed as a class rather than its table.
+    /// Other locals hold tables made elsewhere, such as a parameter typed as a class or a loop
+    /// variable over another file's tables, and like TypeScript, what is set through them adds no
+    /// field to those tables.
+    fn owns(&self, root: &Name, owner: &str, injected: bool) -> bool {
+        let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(root.span.start) else { return false };
+        let decl = self.ctx.resolution.local(id).decl.start;
+        let made = match self.ctx.decl(decl) {
+            Some(Decl::SelfParam { .. }) => return true,
+            Some(Decl::Local { stmt, index }) => {
+                self.ctx.sets_metatable(id)
+                    || matches!(&stmt.kind, StmtKind::Local { exprs, .. }
+                        if exprs.get(*index).is_some_and(|value| table_fields(value).is_some()))
+            }
+            _ => false,
+        };
+        if injected {
+            return false;
+        }
+        let holds =
+            |table: &str| owner.strip_prefix(table).is_some_and(|rest| rest.is_empty() || rest.starts_with('.'));
+        self.is_class_table(root)
+            || holds(&self.ctx.local_owner_key(decl))
+            || made && self.owner_of(&self.infer.local_type_at(id, root.span.start)).is_some_and(|table| holds(&table))
     }
 
     fn root_is_global(&self, expr: &Expr) -> bool {

@@ -7465,6 +7465,61 @@ end
 }
 
 #[test]
+fn fields_are_set_only_through_the_names_that_own_their_tables() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Thing
+---@field name string
+local Thing = {}
+Thing.version = 2
+
+function Thing:init()
+    self.ready = true
+end
+
+---@param thing Test.Thing
+local function tag(thing)
+    thing.extra = 5
+end
+
+local Config = { debug = false }
+Config.verbose = true
+local alias = Config
+alias.copied = 1
+
+local rows = { { label = 'a' }, { label = 'b' } }
+for _, row in pairs(rows) do
+    row.count = 0
+end
+
+---@type Test.Thing
+local other
+print(other.version, other.ready, other.extra, Config.verbose, Config.copied, rows[1].count, tag)
+";
+    client.open_with(CLIENT, text);
+    let print = pos(text, "print(", 0).0;
+    let line = text.lines().nth(print as usize).unwrap();
+    // The table of the `---@class`, `self` in its methods and a top-level local's own table take
+    // the fields set through them.
+    for (needle, expected) in [
+        ("other.version", "version: integer"),
+        ("other.ready", "ready: boolean"),
+        ("Config.verbose", "verbose: boolean"),
+    ] {
+        let column = (line.find(needle).unwrap() + needle.len() - 1) as u32;
+        let hover = client.hover_text(CLIENT, print, column);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    // A parameter typed as the class, another local holding the table and a loop variable over
+    // the rows hold tables they do not own, so what is set through them is no field of those.
+    for needle in ["other.extra", "Config.copied", "rows[1].count"] {
+        let column = (line.find(needle).unwrap() + needle.len() - 1) as u32;
+        let hover = client.hover_text(CLIENT, print, column);
+        assert!(hover.is_empty(), "{needle}: expected no hover, got {hover}");
+    }
+}
+
+#[test]
 fn class_operators_type_the_operations_on_their_values() {
     let mut client = Client::start(fixture_root());
     let text = "\
@@ -8388,8 +8443,9 @@ print(held, typed, late, looped, loopedMissing, fromRight, fromLeft, neither)
         // `setmetatable(Other, Base)` gives `Other` the methods of `Base`.
         ("local other =", &["greet: function"], &[]),
         // `setmetatable(o, self)` inside `Animal:new`, and on a local before it is returned. A method
-        // defined on an instance is one of the instances, not of the class.
-        ("local dog =", &["speak: function", "bark: function"], &[]),
+        // defined through a local that holds an instance made elsewhere adds nothing, to the
+        // instances or the class, as TypeScript reads `dog.bark = ...`.
+        ("local dog =", &["speak: function"], &["bark"]),
         ("local built =", &["speak: function"], &[]),
         // An instance of a `---@class` is that class, and the class keeps its own fields.
         ("local point =", &["local point: Point"], &[]),

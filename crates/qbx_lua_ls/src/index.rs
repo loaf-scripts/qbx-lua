@@ -156,7 +156,8 @@ pub struct Member {
     pub owner: SmolStr,
     pub symbol: Symbol,
     /// Set through a value typed as the class rather than on the table its `---@class` declares,
-    /// like `abc.x = 1` below `---@type Test` `local abc`. Strict classes do not count it as declared.
+    /// like `self.x = 1` in a method of `Test`, or `abc.x = 1` below `---@type Test` `abc = {}`.
+    /// Strict classes do not count it as declared.
     pub injected: bool,
     /// The `---@private`, `---@protected` or `---@package` above the statement that sets it.
     pub visibility: Visibility,

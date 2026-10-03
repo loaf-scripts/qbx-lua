@@ -210,6 +210,11 @@ impl<'a> FileContext<'a> {
         self.decls.get(&decl_start)
     }
 
+    /// Whether a `setmetatable(name, metatable)` call gives the local `id` a metatable.
+    pub fn sets_metatable(&self, id: LocalId) -> bool {
+        self.set_metatables.contains_key(&id)
+    }
+
     pub fn doc_at(&self, stmt_start: u32) -> Rc<DocGroup> {
         if let Some(doc) = self.docs.borrow().get(&stmt_start) {
             return doc.clone();
