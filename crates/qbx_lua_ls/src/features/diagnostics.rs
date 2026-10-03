@@ -5,9 +5,10 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
-    ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, DISCARD_RETURNS, IMPOSSIBLE_COMPARISON, INJECT_FIELD, INVISIBLE,
-    MISSING_FIELDS, MISSING_PARAMETER, MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN, PARAM_TYPE_MISMATCH,
-    REDUNDANT_PARAMETER, REDUNDANT_RETURN_VALUE, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
+    ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, DISCARD_RETURNS, IMPOSSIBLE_COMPARISON, INCOMPLETE_SIGNATURE_DOC,
+    INJECT_FIELD, INVISIBLE, MISSING_FIELDS, MISSING_GLOBAL_DOC, MISSING_LOCAL_EXPORT_DOC, MISSING_PARAMETER,
+    MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN, PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER, REDUNDANT_RETURN_VALUE,
+    RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -28,7 +29,7 @@ use super::injected_fields::injected_fields;
 use super::nil_checks::{unchecked_nils, UncheckedNils};
 use super::returns::{mismatched_returns, missing_returns, redundant_returns};
 use super::strict_classes::undeclared_fields;
-use super::unknown_types::{unknown_types, unknown_values};
+use super::unknown_types::{typed_by_declaration, unknown_types, unknown_values};
 use super::visibility::invisible_members;
 use crate::document::Document;
 use crate::index::{FileId, FileOrigin};
@@ -78,11 +79,17 @@ impl<'a> CheckInput<'a> {
     }
 }
 
-/// Findings for rules qbx-lint registers but cannot check, because they need the LuaCATS types only
-/// the server indexes, and the parts of `missing-parameter` and `redundant-parameter` that depend on
-/// the handler a `@callback` wrapper call reaches. Inline suppression comments apply to them as they
-/// do to the linter's own.
-fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<qbx_lua_analysis::Diagnostic> {
+/// Adds to `found`, the linter's findings, those of rules qbx-lint registers but cannot check,
+/// because they need the LuaCATS types only the server indexes, and the parts of `missing-parameter`
+/// and `redundant-parameter` that depend on the handler a `@callback` wrapper call reaches. Inline
+/// suppression comments apply to them as they do to the linter's own. Removes the linter's findings
+/// of parameters without `@param` that those types document.
+fn type_diagnostics(
+    ws: &Workspace,
+    doc: &Document,
+    config: &FileConfig,
+    found: &mut Vec<qbx_lua_analysis::Diagnostic>,
+) {
     type Check = fn(&CheckInput) -> Vec<(Span, String)>;
     let checks: [(&'static str, Check); 17] = [
         (UNDEFINED_DOC_NAME, |input| {
@@ -129,14 +136,19 @@ fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<
     let infer = Infer::new(&ctx, &ws.index);
     let suppressions = Suppressions::parse(&doc.text, &doc.chunk.comments, &doc.lines);
     let input = CheckInput { ws, doc, infer: &infer, payloads: OnceCell::new(), suppressions };
-    let mut out = Vec::new();
+    // A parameter typed by what its function is written as, such as the `fun(source: number, ...)`
+    // of a callback wrapper, needs no `@param` of its own. The linter only knows the function types
+    // that the functions of its resource document.
+    let missing_docs = [MISSING_GLOBAL_DOC, MISSING_LOCAL_EXPORT_DOC, INCOMPLETE_SIGNATURE_DOC];
+    if missing_docs.iter().any(|code| config.severity(code).is_some()) {
+        found.retain(|d| !missing_docs.contains(&d.code) || !typed_by_declaration(&infer, d.span));
+    }
     for (code, check) in checks {
         let Some(severity) = config.severity(code) else { continue };
-        out.extend(check(&input).into_iter().filter(|(span, _)| !input.is_suppressed(code, *span)).map(
+        found.extend(check(&input).into_iter().filter(|(span, _)| !input.is_suppressed(code, *span)).map(
             |(span, message)| qbx_lua_analysis::Diagnostic { code, severity, span, message, tag: None, fix: None },
         ));
     }
-    out
 }
 
 pub fn diagnostics(
@@ -242,7 +254,7 @@ pub(crate) fn diagnostics_with_support(
             crossrefs: Some(crossrefs),
             locale: support.and_then(|support| support.locale).or(owned_locale.as_ref()),
         });
-        found.extend(type_diagnostics(ws, doc, &config));
+        type_diagnostics(ws, doc, &config, &mut found);
         found
     };
 

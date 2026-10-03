@@ -24,4 +24,5 @@ RegisterNUICallback('close', function(_, cb)
     cb(1)
 end)
 
+---@return integer
 exports('getCount', function() return count end)

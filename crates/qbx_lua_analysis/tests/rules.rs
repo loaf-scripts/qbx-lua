@@ -808,16 +808,26 @@ fn values_the_linter_cannot_follow_are_not_checked() {
 
 /// The findings of `code` in `source`, linted on its own, as `(line, message)`.
 fn findings(source: &str, code: &str) -> Vec<(u32, String)> {
+    findings_with(source, code, &FileConfig::default())
+}
+
+/// The findings of `code`, a rule that is off by default, with it turned on.
+fn opt_in_findings(source: &str, code: &str) -> Vec<(u32, String)> {
+    let mut config = FileConfig::default();
+    config.set(code, Level::Warning);
+    findings_with(source, code, &config)
+}
+
+fn findings_with(source: &str, code: &str, config: &FileConfig) -> Vec<(u32, String)> {
     let chunk = parse(source);
     let resolution = resolve(&chunk);
     let summary = summarize(source, &chunk, &resolution);
-    let config = FileConfig::default();
     let input = FileInput {
         source,
         chunk: &chunk,
         resolution: &resolution,
         summary: &summary,
-        config: &config,
+        config,
         side: None,
         resource: None,
         crossrefs: None,
@@ -1040,6 +1050,178 @@ return handler";
             (7, "the function below has no parameter 'other'".to_string()),
             (10, "no function follows the @param 'x' annotation".to_string()),
         ]
+    );
+}
+
+fn owned(findings: &[(u32, &str)]) -> Vec<(u32, String)> {
+    findings.iter().map(|&(line, message)| (line, message.to_string())).collect()
+}
+
+#[test]
+fn global_functions_without_annotations() {
+    let source = "function Add(a, b) return a + b end
+function Nothing() end
+-- Opens the menu.
+function Commented() end
+---@diagnostic disable-next-line: lowercase-global
+function diagnosticOnly() end
+---@param id integer
+function Partial(id) return tostring(id) end
+function Branches(flag)
+    if flag then return 1, 2 end
+    return 3
+end
+function Ignored(self, _, _unused, ...) end
+---@type fun(a: integer): integer
+Typed = function(a) return a end
+---@param ... any
+---@return integer ...
+function Variadic(...) return 1, 2, 3 end
+function Outer()
+    function Inner() end
+end
+local function notGlobal(x) return x end
+Table = {}
+function Table.field(y) return y end
+function Table:method(z) return z end
+function BareReturn() if Table then return end end
+return notGlobal";
+    assert_eq!(
+        opt_in_findings(source, "missing-global-doc"),
+        owned(&[
+            (1, "parameter 'a' of global function 'Add' has no @param annotation"),
+            (1, "parameter 'b' of global function 'Add' has no @param annotation"),
+            (1, "return value #1 of global function 'Add' has no @return annotation"),
+            (2, "global function 'Nothing' has no comment"),
+            (6, "global function 'diagnosticOnly' has no comment"),
+            (8, "return value #1 of global function 'Partial' has no @return annotation"),
+            (9, "parameter 'flag' of global function 'Branches' has no @param annotation"),
+            (10, "return value #1 of global function 'Branches' has no @return annotation"),
+            (10, "return value #2 of global function 'Branches' has no @return annotation"),
+            (11, "return value #1 of global function 'Branches' has no @return annotation"),
+            (13, "parameter '...' of global function 'Ignored' has no @param annotation"),
+            (19, "global function 'Outer' has no comment"),
+            (20, "global function 'Inner' has no comment"),
+            (26, "global function 'BareReturn' has no comment"),
+        ])
+    );
+    // Off unless turned on, like the other two.
+    for code in ["missing-global-doc", "missing-local-export-doc", "incomplete-signature-doc"] {
+        assert_eq!(findings(source, code), [], "{code}");
+    }
+}
+
+#[test]
+fn exported_local_functions_without_annotations() {
+    let source = "local M = {}
+local function helper(a) return a end
+M.helper = helper
+M.again = helper
+function M.direct(b) return b end
+M.assigned = function(c) return c end
+---@param d integer
+local function documented(d) return d end
+M.documented = documented
+local function nothing() end
+M.nothing = nothing
+local inline = function(e) end
+exports('Inline', function(f) return f end)
+exports('Local', inline)
+function Global(g) return g end
+exports('Global', Global)
+-- Shows the menu.
+exports('Commented', function() end)
+exports('Bare', function() end)
+local Other = {}
+local function hidden(h) return h end
+Other.hidden = hidden
+return M";
+    assert_eq!(
+        opt_in_findings(source, "missing-local-export-doc"),
+        owned(&[
+            (2, "parameter 'a' of exported local function 'helper' has no @param annotation"),
+            (2, "return value #1 of exported local function 'helper' has no @return annotation"),
+            (8, "return value #1 of exported local function 'documented' has no @return annotation"),
+            (10, "exported local function 'nothing' has no comment"),
+            (12, "parameter 'e' of exported local function 'inline' has no @param annotation"),
+            (13, "parameter 'f' of exported function 'Inline' has no @param annotation"),
+            (13, "return value #1 of exported function 'Inline' has no @return annotation"),
+            (19, "exported function 'Bare' has no comment"),
+        ])
+    );
+}
+
+#[test]
+fn partly_annotated_functions() {
+    let source = "---@param a integer
+local function partial(a, b) return a end
+local function undocumented(c) return c end
+--- Only a description.
+local function described(d) return d end
+---@param src number
+RegisterNetEvent('event', function(src, data) end)
+local handlers = {
+    ---@param e integer
+    one = function(e, f) end, two = function(g) end,
+}
+---@param x integer
+local nested = function(x) return function(y) return y end end
+---@param h integer
+---@return integer
+---@return string
+local function extra(h) return h, 'x', nil end
+local function byName(i, j) return i, j end
+---@param i integer
+RegisterNetEvent('byName', byName)
+---@param k integer
+RegisterNetEvent('lines',
+    function(k, l) end)
+---@param self table
+---@param m integer
+function handlers:method(m, _n) end
+---@type fun(o: integer)
+local typed = function(o, p) end
+return partial, undocumented, described, handlers, nested, extra, byName, typed";
+    assert_eq!(
+        opt_in_findings(source, "incomplete-signature-doc"),
+        owned(&[
+            (2, "incomplete signature: parameter 'b' has no @param annotation"),
+            (2, "incomplete signature: return value #1 has no @return annotation"),
+            (7, "incomplete signature: parameter 'data' has no @param annotation"),
+            (10, "incomplete signature: parameter 'f' has no @param annotation"),
+            (13, "incomplete signature: return value #1 has no @return annotation"),
+            (17, "incomplete signature: return value #3 has no @return annotation"),
+            (23, "incomplete signature: parameter 'l' has no @param annotation"),
+        ])
+    );
+
+    // The parameters that the function type of a documented callback wrapper names.
+    let source = "---@param event string
+---@param callback fun(source: number, phoneNumber: string, ...): any
+function BaseCallback(event, callback) end
+---@param contact table
+BaseCallback('saveContact', function(source, phoneNumber, contact, extra) return contact, extra end)
+---@param name string
+---@param handler fun(src: number, ...)
+local function register(name, handler) end
+---@param data table
+register('local', function(src, data) end)
+local Wrapper = {}
+---@param cb fun(player: table)
+function Wrapper:on(cb) end
+---@param other string
+Wrapper:on(function(player, other) end)
+local function undocumented(name, cb) end
+---@param data table
+undocumented('x', function(src, data) end)";
+    assert_eq!(
+        opt_in_findings(source, "incomplete-signature-doc"),
+        owned(&[
+            (5, "incomplete signature: parameter 'extra' has no @param annotation"),
+            (5, "incomplete signature: return value #1 has no @return annotation"),
+            (5, "incomplete signature: return value #2 has no @return annotation"),
+            (18, "incomplete signature: parameter 'src' has no @param annotation"),
+        ])
     );
 }
 

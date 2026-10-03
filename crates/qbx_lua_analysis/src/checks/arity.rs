@@ -29,27 +29,102 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     if sink.enabled(rules::MISSING_PARAMETER).is_none() && sink.enabled(rules::REDUNDANT_PARAMETER).is_none() {
         return;
     }
-    let own_env;
-    let env = match input.resource {
-        Some(resource) => resource.env,
-        None => {
-            let mut env = ResourceEnv::default();
-            env.add_summary(input.summary, None);
-            own_env = env;
-            &own_env
+    let callees = Callees::new(input);
+    Calls { callees: &callees, sink }.visit_block(&input.chunk.block);
+}
+
+/// The functions that the calls of a file may run, as far as the file and the summaries of its
+/// resource tell: the documented global functions, and the local functions and fields of local
+/// tables of the file.
+pub(super) struct Callees<'i, 'a> {
+    input: &'i FileInput<'a>,
+    /// The file's own summary, for a file outside any resource.
+    own_env: ResourceEnv,
+    locals: LocalDefs,
+    declared: DeclaredDefs,
+    regions: SideRegions,
+}
+
+impl<'i, 'a> Callees<'i, 'a> {
+    pub(super) fn new(input: &'i FileInput<'a>) -> Self {
+        let mut own_env = ResourceEnv::default();
+        if input.resource.is_none() {
+            own_env.add_summary(input.summary, None);
         }
-    };
-    let mut collector = LocalCollector { input, env, defs: LocalDefs::default(), declared: DeclaredDefs::default() };
-    collector.visit_block(&input.chunk.block);
-    let mut calls = Calls {
-        input,
-        env,
-        locals: collector.defs,
-        declared: collector.declared,
-        regions: SideRegions::of(input.source, input.chunk),
-        sink,
-    };
-    calls.visit_block(&input.chunk.block);
+        let env = input.resource.map_or(&own_env, |resource| resource.env);
+        let mut collector =
+            LocalCollector { input, env, defs: LocalDefs::default(), declared: DeclaredDefs::default() };
+        collector.visit_block(&input.chunk.block);
+        let (locals, declared) = (collector.defs, collector.declared);
+        Self { input, own_env, locals, declared, regions: SideRegions::of(input.source, input.chunk) }
+    }
+
+    fn env(&self) -> &ResourceEnv {
+        self.input.resource.map_or(&self.own_env, |resource| resource.env)
+    }
+
+    /// The signatures a call of `root.fields` may run: every definition, and its overloads unless
+    /// they are scoped to the other side. `None` when the call may run a function the file does not
+    /// know, such as one held by a parameter.
+    fn signatures(&self, call: &Expr, root: &Name, fields: &[&str]) -> Option<Vec<Arc<FunType>>> {
+        let side = self.regions.effective(call.span.start, self.input.side);
+        let defs: Vec<Option<Arc<FunType>>> = match self.input.resolution.resolve_at(root.span.start)? {
+            Resolved::Local(id) => {
+                // Parameters and loop variables start out with a value this file does not know.
+                let kind = self.input.resolution.local(id).kind;
+                if !matches!(kind, LocalKind::Local | LocalKind::LocalFunction) {
+                    return None;
+                }
+                let key = (id, SmolStr::new(fields.join(".")));
+                match (self.declared.get(&key), self.locals.get(&key)) {
+                    (Some(declared), _) => vec![Some(declared.clone())],
+                    (None, Some(defs)) => defs.clone(),
+                    (None, None) => return None,
+                }
+            }
+            // An encrypted script of the resource may define the global differently.
+            Resolved::Global(_) if self.env().opaque => return None,
+            Resolved::Global(_) => {
+                let path = global_key(&root.text, fields)?;
+                self.env().function_defs(&path, side).map(|def| def.cloned()).collect()
+            }
+        };
+        // A value other than a function literal may be any function.
+        let defs = defs.into_iter().collect::<Option<Vec<_>>>()?;
+        let signatures: Vec<Arc<FunType>> = defs
+            .iter()
+            .flat_map(|fun| {
+                let overloads = fun.overloads.iter().filter(|overload| applies_on(overload.side, side));
+                std::iter::once(fun).chain(overloads).cloned()
+            })
+            .collect();
+        (!signatures.is_empty()).then_some(signatures)
+    }
+
+    /// The function types that the functions `call` may run declare for its argument at
+    /// `position`, such as the `fun(source: number, ...)` of a callback wrapper.
+    pub(super) fn argument_functions(&self, call: &Expr, position: usize) -> Vec<Arc<FunType>> {
+        let callee = match &call.kind {
+            ExprKind::Call { callee, .. } => member_path(callee).map(|(root, fields)| (root, fields, false)),
+            ExprKind::MethodCall { base, method, .. } => member_path(base).map(|(root, mut fields)| {
+                fields.push(&method.text);
+                (root, fields, true)
+            }),
+            _ => None,
+        };
+        let Some((root, fields, via_colon)) = callee else { return Vec::new() };
+        let Some(signatures) = self.signatures(call, root, &fields) else { return Vec::new() };
+        let alias = |name: &str| self.env().alias(name);
+        signatures
+            .iter()
+            .filter_map(|fun| {
+                // Positions count as `Requirement::of` counts them.
+                let index = (position + usize::from(via_colon)).checked_sub(usize::from(fun.is_method))?;
+                let param = fun.params.get(index).or_else(|| fun.params.last().filter(|p| p.name == "..."))?;
+                function_type(&param.ty, &alias, 0)
+            })
+            .collect()
+    }
 }
 
 struct LocalCollector<'i, 'a> {
@@ -156,16 +231,12 @@ impl<'ast> Visitor<'ast> for LocalCollector<'_, '_> {
     }
 }
 
-struct Calls<'i, 'a, 's> {
-    input: &'i FileInput<'a>,
-    env: &'i ResourceEnv,
-    locals: LocalDefs,
-    declared: DeclaredDefs,
-    regions: SideRegions,
-    sink: &'i mut Sink<'s>,
+struct Calls<'c, 'i, 'a, 's> {
+    callees: &'c Callees<'i, 'a>,
+    sink: &'c mut Sink<'s>,
 }
 
-impl<'ast> Visitor<'ast> for Calls<'_, '_, '_> {
+impl<'ast> Visitor<'ast> for Calls<'_, '_, '_, '_> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
         match &expr.kind {
             ExprKind::Call { callee, args, .. } => {
@@ -190,7 +261,7 @@ impl<'ast> Visitor<'ast> for Calls<'_, '_, '_> {
     }
 }
 
-impl Calls<'_, '_, '_> {
+impl Calls<'_, '_, '_, '_> {
     #[allow(clippy::too_many_arguments)]
     fn check_call(
         &mut self,
@@ -202,43 +273,9 @@ impl Calls<'_, '_, '_> {
         span: Span,
         display: &str,
     ) {
-        let side = self.regions.effective(call.span.start, self.input.side);
-        let defs: Vec<Option<Arc<FunType>>> = match self.input.resolution.resolve_at(root.span.start) {
-            Some(Resolved::Local(id)) => {
-                // Parameters and loop variables start out with a value this file does not know.
-                let kind = self.input.resolution.local(id).kind;
-                if !matches!(kind, LocalKind::Local | LocalKind::LocalFunction) {
-                    return;
-                }
-                let key = (id, SmolStr::new(fields.join(".")));
-                match (self.declared.get(&key), self.locals.get(&key)) {
-                    (Some(declared), _) => vec![Some(declared.clone())],
-                    (None, Some(defs)) => defs.clone(),
-                    (None, None) => return,
-                }
-            }
-            // An encrypted script of the resource may define the global differently.
-            Some(Resolved::Global(_)) if self.env.opaque => return,
-            Some(Resolved::Global(_)) => {
-                let Some(path) = global_key(&root.text, fields) else { return };
-                self.env.function_defs(&path, side).map(|def| def.cloned()).collect()
-            }
-            None => return,
-        };
-        // A value other than a function literal may be any function.
-        let Some(defs) = defs.into_iter().collect::<Option<Vec<_>>>() else { return };
-        // Any definition or overload may be the one that runs, unless the overload is scoped to the
-        // other side.
-        let signatures: Vec<&FunType> = defs
-            .iter()
-            .flat_map(|fun| {
-                let overloads = fun.overloads.iter().filter(|overload| applies_on(overload.side, side));
-                std::iter::once(fun).chain(overloads).map(|fun| fun.as_ref())
-            })
-            .collect();
-        if signatures.is_empty() {
-            return;
-        }
+        // Any definition or overload may be the one that runs.
+        let Some(signatures) = self.callees.signatures(call, root, fields) else { return };
+        let signatures: Vec<&FunType> = signatures.iter().map(|fun| fun.as_ref()).collect();
         self.missing(&signatures, args, via_colon, span, display);
         self.redundant(&signatures, args, via_colon, display);
     }
@@ -246,7 +283,7 @@ impl Calls<'_, '_, '_> {
     /// `missing-parameter`, for the signature that needs the fewest arguments.
     fn missing(&mut self, signatures: &[&FunType], args: &[Expr], via_colon: bool, span: Span, display: &str) {
         let Some(passed) = passed_count(args, 0) else { return };
-        let env = self.env;
+        let env = self.callees.env();
         let alias = |name: &str| env.alias(name);
         let least = signatures
             .iter()

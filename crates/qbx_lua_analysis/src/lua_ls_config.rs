@@ -36,6 +36,9 @@ const EQUIVALENT_CODES: &[&str] = &[
     "undefined-doc-param",
     "duplicate-doc-alias",
     "duplicate-doc-field",
+    "missing-global-doc",
+    "missing-local-export-doc",
+    "incomplete-signature-doc",
     "missing-fields",
     "assign-type-mismatch",
     "invisible",
@@ -76,6 +79,8 @@ pub(crate) fn parse(text: &str, emmylua: bool, settings: &mut Settings) -> Resul
 
     let mut severities = Vec::new();
     let mut disabled = Vec::new();
+    let mut turned_on = Vec::new();
+    let mut turned_off = Vec::new();
     for (key, value) in entries {
         // LuaLS also accepts the settings under the client's `Lua.` prefix.
         let key = key.strip_prefix("Lua.").unwrap_or(&key);
@@ -97,13 +102,25 @@ pub(crate) fn parse(text: &str, emmylua: bool, settings: &mut Settings) -> Resul
                     if let Some(level) = level_from_severity(level) {
                         severities.push((code.to_string(), level));
                     }
+                } else if let (Some(code), Some(status)) =
+                    (key.strip_prefix("diagnostics.neededFileStatus."), value.as_str())
+                {
+                    match status.trim_end_matches('!').to_ascii_lowercase().as_str() {
+                        "any" | "opened" => turned_on.push(code.to_string()),
+                        "none" => turned_off.push(code.to_string()),
+                        _ => {}
+                    }
                 }
             }
         }
     }
-    // Both servers let `diagnostics.disable` win over a severity for the same code.
-    let disabled = disabled.into_iter().map(|code| (code, Level::Off));
-    for (code, level) in severities.into_iter().chain(disabled) {
+    // A LuaLS file status turns a check on at the check's own severity, a warning for each check
+    // that is off here by default, unless `diagnostics.severity` gives one, and `None` turns it off
+    // whatever its severity. Both servers let `diagnostics.disable` win over everything.
+    let off_by_default = |code: &String| crate::rules::find(code).is_some_and(|rule| rule.default.is_none());
+    let turned_on = turned_on.into_iter().filter(off_by_default).map(|code| (code, Level::Warning));
+    let turned_off = turned_off.into_iter().chain(disabled).map(|code| (code, Level::Off));
+    for (code, level) in turned_on.chain(severities).chain(turned_off) {
         match ALIASES.iter().find(|(alias, _)| *alias == code) {
             Some((_, codes)) => settings.rules.extend(codes.iter().map(|c| (c.to_string(), level))),
             None if EQUIVALENT_CODES.contains(&code.as_str()) => settings.rules.push((code, level)),
@@ -303,6 +320,26 @@ mod tests {
         let settings = parse_luals(r#"{ "diagnostics": { "disable": ["unused"] } }"#);
         assert_eq!(settings.rules.len(), 4);
         assert!(settings.rules.iter().all(|(code, level)| code.starts_with("unused-") && *level == Level::Off));
+    }
+
+    #[test]
+    fn file_status_turns_checks_on_and_off() {
+        let settings = parse_luals(
+            r#"{ "diagnostics.neededFileStatus": { "missing-global-doc": "Any", "incomplete-signature-doc": "Opened!",
+                     "missing-local-export-doc": "Any", "unused-local": "Opened", "need-check-nil": "None", "no-unknown": "Any" },
+                 "diagnostics.severity": { "missing-local-export-doc": "Hint", "need-check-nil": "Error" },
+                 "diagnostics.disable": ["no-unknown"] }"#,
+        );
+        let level = |code: &str| settings.rules.iter().rev().find(|(c, _)| c == code).map(|(_, level)| *level);
+        // Checks that are off here by default turn on as warnings, unless a severity is given.
+        assert_eq!(level("missing-global-doc"), Some(Level::Warning));
+        assert_eq!(level("incomplete-signature-doc"), Some(Level::Warning));
+        assert_eq!(level("missing-local-export-doc"), Some(Level::Hint));
+        // Rules on by default keep their level.
+        assert_eq!(level("unused-local"), None);
+        // `None` wins over a severity, and `diagnostics.disable` over a status.
+        assert_eq!(level("need-check-nil"), Some(Level::Off));
+        assert_eq!(level("no-unknown"), Some(Level::Off));
     }
 
     #[test]

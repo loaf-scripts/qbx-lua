@@ -117,6 +117,22 @@ pub(super) fn has_param_line(infer: &Infer, param: &Local) -> bool {
     doc_anchor.is_some_and(|anchor| infer.ctx.doc_at(anchor).params.iter().any(|doc| doc.name == param.name))
 }
 
+/// Whether `span` declares a parameter that takes a type from what its function is written as: the
+/// function type of the parameter it is passed for or of the field it is written for, or a `@type`.
+/// Taking `any` from the `...` of that function type says nothing about it.
+pub(super) fn typed_by_declaration(infer: &Infer, span: Span) -> bool {
+    let Some(Resolved::Local(id)) = infer.ctx.resolution.resolve_at(span.start) else { return false };
+    let local = infer.ctx.resolution.local(id);
+    if local.kind != LocalKind::Param || local.decl != span {
+        return false;
+    }
+    match infer.local_type(id) {
+        Type::Unknown => false,
+        Type::Any => !from_vararg(infer, local),
+        _ => true,
+    }
+}
+
 /// Whether the parameter takes its value from the `...` of the function type its function has to be.
 fn from_vararg(infer: &Infer, param: &Local) -> bool {
     let Some(Decl::Param { index, expected: Some(expected), .. }) = infer.ctx.decl(param.decl.start) else {

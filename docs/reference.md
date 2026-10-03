@@ -102,8 +102,9 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `no-unknown`, `need-check-nil` and `inject-field`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-global-doc`, `missing-local-export-doc`, `incomplete-signature-doc`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `no-unknown`, `need-check-nil` and `inject-field`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
+| `diagnostics.neededFileStatus` | For the same codes, `Any` or `Opened` turns a rule that is off by default, such as `no-unknown` or `missing-global-doc`, on as a warning, unless `diagnostics.severity` gives its level. `None` turns a rule off, whatever its severity. With or without a trailing `!` |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
 
@@ -935,6 +936,60 @@ the function may run before the guard does. lua-language-server reports it as we
 
 Unlike lua-language-server, qbx-lua-ls also checks arithmetic, concatenation, `#`, `<`, `<=`, `>`,
 `>=` and `for` bounds.
+
+## Missing documentation
+
+`missing-global-doc`, `missing-local-export-doc` and `incomplete-signature-doc` are off by default
+and keep lua-language-server's names, so a `.luarc.json` that turns them on with
+`diagnostics.neededFileStatus` turns them on here too. Turned on, each reports the parameters of a
+function that no `@param` names, and each value of each `return` at a position that no `@return`
+covers:
+
+```toml
+[rules]
+"missing-global-doc" = "warning"
+"incomplete-signature-doc" = "warning"
+```
+
+```lua
+function GetName(id) return tostring(id) end -- parameter 'id' of global function 'GetName' has no @param annotation
+
+---@param id integer
+local function getName(id) return tostring(id) end -- incomplete signature: return value #1 has no @return annotation
+```
+
+- `missing-global-doc` checks the global functions defined with `function Name()` or
+  `Name = function()`, also inside other functions, but not fields of global tables or methods. One
+  without parameters or returned values needs a comment instead: any comment directly above it, or
+  after code on the line its parameters start on, other than `---@diagnostic` lines.
+- `missing-local-export-doc` checks the local functions a file exports, and asks for a comment the
+  same way. A module exports those it assigns by name to a field of a local table that a `return`
+  gives, as `M.name = name` before `return M`; functions defined with `function M.name()` are not
+  checked, as in lua-language-server. `exports('Name', fn)` exports `fn`, and a function written in
+  the call. A global function passed to `exports` is left to `missing-global-doc`.
+- `incomplete-signature-doc` checks every function whose doc comment has `@param` or `@return`
+  lines, handlers passed to calls and functions in table fields included. A global function can be
+  reported by it and `missing-global-doc` alike.
+
+A function's doc comment is the one above the line it starts on, or above a call that spans lines
+and passes it; comment lines in between do not separate them, a blank line does. Only the first
+function that starts on the line takes it. `@param ...` or `@vararg` documents `...`, and `self`
+and parameters that start with `ignore_unused_prefix` need no `@param`. A call or `...` at the end
+of a `return` counts as one value, and a last `@return` of `...T`, or named `...`, covers every
+later value. A `---@type fun(...)` in the doc comment documents the parameters and values it lists.
+
+A parameter that the function type its function is passed as names needs no `@param` either, such
+as `source` and `phoneNumber` of a handler passed to a wrapper documented with
+`---@param callback fun(source: number, phoneNumber: string, ...)`; the parameters that fall into
+its `...` still do. qbx-lint knows the function types of the global functions its resource
+documents and of the local functions and local tables of the file. qbx-lua-ls knows every declared
+type: those of stubs and other resources, class fields, and the `---@type` of a variable or field.
+
+Unlike lua-language-server, these rules count `---@type fun(...)`, the function type a function is
+passed as, `@vararg` and a `...T` `@return` as documentation, takes a comment above
+`Name = function()` as that function's comment, asks for a comment on a function whose only
+`return` gives no value, and marks the name of a function that needs a comment rather than the
+whole function.
 
 ## Events, exports, and locales
 

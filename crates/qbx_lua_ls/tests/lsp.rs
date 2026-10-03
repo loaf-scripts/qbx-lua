@@ -3242,6 +3242,57 @@ print(target, typed, name, box, call)
 }
 
 #[test]
+fn missing_doc_rules_report_when_turned_on_in_the_editor() {
+    let codes = ["missing-global-doc", "missing-local-export-doc", "incomplete-signature-doc"];
+    let rules: serde_json::Map<String, Value> = codes.iter().map(|code| (code.to_string(), json!("warning"))).collect();
+    let mut client =
+        Client::start_with_options(fixture_root(), json!({}), json!({ "diagnostics": { "rules": rules } }));
+    let text = "\
+---@param id integer
+function GetName(id) return tostring(id) end
+
+local function format(text) return text end
+exports('Format', format)
+";
+    client.open_with(CLIENT, text);
+    let finding = |code: &str, line: u64, message: &str| (code.to_string(), line, message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &codes),
+        [
+            finding("incomplete-signature-doc", 1, "incomplete signature: return value #1 has no @return annotation"),
+            finding("missing-global-doc", 1, "return value #1 of global function 'GetName' has no @return annotation"),
+            finding(
+                "missing-local-export-doc",
+                3,
+                "parameter 'text' of exported local function 'format' has no @param annotation"
+            ),
+            finding(
+                "missing-local-export-doc",
+                3,
+                "return value #1 of exported local function 'format' has no @return annotation"
+            ),
+        ]
+    );
+
+    // A parameter that the function type a function is passed as names needs no `@param`, also
+    // where only the types the server reads say what that function type is.
+    let text = "\
+---@class Probe.Bus
+---@field on fun(self: Probe.Bus, name: string, callback: fun(player: table, ...))
+
+---@type Probe.Bus
+local bus = GetBus()
+---@param reason string
+bus:on('dropped', function(player, reason, extra) end)
+";
+    client.change(CLIENT, 2, text);
+    assert_eq!(
+        findings(&mut client, CLIENT, &codes),
+        [finding("incomplete-signature-doc", 6, "incomplete signature: parameter 'extra' has no @param annotation")]
+    );
+}
+
+#[test]
 fn casts_change_the_type_of_a_local_from_their_line_on() {
     let mut client = Client::start(fixture_root());
     let text = "\
