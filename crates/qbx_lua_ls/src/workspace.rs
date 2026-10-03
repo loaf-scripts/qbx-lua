@@ -375,10 +375,11 @@ impl Workspace {
     }
 
     /// Indexes a document open in the editor. Its symbols are inferred with what the index held for
-    /// the file, so when it declares other classes or aliases now, as one indexed for the first time
-    /// does, a second pass reads them, as the scan's second pass does for every file, and the
-    /// methods of `---@class Name` `Name = {}` see the class. What it now declares differently is
-    /// added to `changes`.
+    /// the file, so when it is indexed for the first time, or declares other classes or aliases now,
+    /// and it read what it declares differently, a second pass reads that, as the scan's second
+    /// pass does for every file: the methods of `---@class Name` `Name = {}` see the class, and
+    /// `function Shop.count() return Shop.items.apple end` the items. What it now declares
+    /// differently is added to `changes`.
     pub fn index_document(
         &mut self,
         path: &Path,
@@ -388,11 +389,14 @@ impl Workspace {
         changes: &mut Changes,
     ) -> FileId {
         let id = self.index.allocate(path);
+        let first = self.index.file(id).is_none();
         let declared = |ws: &Self| ws.index.file(id).map(|file| declared_types(&file.index)).unwrap_or_default();
         let before = declared(self);
         let (_, replaced) = self.index_entry(path, FileOrigin::Workspace, source, chunk, resolution);
-        record(changes, id, self.changed(id, replaced.as_ref()));
-        if declared(self) != before {
+        let changed = self.changed(id, replaced.as_ref());
+        let again = (first || declared(self) != before) && self.index.read_any(id, &changed);
+        record(changes, id, changed);
+        if again {
             let (_, replaced) = self.index_entry(path, FileOrigin::Workspace, source, chunk, resolution);
             record(changes, id, self.changed(id, replaced.as_ref()));
         }

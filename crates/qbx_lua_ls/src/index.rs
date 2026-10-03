@@ -771,6 +771,11 @@ impl Index {
         changed_groups(out, module(before), module(after), |a, b| a == b && a.same_origins(b));
     }
 
+    /// Whether indexing the file `id` read any of `reads`.
+    pub fn read_any(&self, id: FileId, reads: &FxHashSet<Read>) -> bool {
+        self.file(id).is_some_and(|file| file.index.reads.iter().any(|read| reads.contains(read)))
+    }
+
     /// The files that read what a file in `changed` declares differently and see that file, the file
     /// itself included, unless they are in `indexed`: indexed again, in order, since that file was.
     pub fn readers_of(&self, changed: &Changes, indexed: &FxHashSet<FileId>) -> FxHashSet<FileId> {

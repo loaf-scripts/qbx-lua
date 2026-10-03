@@ -610,3 +610,48 @@ fn closed_files_follow_the_classes_members_exports_and_modules_they_read() {
     client.notify("textDocument/didSave", json!({"textDocument": {"uri": players}}));
     assert_eq!(hover(&mut client, &query, text, "Boss"), "(global) Boss: string");
 }
+
+#[test]
+fn new_files_read_what_they_declare_themselves_from_the_start() {
+    let fixture = Fixture::new();
+    fixture.write("demo/fxmanifest.lua", "shared_script '*.lua'\n");
+    fixture.write("demo/query.lua", "");
+    let mut client = Client::start(&fixture.0);
+    // A document that is not on disk yet, typed from the globals it declares without annotations.
+    let fresh = path_to_uri(&fixture.0.join("demo/fresh.lua"));
+    let text = "\
+Shop = {}
+Shop.items = { apple = 1 }
+
+function Shop.count()
+    return Shop.items.apple
+end
+
+Animal = {}
+Animal.__index = Animal
+
+function Animal.new()
+    return setmetatable({}, Animal)
+end
+
+function Animal:speak()
+    return 'hi'
+end
+
+local count = Shop.count()
+local said = Animal.new():speak()
+print(count, said)
+";
+    client.open(&fresh, text);
+    assert_eq!(hover(&mut client, &fresh, text, "count ="), "local count: integer");
+    assert_eq!(hover(&mut client, &fresh, text, "said ="), "local said: string");
+
+    // A file created on disk, which the files that read it follow.
+    fixture.write("demo/created.lua", "Stock = { pears = 2 }\n\nfunction GetPears()\n    return Stock.pears\nend\n");
+    let created = path_to_uri(&fixture.0.join("demo/created.lua"));
+    client.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": created, "type": 1}]}));
+    let query = path_to_uri(&fixture.0.join("demo/query.lua"));
+    let text = "local pears = GetPears()\nprint(pears)\n";
+    client.open(&query, text);
+    assert_eq!(hover(&mut client, &query, text, "pears ="), "local pears: integer");
+}
