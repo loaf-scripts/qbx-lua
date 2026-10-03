@@ -2004,8 +2004,9 @@ print(state, copy, level, label, changed, mode)
         ("copy = state", "local copy: \"active\"|\"busy\"|\"ready\""),
         ("level, label", "local level: 1|2"),
         ("label = GetLevel", "local label: \"low\"|\"high\""),
-        // One that is assigned again may hold other values of that kind.
-        ("changed = GetState", "local changed: string"),
+        // One that is assigned again holds them until then, and what is assigned later after that.
+        ("changed = GetState", "local changed: \"active\"|\"busy\"|\"ready\""),
+        ("changed, mode)", "local changed: string"),
         ("mode = 'dev'", "local mode: string"),
     ] {
         let (l, c) = pos(text, needle, 0);
@@ -2095,13 +2096,216 @@ local copy = name
         // A `goto` that skipped the guard reaches the code after its label.
         ("item) -- item skipped", "item: string?\n"),
         ("again) -- asserted", "again: string\n"),
-        // Something assigns to it after its declaration, so a guard says nothing about it.
-        ("changed) -- reassigned", "changed: string?\n"),
+        // A guard narrows what the assignments before it give a local that is assigned again.
+        ("changed) -- reassigned", "changed: string\n"),
     ] {
         let (l, c) = pos(text, needle, 0);
         let hover = client.hover_text(CLIENT, l, c);
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
+}
+
+#[test]
+fn locals_that_are_assigned_again_hold_what_reaches_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return string?
+local function maybe() end
+---@param cb fun(value: string)
+local function each(cb) end
+local cond = math.random() > 0.5
+
+local filled = maybe()
+filled = filled or 'default'
+print(filled) -- filled
+local branch = maybe()
+if not branch then
+    branch = 'x'
+end
+print(branch) -- joined
+local cleared = 'x'
+if cond then
+    cleared = nil
+end
+print(cleared) -- one branch
+local later
+print(later) -- not yet
+later = 5
+print(later) -- assigned
+---@type string?
+local typed = nil
+typed = 'x'
+print(typed) -- bounded
+---@type integer
+local wrong = 1
+wrong = 'x'
+print(wrong) -- mismatch
+local looped = 'start'
+while cond do
+    print(looped) -- loop start
+    looped = nil
+end
+print(looped) -- after loop
+local counted = maybe()
+for _ = 1, 3 do
+    counted = counted or 'y'
+end
+print(counted) -- after for
+local repeated = maybe()
+repeat
+    repeated = 'z'
+until cond
+print(repeated) -- after repeat
+local endless = maybe()
+while true do
+    if endless then
+        break
+    end
+    endless = maybe()
+end
+print(endless) -- after break
+local captured = maybe()
+captured = captured or 'x'
+local function read()
+    print(captured) -- closure
+end
+captured = nil
+local function clear()
+    print(captured) -- closure after
+end
+local found
+each(function(value)
+    found = value
+end)
+print(found) -- callback
+local jumped = maybe()
+for _ = 1, 2 do
+    if not jumped then
+        goto continue
+    end
+    print(jumped) -- before label
+    ::continue::
+    print(jumped) -- after label
+    jumped = 'w'
+end
+local flag = true
+for _, a in ipairs({ 1 }) do
+    for _, b in ipairs({ a }) do
+        if b then
+            flag = false
+            break
+        end
+        print(flag) -- inner loop
+    end
+    if flag == false then
+        break
+    end
+end
+local ready = false
+local function waitReady()
+    if not ready then
+        each(function()
+            print(ready) -- given later
+        end)
+    end
+end
+local function setReady()
+    ready = true
+end
+print(read, clear, waitReady, setReady)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("filled) -- filled", "filled: string\n"),
+        ("branch) -- joined", "branch: string\n"),
+        ("cleared) -- one branch", "cleared: string?\n"),
+        ("later) -- not yet", "later: nil\n"),
+        ("later) -- assigned", "later: integer\n"),
+        // An annotation keeps the parts the value may be...
+        ("typed) -- bounded", "typed: string\n"),
+        // ...and all of it when the value fits none of them, which `assign-type-mismatch` reports.
+        ("wrong) -- mismatch", "wrong: integer\n"),
+        // A loop starts with what the runs before it leave.
+        ("looped) -- loop start", "looped: string?\n"),
+        ("looped) -- after loop", "looped: string?\n"),
+        ("counted) -- after for", "counted: string?\n"),
+        ("repeated) -- after repeat", "repeated: string\n"),
+        ("endless) -- after break", "endless: string\n"),
+        // A function runs any time after it is created, also after the assignments that follow it.
+        ("captured) -- closure\n", "captured: string?\n"),
+        ("captured) -- closure after", "captured: nil\n"),
+        // The function a call is given may have run once the call returns, and `local found` makes
+        // way for the values assigned later.
+        ("found) -- callback", "found: string\n"),
+        ("jumped) -- before label", "jumped: string\n"),
+        ("jumped) -- after label", "jumped: string?\n"),
+        ("flag) -- inner loop", "flag: boolean\n"),
+        // What a guard told about a value holds no more once something may give it again.
+        ("ready) -- given later", "ready: boolean\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    // An assignment shows the value it gives.
+    let (l, c) = pos(text, "later = 5", 0);
+    assert!(client.hover_text(CLIENT, l, c).contains("later: integer\n"));
+}
+
+#[test]
+fn locals_that_are_assigned_again_are_checked_with_what_reaches_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return 'active'|'busy'
+local function getState() end
+local function untyped(value) return value end
+---@param count integer
+local function wants(count) end
+
+local state = getState()
+if state == 'other' then end
+state = getState()
+if state == 'idle' then end
+state = tostring(state)
+if state == 'other' then end
+local loose = getState()
+loose = untyped(loose)
+if loose == 'other' then end
+local name = 'x'
+name = name .. 'y'
+wants(name)
+local mixed = 1
+if untyped(true) then
+    mixed = untyped(mixed)
+end
+wants(mixed)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, code: &str, message: &str| {
+        (code.to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["impossible-comparison", "param-type-mismatch"]),
+        [
+            finding(
+                "state == 'other' then end\nstate = getState",
+                "impossible-comparison",
+                "Comparing `\"active\"|\"busy\"` with `\"other\"` is always false",
+            ),
+            finding(
+                "state == 'idle'",
+                "impossible-comparison",
+                "Comparing `\"active\"|\"busy\"` with `\"idle\"` is always false",
+            ),
+            finding(
+                "wants(name)",
+                "param-type-mismatch",
+                "Cannot assign `string` to parameter `count` of type `integer`",
+            ),
+        ],
+        "a local that is assigned again has the declared types of the values that reach it, and none when \
+         one of them has none"
+    );
 }
 
 #[test]
@@ -2275,9 +2479,9 @@ print(firstname, lastname) -- after
         ("label -- no label", "label: nil\n"),
         ("id, label) -- typed", "id: integer\n"),
         ("label) -- typed", "label: string\n"),
-        // A local that is assigned again keeps its own type and tells nothing about the others.
+        // A local that is assigned again holds what it is given, and tells nothing about the others.
         ("first, last) -- reassigned", "first: string\n"),
-        ("last) -- reassigned", "last: string?\n"),
+        ("last) -- reassigned", "last: string\n"),
     ] {
         let (l, c) = pos(text, needle, 0);
         let hover = client.hover_text(CLIENT, l, c);
@@ -2533,9 +2737,9 @@ print(loose) -- removed from unknown
         ("scoped) -- in block", "scoped: integer\n"),
         // A cast ends with its block...
         ("scoped) -- after block", "scoped: string|integer|nil\n"),
-        // ...and once the local is assigned again.
+        // ...and once the local is assigned again, which gives it the type of its new value.
         ("changed:upper()", "changed: string\n"),
-        ("changed) -- reassigned", "changed: string|integer|nil\n"),
+        ("changed) -- reassigned", "changed: string\n"),
         ("guarded) -- cast over guard", "guarded: integer\n"),
         ("guarded) -- guard over cast", "guarded: string\n"),
         // On the last line of an `if` branch, a cast types what the branch leaves for the code
@@ -2549,9 +2753,9 @@ print(loose) -- removed from unknown
         // A line with no type keeps the guards before it.
         ("typing) -- no type yet", "typing: string|integer\n"),
         ("typing) -- no name", "typing: string|integer\n"),
-        // A guard on a local that is assigned again narrows the type a cast before it gives, up to
-        // the next assignment.
-        ("plain) -- reassigned guard", "plain: string|integer|nil\n"),
+        // A guard on a local that is assigned again narrows what it is given, and the type a cast
+        // before the guard gives, up to the next assignment.
+        ("plain) -- reassigned guard", "plain: string|integer\n"),
         ("data) -- guard after cast", "data: string\n"),
         ("data) -- assigned after guard", "data: string|integer|nil\n"),
         ("value) -- closure", "value: string\n"),
@@ -2657,6 +2861,29 @@ fn many_casts_and_writes_of_one_local_stay_fast() {
     let elapsed = started.elapsed();
     assert!(hover.contains("x: integer\n"), "{hover}");
     assert!(elapsed < Duration::from_secs(5), "hover took {elapsed:?}");
+}
+
+#[test]
+fn locals_assigned_many_times_in_loops_stay_fast() {
+    let mut client = Client::start(fixture_root());
+    // Each assignment reads what the others give, and each loop is walked again until what its
+    // locals hold settles, which loops inside it must not multiply.
+    let mut text = "local j, k = 1, 1\nwhile math.random() > 0.5 do\n".to_string();
+    text.push_str(&"    if math.random() > 0.5 then j = j + 3 end\n".repeat(100));
+    text.push_str("end\n");
+    text.push_str(&"for _ = 1, 2 do\n    k = k + 1\n".repeat(12));
+    text.push_str(&"end\n".repeat(12));
+    text.push_str("print(j, k) -- last\n");
+    client.open_with(CLIENT, &text);
+    let started = Instant::now();
+    findings(&mut client, CLIENT, &["param-type-mismatch"]);
+    for (needle, expected) in [("j, k) -- last", "j: integer\n"), ("k) -- last", "k: integer\n")] {
+        let (line, character) = pos(&text, needle, 0);
+        let hover = client.hover_text(CLIENT, line, character);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
 }
 
 #[test]
@@ -4736,6 +4963,9 @@ plain = 'text'
             // The statement whose `---@type` declares a name may give it `nil`, as in LuaLS.
             finding("then handle = nil", "Cannot assign `nil` to `handle` of type `number`"),
             finding("local letter", "Cannot assign `\"c\"` to `letter` of type `\"a\"|\"b\"`"),
+            // A local that is assigned again has the type of what may reach it: what `state = nil`
+            // gives is still a `Test.State`, as that is reported.
+            finding("letter = state", "Cannot assign `Test.State` to `letter` of type `\"a\"|\"b\"`"),
             // The `@field` decides what a class field takes, and reports it once.
             finding("holder.name = true", "Cannot assign `boolean` to field `name` of type `string`"),
             finding("holder.label = 5", "Cannot assign `integer` to `holder.label` of type `string`"),
@@ -4746,8 +4976,8 @@ plain = 'text'
             finding("name, count, extra = 1", "Cannot assign `string` to `count` of type `integer?`"),
             finding("id = tostring(id)", "Cannot assign `string` to `id` of type `number`"),
         ],
-        "values the type takes, a guarded local, a local without a value, a reassigned local as the value, \
-         the table a `---@class` declares, optional and undocumented parameters and untyped locals pass"
+        "values the type takes, a guarded local, a local without a value, the table a `---@class` declares, \
+         optional and undocumented parameters and untyped locals pass"
     );
     let (line, column) = pos(text, "second = pair()", 0);
     let hover = client.hover_text(CLIENT, line, column);
@@ -4904,6 +5134,30 @@ use(back, returned, built)
         "a class needs one the declared type names or extends, as in lua-language-server: a subclass passes, a \
          parent does not, type arguments are not compared, `table` takes any class, and so does a local declared \
          with a table constructor"
+    );
+}
+
+#[test]
+fn casts_of_locals_assigned_again_compare_the_values_that_reach_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local count = 5
+count = 6
+---@cast count string
+local label = 5
+label = 'five'
+---@cast label string
+local unknown = 5
+unknown = UnknownValue
+---@cast unknown string
+print(count, label, unknown)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        findings(&mut client, CLIENT, &["cast-type-mismatch"]),
+        [("cast-type-mismatch".to_string(), line("cast count"), "Cannot convert `integer` to `string`".to_string())],
+        "a local that nothing annotates holds the values that reach the cast, and one of unknown type takes any"
     );
 }
 

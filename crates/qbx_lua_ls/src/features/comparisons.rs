@@ -17,12 +17,12 @@ use qbx_lua_analysis::scope::{Local, LocalId, Resolved};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::class_tables::{Classes, Key};
 use super::unknown_types::has_param_line;
-use crate::infer::{Decl, Expected, Infer};
-use crate::luacats::CastEntry;
+use crate::infer::{assigned_value, Decl, Expected, Infer};
+use crate::narrow::Origin;
 use crate::types::Type;
 
 const MAX_DEPTH: u32 = 16;
@@ -50,6 +50,10 @@ pub struct Declared<'a, 'b> {
     cast_starts: OnceCell<FxHashMap<u32, u32>>,
     /// The types the locals read so far are declared with.
     declarations: RefCell<FxHashMap<LocalId, Type>>,
+    /// The declared types of the values that the declarations and assignments of locals that are
+    /// assigned again give them, by the local and the origin of the value.
+    origins: RefCell<FxHashMap<(LocalId, u32), Type>>,
+    in_progress: RefCell<FxHashSet<(LocalId, u32)>>,
 }
 
 impl<'a, 'b> Declared<'a, 'b> {
@@ -60,6 +64,8 @@ impl<'a, 'b> Declared<'a, 'b> {
             keeps_annotations: false,
             cast_starts: OnceCell::new(),
             declarations: RefCell::default(),
+            origins: RefCell::default(),
+            in_progress: RefCell::default(),
         }
     }
 
@@ -138,26 +144,97 @@ impl<'a, 'b> Declared<'a, 'b> {
         (starts.get(&expr.span.end) == Some(&expr.span.start)).then_some(cast)
     }
 
-    /// The type of a local where it is read at `offset`. One that is assigned again after its
-    /// declaration is `unknown`, since its declared type may not be what it holds, unless a
-    /// `---@cast` line types it. A `+T` entry adds to a type, so one that is not known stays so.
+    /// The type of a local where it is read at `offset`: the declared types of the values that may
+    /// reach the read, as the guards and casts around the read narrow them. A value whose type is not
+    /// declared leaves the local `unknown`, unless a `---@cast` line types it. A `+T` entry adds to a
+    /// type, so one that is not known stays so.
     fn local(&self, id: LocalId, offset: u32, depth: u32) -> Type {
-        let ty = match depth {
-            0 => self.declaration(id),
-            _ => self.local_declaration(id, depth),
-        };
-        let typed = || {
-            let mut casts = self.infer.ctx.casts().at(id, offset);
-            casts.any(|cast| cast.entries.iter().any(|(entry, _)| matches!(entry, CastEntry::Replace(_))))
-        };
-        if ty.is_unknown() && !typed() {
-            return ty;
+        self.infer.narrowed_with(id, offset, &|origin| self.origin(id, origin, depth), true)
+    }
+
+    /// The declared type of the local `id` where it is read at `offset`, as `of` gives it for a read
+    /// there.
+    pub fn at(&self, id: LocalId, offset: u32) -> Type {
+        self.local(id, offset, 0)
+    }
+
+    /// Whether the guards where the local `id` is read at `offset` rule out `value` for each of the
+    /// values that may reach the read and be it.
+    pub fn rules_out(&self, id: LocalId, offset: u32, value: &Type) -> bool {
+        self.infer.rules_out_with(id, offset, value, &|origin| self.origin(id, origin, 0))
+    }
+
+    /// The declared type of the value that `origin` gives the local `id`, or `None` while it is
+    /// being found. An assignment gives the declared type of the value, bounded by the annotation
+    /// of the local, or the `---@type` above it.
+    fn origin(&self, id: LocalId, origin: u32, depth: u32) -> Option<Type> {
+        let local = self.infer.ctx.resolution.local(id);
+        if !local.refs.iter().any(|r| r.write) {
+            return Some(match depth {
+                0 => self.declaration(id),
+                _ => self.local_declaration(id, depth),
+            });
         }
-        self.infer.narrowed(id, offset, ty)
+        let key = (id, origin);
+        if let Some(ty) = self.origins.borrow().get(&key) {
+            return Some(ty.clone());
+        }
+        // The values given before it first, and none given after it that are not known yet, as for
+        // `Infer::origin_type`.
+        if self.in_progress.borrow().iter().any(|(local, other)| *local == id && *other <= origin) {
+            return None;
+        }
+        self.in_progress.borrow_mut().insert(key);
+        for earlier in self.infer.ctx.flow().chained(id).iter().take_while(|earlier| **earlier < origin) {
+            self.origin(id, *earlier, depth);
+        }
+        let ty = match self.infer.ctx.flow().origin(origin) {
+            Origin::Declaration => self.declared_value(id, depth),
+            Origin::Assignment { stmt, index } => self.assigned(id, origin, stmt, index, depth),
+            Origin::Compound { stmt } => match &stmt.kind {
+                StmtKind::CompoundAssign { op: BinOp::Concat, .. } => Type::String,
+                _ => Type::Unknown,
+            },
+            Origin::Function { .. } => self.infer.origin_type(id, origin).unwrap_or_default(),
+        };
+        self.in_progress.borrow_mut().remove(&key);
+        self.origins.borrow_mut().insert(key, ty.clone());
+        Some(ty)
+    }
+
+    /// The declared type of value `index` of the assignment `stmt` to the local `id`, which gives it
+    /// the value of `origin`.
+    fn assigned(&self, id: LocalId, origin: u32, stmt: &Stmt, index: usize, depth: u32) -> Type {
+        let StmtKind::Assign { exprs, .. } = &stmt.kind else { return Type::Unknown };
+        let doc = self.infer.ctx.doc_at(stmt.span.start);
+        if let Some(ty) = doc.type_at(index).filter(|_| doc.declared_class().is_none()) {
+            return ty.clone();
+        }
+        let single = |expr: &Expr| self.declared(expr, depth + 1);
+        // `name = tonumber(name) --[[@as number]]` casts the first value of the call.
+        let multi = |call: &Expr| {
+            let mut values = self.returned(call).unwrap_or_default();
+            if let Some(cast) = self.cast(call) {
+                match values.first_mut() {
+                    Some(first) => *first = cast,
+                    None => values.push(cast),
+                }
+            }
+            values
+        };
+        let value = assigned_value(exprs, index, single, multi);
+        match self.infer.annotation(id) {
+            // A value with no declared type, as `name or 'none'`, still tells which parts of the
+            // annotation it may be.
+            Some(_) if value.is_unknown() => self.infer.origin_type(id, origin).unwrap_or_default(),
+            Some(declared) => self.infer.bounded(&declared, &value),
+            None => value,
+        }
     }
 
     /// The type a local is declared with, without what the guards and casts after its declaration
-    /// tell.
+    /// tell. One that is assigned again after its declaration is `unknown`, since its declared type
+    /// may not be what it holds.
     pub fn declaration(&self, id: LocalId) -> Type {
         if let Some(ty) = self.declarations.borrow().get(&id) {
             return ty.clone();
@@ -172,6 +249,12 @@ impl<'a, 'b> Declared<'a, 'b> {
         if local.refs.iter().any(|r| r.write) && !(self.keeps_annotations && self.is_annotated(local)) {
             return Type::Unknown;
         }
+        self.declared_value(id, depth)
+    }
+
+    /// The type that the declaration of the local `id` gives it, whatever is assigned to it later.
+    fn declared_value(&self, id: LocalId, depth: u32) -> Type {
+        let local = self.infer.ctx.resolution.local(id);
         match self.infer.ctx.decl(local.decl.start) {
             Some(Decl::Local { stmt, index }) => self.local_value(id, stmt, *index, depth),
             Some(Decl::Param { .. }) if has_param_line(self.infer, local) => self.infer.local_type(id),
@@ -240,6 +323,23 @@ impl<'a, 'b> Declared<'a, 'b> {
                 first.ty.clone()
             }
             _ => Type::Unknown,
+        }
+    }
+
+    /// The type that an assignment to `target` has to store: what its local is declared with,
+    /// whatever it holds before, or the declared type of the field it sets, which no guard narrows.
+    pub fn target(&self, target: &Expr) -> Type {
+        match &target.kind {
+            ExprKind::Name(name) => match self.infer.ctx.resolution.resolve_at(name.span.start) {
+                Some(Resolved::Local(id)) => self.declaration(id),
+                _ => self.of(target),
+            },
+            ExprKind::Field { base, name, .. } => self.field(base, &name.text, 0),
+            ExprKind::Index { base, index, .. } => match index.as_string() {
+                Some(name) => self.field(base, name, 0),
+                None => Type::Unknown,
+            },
+            _ => self.of(target),
         }
     }
 

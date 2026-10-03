@@ -209,7 +209,7 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
                         Some(ty) => Some(ExpectedValue::stored(ty.clone(), doc.type_values_at(index).to_vec())),
                         None => targets
                             .get(index)
-                            .map(|target| ExpectedValue::stored(self.declared.of(target), self.described(target))),
+                            .map(|target| ExpectedValue::stored(self.declared.target(target), self.described(target))),
                     };
                 }
             }

@@ -1,8 +1,10 @@
 //! `cast-type-mismatch`: a `---@cast name T` that gives a local a type its declared type does not
-//! take, such as `string` for an `integer`. As for `assign-type-mismatch`, each type that `T` lists
-//! has to be of a kind the declared type allows, and a literal has to be one it lists. A class also
-//! has to be one that the declared type names or extends, as lua-language-server checks it. Only
-//! plain casts are checked, since `+T` and `-T` add to the type and take from it.
+//! take, such as `string` for an `integer`. A local that nothing annotates and that is assigned
+//! again has the declared types of the values that reach the cast. As for `assign-type-mismatch`,
+//! each type that `T` lists has to be of a kind the declared type allows, and a literal has to be
+//! one it lists. A class also has to be one that the declared type names or extends, as
+//! lua-language-server checks it. Only plain casts are checked, since `+T` and `-T` add to the type
+//! and take from it.
 
 use qbx_lua_analysis::scope::LocalId;
 use qbx_lua_syntax::ast::{ExprKind, StmtKind};
@@ -26,7 +28,12 @@ pub fn mismatched_casts(infer: &Infer) -> Vec<(Span, String)> {
     let mut out = Vec::new();
     for cast in casts.iter() {
         let Some(local) = cast.local else { continue };
-        let expected = declared.declaration(local);
+        // A local that nothing annotates and that is assigned again holds the declared types of the
+        // values that reach the cast.
+        let expected = match declared.declaration(local) {
+            Type::Unknown => declared.at(local, cast.span.start),
+            declared => declared,
+        };
         // `local data = nil` makes room for a value that the cast tells the type of.
         if expected.is_unknown() || expected == Type::Nil {
             continue;

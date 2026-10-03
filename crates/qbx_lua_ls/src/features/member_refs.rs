@@ -218,7 +218,7 @@ impl<'ast> Visitor<'ast> for Finder<'_, '_> {
             }
             StmtKind::Assign { targets, exprs } => {
                 for (target, expr) in targets.iter().zip(exprs) {
-                    self.table(&self.infer.expr(target), expr);
+                    self.table(&self.infer.target_type(target), expr);
                 }
             }
             _ => {}

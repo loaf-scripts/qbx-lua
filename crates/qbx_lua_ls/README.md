@@ -61,7 +61,9 @@ Available features depend on the editor's LSP client.
   or `state == "busy"` narrow it to that kind or value. A guard on one value of
   `local ok, err = f()` also narrows the others, for functions that return
   [sets of values](#sets-of-returned-values) such as `false | (string, string)`, and a
-  [`---@cast`](#casts) changes the type of a local from its line on.
+  [`---@cast`](#casts) changes the type of a local from its line on. A local that is
+  [assigned again](#locals-that-are-assigned-again) holds the values that reach each point, so
+  `name = name or 'none'` leaves a `string`.
 - Diagnostics and quick fixes with resource and client/server context, plus LuaCATS type checks:
   `missing-fields` and `assign-type-mismatch` for tables and assignments that leave out required
   fields of their class or store a value of the wrong type, in a field or in a variable typed with
@@ -147,9 +149,8 @@ true when `name` holds a value, and so are `name?.job == "police"` and `name?.jo
 They apply to the branches of an `if` or `elseif`, failed ones to the conditions of the `elseif`s
 after them, to the code after an `if` whose other branches all end in `return`, `error(...)`,
 `break` or `goto`, to the body of a `while`, to the right side of `and` and `or`, and to the code
-after `assert(name)`. A local that is assigned again after its declaration is only narrowed by the
-guards after a [`---@cast`](#casts) of it, since a guard says nothing about the new value, and
-globals and fields are not narrowed.
+after `assert(name)`. A guard narrows what a local holds there, also one that is
+[assigned again](#locals-that-are-assigned-again), while globals and fields are not narrowed.
 
 A comparison with a literal narrows the local to that literal: inside `if state == "busy" then`, a
 `"active"|"busy"|nil` and a `string` are both `"busy"`, and in the `else` branch the first is
@@ -174,6 +175,39 @@ from a `float`, and `kind == "table"` after `local kind = type(name)` narrows li
 after `local type = type`, and not `table.type` of ox_lib. Where one of
 several checks held, as inside `if type(value) == "string" or type(value) == "number" then`, the
 local is of the kinds they let through.
+
+### Locals that are assigned again
+
+A local that is assigned again holds, at each point, the values that may reach it there: that of its
+declaration or of an assignment, each narrowed by the guards since, and those of the ways that meet
+after an `if`, a loop or a label. An assignment gives its value from the end of its statement:
+
+```lua
+local name = GetName() -- string?
+name = name or "none"
+print(name) -- string
+
+local label = GetName()
+if not label then
+    label = "none"
+end
+print(label) -- string
+```
+
+A literal is widened to its kind, as `mode = 'dev'` stores a `string`. A local declared without a
+value holds `nil` until it is given one, and then makes way for the values it may be given, as in
+lua-language-server: after `local found` and `if ok then found = item end`, `found` is the item. A
+local with a `---@type` or `@param` keeps the parts of that type the value may be, as the `string` of
+a `string?` for `"x"`, and all of it for a value of another kind, which `assign-type-mismatch`
+reports, or of no known type. Other locals keep the type of their declaration for such a value. A
+loop starts with what the code before it and its runs before leave, and a label with what the
+`goto`s to it leave.
+
+Calls are taken to change no local, but a function runs any time after it is created. Inside it, a
+local declared outside it may hold what it held where the function was created, and also what the
+code after that and the other functions assign, with nothing known about those values. Where a
+function that assigns a local is created, the code around it may find that value from then on, as
+after `each(list, function(item) found = item end)`.
 
 ### Casts
 

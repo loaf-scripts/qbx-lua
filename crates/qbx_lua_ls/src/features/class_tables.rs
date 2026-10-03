@@ -544,13 +544,15 @@ impl<'a, 'b> Classes<'a, 'b> {
     }
 
     /// The type of `expr` for checking the value it stores or returns. A local that is assigned
-    /// again after its declaration is `unknown`, since its declared type may not be what it holds.
+    /// again after its declaration has the types of the values that may reach it there, and is
+    /// `unknown` when one of them is.
     pub fn value_type(&self, expr: &Expr) -> Type {
         if let ExprKind::Name(name) = &expr.unparen().kind {
             let resolution = self.infer.ctx.resolution;
             if let Some(Resolved::Local(id)) = resolution.resolve_at(name.span.start) {
-                if resolution.local(id).refs.iter().any(|r| r.write) {
-                    return Type::Unknown;
+                let cast = self.infer.cast_after(expr.span.end);
+                if cast.is_none() && resolution.local(id).refs.iter().any(|r| r.write) {
+                    return self.infer.known_local_type_at(id, name.span.start);
                 }
             }
         }
@@ -994,12 +996,12 @@ impl<'c> Finder<'_, '_, 'c> {
     /// class the target holds, or else the table type it is declared with, as its own `---@type`
     /// or `@param` declares it. What the target was assigned before only tells what it held then.
     fn assigned_type(&self, target: &Expr) -> Type {
-        let ty = self.classes.infer.expr(target);
+        let ty = self.classes.infer.target_type(target);
         if self.classes.class_of(&ty, self.classes.file()).is_some() {
             return ty;
         }
         match &self.table_types {
-            Some((declared, _)) => declared.of(target),
+            Some((declared, _)) => declared.target(target),
             None => ty,
         }
     }

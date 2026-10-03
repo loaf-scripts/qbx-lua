@@ -33,6 +33,8 @@ use super::arguments::{candidates, expected, mismatch, param_for, signatures, ta
 use super::class_tables::Classes;
 use super::comparisons::Declared;
 use crate::infer::{Decl, Infer};
+use crate::luacats::CastEntry;
+use crate::narrow::Version;
 use crate::types::{FunType, Param, Type};
 
 /// What `need-check-nil` finds in a file, each with the message naming the type.
@@ -99,18 +101,33 @@ impl Finder<'_, '_> {
         if self.checked.iter().any(|(checked, span)| *checked == id && span.contains(at)) {
             return;
         }
+        let assigned = local.refs.iter().any(|r| r.write);
+        let typed = || {
+            self.infer
+                .ctx
+                .casts()
+                .at(id, at)
+                .any(|cast| cast.entries.iter().any(|(entry, _)| matches!(entry, CastEntry::Replace(_))))
+        };
+        if assigned && !typed() {
+            return;
+        }
         let ty = self.declared.of(operand.unparen());
-        let reaches = |value: &Type| !self.infer.rules_out(id, at, value);
+        let reaches = |value: &Type| !self.declared.rules_out(id, at, value);
         let missing = missing_value(&self.infer.expand_aliases(&ty, 0), reaches);
         let Some(missing) = missing.filter(|missing| param.is_none() || *missing == "nil") else { return };
         // `local vehicle, coords = lib.getClosestVehicle(...)` declares both as optional, and the
         // guard on `vehicle` is the check for `coords` as well.
-        let guards = ctx.guards();
-        let linked = guards.linked(id).unwrap_or_default();
-        if linked.iter().any(|(other, _)| *other != id && guards.at(*other, at).next().is_some()) {
+        let flow = ctx.flow();
+        let covered = |value: &Version| {
+            let linked = flow.linked(id, value.origin).unwrap_or_default();
+            linked
+                .iter()
+                .any(|(other, origin, _)| *other != id && flow.facts(*other, *origin, Span::empty(at)).next().is_some())
+        };
+        if flow.at(id, at).iter().all(covered) {
             return;
         }
-        let assigned = local.refs.iter().any(|r| r.write);
         if !assigned && self.is_lookup_of_source(id) {
             return;
         }

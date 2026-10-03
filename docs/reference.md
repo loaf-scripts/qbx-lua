@@ -349,8 +349,8 @@ it. The payload of a `---@callback` wrapper call is compared with the handlers r
 name.
 
 An argument has a type when something declares it, as for `impossible-comparison`: a literal, an
-operator, an annotation, a stub, or the value a local that is never assigned again is declared
-with. A literal stored in such a local counts by its kind only: `local mode = 'dev'` is a setting to
+operator, an annotation, a stub, or the values a local is declared with or assigned that reach the
+call. A literal stored in a local counts by its kind only: `local mode = 'dev'` is a setting to
 change, so it passes for `"fast" | "slow"`, while `local count = 5` is still no `string`. A
 `--[[@as T]]` right after an argument casts it. Only clear cases count, and the rest is left alone:
 
@@ -559,9 +559,10 @@ Each `return` then has to be one of the sets: `return false` and `return "Joe", 
 comes closest to. This notation is a qbx extension of LuaCATS, which qbx-lua-ls also uses to narrow
 the locals a call declares; see its [type guards](../crates/qbx_lua_ls/README.md#type-guards).
 
-Only clear cases count. Values whose type is not known are skipped, and so is a local that is
-assigned again after its declaration, since its declared type may not be what it holds. The same
-applies to the values `assign-type-mismatch` checks, where `nil` is a value like any other:
+Only clear cases count. Values whose type is not known are skipped, including a local that one of
+the values that may reach the `return` leaves without a known type; see
+[locals that are assigned again](../crates/qbx_lua_ls/README.md#locals-that-are-assigned-again). The
+same applies to the values `assign-type-mismatch` checks, where `nil` is a value like any other:
 `abc.field = nil` needs a field type that allows it, such as `string?` or `string|nil`.
 
 `discard-returns` reports a call on a line of its own whose function is marked `@nodiscard`, as
@@ -653,9 +654,11 @@ local count = 1
 
 The declared type is the `---@type` or `@param` of the local, or else that of the value it is
 declared with, as for `impossible-comparison`: a literal, or what a function declares it returns.
-A local whose type is only inferred, or that is assigned again and has no annotation, is not
-checked, and neither is one declared as `nil`, which the cast gives its type as in
-lua-language-server, nor the `+T` and `-T` entries, which change the type rather than replace it.
+A local that is assigned again and has no annotation has the declared types of the values that
+reach the cast, so `local count = 5`, `count = 6` and then `---@cast count string` is reported. A
+local whose type is only inferred is not checked, and neither is one declared as `nil`, which the
+cast gives its type as in lua-language-server, nor the `+T` and `-T` entries, which change the type
+rather than replace it.
 As in lua-language-server, a class has to be one that the declared type names or extends: a
 `Test.Animal` can be cast to its subclass `Test.Dog`, but a `Test.Dog` not to `Test.Animal`, and
 neither to an unrelated class. Type arguments are not compared, a declared type that is no class,
@@ -682,13 +685,15 @@ A side has a type when something declares it: a literal, an operator such as `no
 parameter of a function passed to a call has the type the callee declares for it, with the generics
 that the other arguments declare: `value` is a `Player` in
 `onValue('Player', function(value) end)` for `---@param cb fun(value: T)` and a `` `T` ``. A
-local that is never assigned again has the type of the value it is declared with, so
-`local state = GetState()` is checked like the call, and inside a
+local has the types of the values it is declared with or assigned that may reach the comparison,
+so `local state = GetState()` is checked like the call, and inside a
 [type guard](../crates/qbx_lua_ls/README.md#type-guards) the type the guard narrows it to: the right
 side of `class ~= 13 or class ~= 14` only runs when `class` is `13`, so it is always true. A
-literal stored in such a local counts by its kind only: `local mode = 'dev'` is a setting to
-change, so `mode == 'prod'` passes, while `mode == false` is still reported as a `string` compared
-with `false`.
+literal stored in a local counts by its kind only: `local mode = 'dev'` is a setting to change, so
+`mode == 'prod'` passes, while `mode == false` is still reported as a `string` compared with
+`false`. A value assigned to a local with a `---@type` or `@param` keeps the parts of that type it
+may be, as described for
+[locals that are assigned again](../crates/qbx_lua_ls/README.md#locals-that-are-assigned-again).
 
 Only clear cases count, and the rest is left alone:
 
@@ -697,9 +702,9 @@ Only clear cases count, and the rest is left alone:
   for what an undocumented function returns, and for the value of `a or b` and `a and b`.
 - Comparisons with `nil`. Annotations often leave out the `?` of a value that may be missing, and
   the check for it is deliberate.
-- A local that is assigned again after its declaration, since its declared type may not be what
-  it holds, unless a `---@cast name T` types it. `---@cast name +T` does not: it adds `T` to a
-  type that is still not known, as it does for a local with no declared type.
+- A local that one of the values that may reach the comparison leaves without a declared type, as
+  `name = untyped(name)` does, unless a `---@cast name T` types it. `---@cast name +T` does not: it
+  adds `T` to a type that is still not known, as it does for a local with no declared type.
 - Natives documented as `boolean` compared with a number. Scripts can get `1` instead of `true`
   from them, so `IsPedInAnyVehicle(ped) == 1` is valid.
 
