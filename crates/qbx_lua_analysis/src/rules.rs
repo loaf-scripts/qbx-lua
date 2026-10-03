@@ -163,7 +163,7 @@ pub static RULES: &[Rule] = &[
     rule(UNDEFINED_DOC_PARAM, Correctness, WARN, false, "A LuaCATS @param names no parameter of the function its doc comment documents, or no function follows the comment."),
     rule(DUPLICATE_DOC_ALIAS, Suspicious, WARN, false, "An @alias or @enum reuses the name of an alias, enum or class that the same file declares for the same side."),
     rule(DUPLICATE_DOC_FIELD, Suspicious, WARN, false, "A class declares the same field twice in one file for the same side; repeated function fields are overloads."),
-    rule(MISSING_FIELDS, Correctness, WARN, false, "A table constructor typed as a LuaCATS class leaves out required fields (language server only)."),
+    rule(MISSING_FIELDS, Correctness, WARN, false, "A table constructor typed as a LuaCATS class or shape, or a union of them, leaves out required fields (language server only)."),
     rule(ASSIGN_TYPE_MISMATCH, Correctness, WARN, false, "A table constructor or assignment stores a value of the wrong type in a field of a LuaCATS class, or in a variable typed with @type or @param (language server only)."),
     rule(PARAM_TYPE_MISMATCH, Correctness, WARN, false, "A call passes an argument of a different type than its parameter's LuaCATS annotation declares (language server only)."),
     rule(UNDECLARED_FIELD, Correctness, WARN, false, "A field or key that a strict LuaCATS class does not declare is set or read (language server only)."),

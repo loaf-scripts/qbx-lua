@@ -705,8 +705,17 @@ generic ones such as `Box<string>` for `---@alias Box<T> { value: T }` included,
 as an argument, as a returned value, and in the fields of another typed table, also for the class
 tables a shape holds. An assignment without a `---@type` checks a table against the type its
 target is declared with, not one inferred from what the target held before. As in
-lua-language-server, such a table may leave fields out and set fields its type does not name, and
-a union of table types is not checked.
+lua-language-server, such a table may set fields its type does not name, and the entries of a table
+typed as a union are not checked.
+
+`missing-fields` reports a table typed as a shape that leaves out a field the shape requires, one
+without `?` whose type does not allow `nil`, as TypeScript does and lua-language-server does not. A
+table typed as a union of classes and shapes needs the required fields of one of them, and the
+report has a line for each, as lua-language-server's does. Types that hold no table are left out,
+so a table for `Dog|string` needs the fields of `Dog`, and as in TypeScript, a union that also
+lists a type that takes any table, such as `table`, `any` or `string[]`, is not reported. A table
+in a field of such a table, like the `{}` of `{ pet = {} }`, needs the fields of one of the types
+that the classes and shapes declare for the field.
 
 ## Casts
 

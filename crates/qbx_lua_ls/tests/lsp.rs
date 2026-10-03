@@ -3792,6 +3792,137 @@ local declared = {}
     );
 }
 
+/// The `missing-fields` diagnostics of `text`, with the line of each.
+fn missing_field_messages(client: &mut Client, text: &str) -> Vec<(u64, String)> {
+    client.open_with(CLIENT, text);
+    client.diagnostics_for(CLIENT);
+    let uri = client.uri(CLIENT).to_string();
+    client.diagnostics[&uri]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == "missing-fields")
+        .map(|d| (d["range"]["start"]["line"].as_u64().unwrap(), d["message"].as_str().unwrap().into()))
+        .collect()
+}
+
+#[test]
+fn tables_typed_as_a_union_need_the_fields_of_one_of_its_types() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Animal
+---@field legs integer
+
+---@class Test.Dog : Test.Animal
+---@field bark boolean
+
+---@class Test.Cat : Test.Animal
+---@field meow boolean
+
+---@class Test.Owner
+---@field pet Test.Dog|Test.Cat
+
+---@alias Test.Pet Test.Dog|Test.Cat
+
+---@type Test.Dog|Test.Animal
+local empty = {}
+
+---@type Test.Dog|Test.Animal
+local animal = { legs = 4 }
+
+---@type Test.Pet
+local neither = { legs = 4 }
+
+---@type Test.Dog|string
+local dog = { legs = 4 }
+
+---@type Test.Dog|table
+local any = {}
+
+---@type Test.Dog|Test.Cat[]
+local list = {}
+
+---@type Test.Owner
+local owner = { pet = {} }
+
+---@return Test.Dog|Test.Cat
+local function adopt()
+    return { legs = 4, meow = true }
+end
+print(empty, animal, neither, dog, any, list, owner, adopt)
+";
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        missing_field_messages(&mut client, text),
+        [
+            (
+                line("local empty"),
+                "Missing required fields in type `Test.Dog`: `bark`, `legs`\n\
+                 Missing required fields in type `Test.Animal`: `legs`"
+                    .into()
+            ),
+            (
+                line("local neither"),
+                "Missing required fields in type `Test.Dog`: `bark`\n\
+                 Missing required fields in type `Test.Cat`: `meow`"
+                    .into()
+            ),
+            // Of `Test.Dog|string`, only the class can be a table.
+            (line("local dog"), "Missing required fields in type `Test.Dog`: `bark`".into()),
+            // The table for `pet` has to be one of the types the field declares.
+            (
+                line("local owner"),
+                "Missing required fields in type `Test.Dog`: `bark`, `legs`\n\
+                 Missing required fields in type `Test.Cat`: `meow`, `legs`"
+                    .into()
+            ),
+        ],
+        "a table with the fields of one type passes, and `table` or an array takes any table"
+    );
+}
+
+#[test]
+fn tables_typed_as_a_shape_need_its_fields() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Dog
+---@field bark boolean
+
+---@class Test.Kennel
+---@field size { width: integer, depth: integer, label?: string }
+
+---@type { name: string, tag: string? }
+local untagged = { name = 'Rex' }
+
+---@type { name: string }
+local unnamed = {}
+
+---@type Test.Kennel
+local kennel = { size = { width = 2 } }
+
+---@type Test.Dog|{ name: string }
+local named = { name = 'Rex' }
+
+---@param options { pet: Test.Dog }
+local function walk(options) end
+walk({ pet = {} })
+print(untagged, unnamed, kennel, named)
+";
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        missing_field_messages(&mut client, text),
+        [
+            (line("local unnamed"), "Missing required fields in type `{ name: string }`: `name`".into()),
+            (
+                line("local kennel"),
+                "Missing required fields in type `{ width: integer, depth: integer, label?: string }`: `depth`".into()
+            ),
+            // A class-typed field of a shape is checked as a field of a class is.
+            (line("walk({"), "Missing required fields in type `Test.Dog`: `bark`".into()),
+        ]
+    );
+}
+
 #[test]
 fn class_typed_tables_complete_the_fields_they_lack() {
     let mut client = Client::start(fixture_root());

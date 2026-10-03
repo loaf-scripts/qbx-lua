@@ -4,8 +4,9 @@
 //! values of a class, they drive `missing-fields`, `assign-type-mismatch`, `undeclared-field`,
 //! `inject-field` and the completion of field names. Table constructors typed as a table type, like a shape
 //! `{ value: string }`, `string[]` or `table<string, integer>`, are found in the same places for
-//! `assign-type-mismatch`. Only the language server knows the classes, so qbx-lint registers the
-//! rules and this module reports them.
+//! `assign-type-mismatch`, and those typed as a shape or a union of classes and shapes for
+//! `missing-fields`. Only the language server knows the classes, so qbx-lint registers the rules
+//! and this module reports them.
 //!
 //! Type names are global, and resources may declare the same one differently: ox_fuel's
 //! `@class State` is not qbx_vehicles' `@enum State`. A name is looked up the way the file that
@@ -24,7 +25,7 @@ use super::unknown_types::is_typed;
 use crate::index::{AliasDef, ClassDef, FileId, ResourceId};
 use crate::infer::{bound_parents, class_bindings, expanded_bindings, substitute, Infer};
 use crate::luacats::applies_on;
-use crate::types::{DescribedValue, Type};
+use crate::types::{DescribedValue, Shape, Type};
 
 const MAX_DEPTH: u32 = 8;
 
@@ -36,6 +37,32 @@ pub struct ClassTable<'c> {
     pub table: &'c Expr,
     /// The file whose view of the type names decided the class.
     pub from: FileId,
+}
+
+/// A table constructor and the classes and shapes of which it has to be one, for `missing-fields`.
+struct RequiredTable<'c> {
+    members: Vec<Member>,
+    table: &'c Expr,
+}
+
+/// A type with required fields that a table constructor may have to be.
+#[derive(PartialEq)]
+enum Member {
+    /// A class, with the type arguments it is given and the file whose view of the type names
+    /// decides it.
+    Class(SmolStr, Vec<Type>, FileId),
+    /// A shape like `{ name: string }`, with the file whose view of the type names it is read with.
+    Shape(Arc<Shape>, FileId),
+}
+
+impl Member {
+    /// How a message names the type: a class by its name, a shape written out.
+    fn name(&self) -> String {
+        match self {
+            Member::Class(class, ..) => class.to_string(),
+            Member::Shape(shape, _) => Type::Shape(shape.clone()).to_string(),
+        }
+    }
 }
 
 /// A `@field` of a class, or of one of its parents.
@@ -247,6 +274,61 @@ impl<'a, 'b> Classes<'a, 'b> {
             }
         }
         self.table_index_for(ty, from, &key.ty())
+    }
+
+    /// The classes and shapes of which a table constructor typed as one of `types`, each named as
+    /// its file sees it, has to be one, looking through `?`, unions and aliases and leaving out the
+    /// types that hold no table, like `string`. There are none when no class or shape is listed, or
+    /// when another type that holds tables is, like `table`, `any`, `string[]` or a generic, since a
+    /// table may be one of those without setting any field.
+    fn table_members(&self, types: &[(Type, FileId)]) -> Option<Vec<Member>> {
+        let mut members = Vec::new();
+        for (ty, from) in types {
+            let mut parts = Vec::new();
+            self.flatten(ty, *from, &mut parts, 0);
+            for part in parts {
+                let member = match (self.class_of(&part, *from), part) {
+                    (Some((class, args, view)), _) => Member::Class(class, args, view),
+                    (None, Type::Shape(shape)) => Member::Shape(shape, *from),
+                    (None, part) if self.kinds(&part, *from, 0).is_some_and(|kinds| kinds & kind::TABLE == 0) => {
+                        continue
+                    }
+                    (None, _) => return None,
+                };
+                if !members.contains(&member) {
+                    members.push(member);
+                }
+            }
+        }
+        (!members.is_empty()).then_some(members)
+    }
+
+    /// The type that `key` of a table of `member` holds, with the file whose view of the type names
+    /// it is read with, as `field_type` and `table_field_type` find it.
+    fn member_field_type(&self, member: &Member, key: &Key) -> Option<(Type, FileId)> {
+        match member {
+            Member::Class(class, args, from) => self.field_type(class, args, *from, key),
+            Member::Shape(shape, from) => self.table_field_type(&Type::Shape(shape.clone()), *from, key),
+        }
+    }
+
+    /// The fields of `member` that a table setting the names `given` leaves out although their
+    /// type does not allow `nil`.
+    fn missing(&self, member: &Member, given: &[&str]) -> Vec<SmolStr> {
+        let fields: Vec<(SmolStr, Type, FileId)> = match member {
+            Member::Class(class, args, from) => {
+                self.fields(class, args, *from).into_iter().map(|field| (field.name, field.ty, field.file)).collect()
+            }
+            Member::Shape(shape, from) => {
+                let required = shape.fields.iter().filter(|field| !field.optional);
+                required.map(|field| (field.name.clone(), field.ty.clone(), *from)).collect()
+            }
+        };
+        fields
+            .into_iter()
+            .filter(|(name, ty, file)| !self.admits_nil(ty, *file) && !given.contains(&name.as_str()))
+            .map(|(name, ..)| name)
+            .collect()
     }
 
     /// The `@field`s of `class`, given the type arguments `args`, and of its parents, with the fields
@@ -722,13 +804,7 @@ impl<'a, 'b> Classes<'a, 'b> {
 
 /// Every class-typed table constructor of `chunk`, outer tables before the ones they hold.
 pub fn class_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> Vec<ClassTable<'c>> {
-    let mut finder = Finder {
-        classes: Classes::new(infer),
-        function_returns: Vec::new(),
-        documented: FxHashMap::default(),
-        out: Vec::new(),
-        table_types: None,
-    };
+    let mut finder = Finder::new(infer);
     finder.visit_block(&chunk.block);
     finder.out
 }
@@ -746,15 +822,20 @@ pub struct TypedTable<'c> {
 /// The table constructors of `chunk` typed as a class, as `class_tables` finds them, together with
 /// those typed as a table type, and the class-typed ones that tables of such types hold.
 fn typed_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> (Vec<ClassTable<'c>>, Vec<TypedTable<'c>>) {
-    let mut finder = Finder {
-        classes: Classes::new(infer),
-        function_returns: Vec::new(),
-        documented: FxHashMap::default(),
-        out: Vec::new(),
-        table_types: Some((Declared::keeping_annotations(infer), Vec::new())),
-    };
+    let declared = Some(Declared::keeping_annotations(infer));
+    let mut finder = Finder { declared, table_types: Some(Vec::new()), ..Finder::new(infer) };
     finder.visit_block(&chunk.block);
-    (finder.out, finder.table_types.map(|(_, typed)| typed).unwrap_or_default())
+    (finder.out, finder.table_types.unwrap_or_default())
+}
+
+/// The table constructors of `chunk` that `missing-fields` checks: those typed as a class, a shape
+/// or a union of them, found where `class_tables` finds class tables, and those that such tables
+/// hold for fields of these types.
+fn required_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> Vec<RequiredTable<'c>> {
+    let declared = Some(Declared::keeping_annotations(infer));
+    let mut finder = Finder { declared, required: Some(Vec::new()), ..Finder::new(infer) };
+    finder.visit_block(&chunk.block);
+    finder.required.unwrap_or_default()
 }
 
 /// A field set or read outside a table constructor.
@@ -891,24 +972,27 @@ impl<'c> Visitor<'c> for Innermost {
     }
 }
 
-/// Each class-typed table constructor that leaves out required fields, with the message naming them.
-/// Fields that its class keeps from the code there, like `---@field private`, are required too, as
-/// in LuaLS.
+/// Each table constructor typed as a class or a shape that leaves out required fields, with the
+/// message naming them. Fields that a class keeps from the code there, like `---@field private`,
+/// are required too, as in LuaLS. A table typed as a union of classes and shapes has to set the
+/// required fields of one of them, and its message has a line for each, as LuaLS's does.
 pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
-    class_tables(infer, chunk)
+    required_tables(infer, chunk)
         .into_iter()
         .filter_map(|found| {
             let ExprKind::Table(fields) = &found.table.kind else { return None };
             let given: Vec<&str> = fields.iter().filter_map(named_field).map(|(name, _)| name).collect();
-            let missing: Vec<String> = classes
-                .fields(&found.class, &found.args, found.from)
-                .iter()
-                .filter(|field| !classes.admits_nil(&field.ty, field.file) && !given.contains(&field.name.as_str()))
-                .map(|field| format!("`{}`", field.name))
-                .collect();
-            let message = format!("Missing required fields in type `{}`: {}", found.class, missing.join(", "));
-            (!missing.is_empty()).then_some((found.table.span, message))
+            let mut lines = Vec::new();
+            for member in &found.members {
+                let missing: Vec<String> =
+                    classes.missing(member, &given).iter().map(|name| format!("`{name}`")).collect();
+                if missing.is_empty() {
+                    return None;
+                }
+                lines.push(format!("Missing required fields in type `{}`: {}", member.name(), missing.join(", ")));
+            }
+            Some((found.table.span, lines.join("\n")))
         })
         .collect()
 }
@@ -985,16 +1069,38 @@ struct Finder<'a, 'b, 'c> {
     /// parameter list.
     documented: FxHashMap<u32, Vec<Type>>,
     out: Vec<ClassTable<'c>>,
-    /// When tables typed as table types are looked for too, the reader of declared types that
-    /// assignments without a `---@type` are typed by, and the tables found.
-    table_types: Option<(Declared<'a, 'b>, Vec<TypedTable<'c>>)>,
+    /// When tables of other types than classes are looked for, the reader of declared types that
+    /// assignments without a `---@type` are typed by.
+    declared: Option<Declared<'a, 'b>>,
+    /// When tables typed as table types are looked for too, the tables found.
+    table_types: Option<Vec<TypedTable<'c>>>,
+    /// When the tables that `missing-fields` checks are looked for instead of class tables, the
+    /// tables found.
+    required: Option<Vec<RequiredTable<'c>>>,
 }
 
-impl<'c> Finder<'_, '_, 'c> {
+impl<'a, 'b, 'c> Finder<'a, 'b, 'c> {
+    /// A finder of class tables.
+    fn new(infer: &'a Infer<'b>) -> Self {
+        Self {
+            classes: Classes::new(infer),
+            function_returns: Vec::new(),
+            documented: FxHashMap::default(),
+            out: Vec::new(),
+            declared: None,
+            table_types: None,
+            required: None,
+        }
+    }
+
     /// Records `expr` when it is a table constructor and `expected`, named as `from` sees it, is a
     /// class, or a table type when those are looked for, then the constructors it holds for fields
-    /// of such types.
+    /// of such types. The tables that `missing-fields` checks are recorded by `required_table`.
     fn table(&mut self, expected: &Type, expr: &'c Expr, from: FileId, depth: u32) {
+        if self.required.is_some() {
+            self.required_table(&[(expected.clone(), from)], expr, depth);
+            return;
+        }
         let table = expr.unparen();
         let ExprKind::Table(fields) = &table.kind else { return };
         if let Some((class, args, from)) = self.classes.class_of(expected, from) {
@@ -1021,8 +1127,32 @@ impl<'c> Finder<'_, '_, 'c> {
                 }
             }
         }
-        if let Some((_, typed)) = &mut self.table_types {
+        if let Some(typed) = &mut self.table_types {
             typed.push(TypedTable { ty, table, from });
+        }
+    }
+
+    /// Records `expr` when it is a table constructor that has to be one of the classes and shapes
+    /// that `expected` lists, each named as its file sees it, then the constructors it holds for
+    /// fields that some of them declare, which have to be one of the types those declare.
+    fn required_table(&mut self, expected: &[(Type, FileId)], expr: &'c Expr, depth: u32) {
+        let table = expr.unparen();
+        let ExprKind::Table(fields) = &table.kind else { return };
+        let Some(members) = self.classes.table_members(expected) else { return };
+        let mut held = Vec::new();
+        if depth < MAX_DEPTH {
+            for (key, _, value) in entries(self.classes.infer, fields) {
+                let Some(value) = value.filter(|value| is_table(value)) else { continue };
+                let types: Vec<_> =
+                    members.iter().filter_map(|member| self.classes.member_field_type(member, &key)).collect();
+                held.push((types, value));
+            }
+        }
+        if let Some(required) = &mut self.required {
+            required.push(RequiredTable { members, table });
+        }
+        for (types, value) in held {
+            self.required_table(&types, value, depth + 1);
         }
     }
 
@@ -1032,15 +1162,16 @@ impl<'c> Finder<'_, '_, 'c> {
     }
 
     /// The type that an assignment to `target` without a `---@type` gives a table: that of a
-    /// class the target holds, or else the table type it is declared with, as its own `---@type`
-    /// or `@param` declares it. What the target was assigned before only tells what it held then.
+    /// class the target holds, or else, when tables of other types are looked for, the type it is
+    /// declared with, as its own `---@type` or `@param` declares it. What the target was assigned
+    /// before only tells what it held then.
     fn assigned_type(&self, target: &Expr) -> Type {
         let ty = self.classes.infer.target_type(target);
         if self.classes.class_of(&ty, self.classes.file()).is_some() {
             return ty;
         }
-        match &self.table_types {
-            Some((declared, _)) => declared.target(target),
+        match &self.declared {
+            Some(declared) => declared.target(target),
             None => ty,
         }
     }
