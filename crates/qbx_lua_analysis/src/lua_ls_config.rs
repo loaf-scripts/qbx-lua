@@ -47,6 +47,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "cast-type-mismatch",
     "no-unknown",
     "need-check-nil",
+    "inject-field",
 ];
 
 #[derive(Debug, Default)]

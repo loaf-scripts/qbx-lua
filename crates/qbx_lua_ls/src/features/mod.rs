@@ -15,6 +15,7 @@ pub mod event_call;
 pub mod expected;
 pub mod folding;
 pub mod hover;
+pub mod injected_fields;
 pub mod inlay;
 pub mod member_refs;
 mod native_argument;

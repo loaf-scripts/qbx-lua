@@ -5,9 +5,9 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
-    ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, DISCARD_RETURNS, IMPOSSIBLE_COMPARISON, INVISIBLE, MISSING_FIELDS,
-    MISSING_PARAMETER, MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN, PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER,
-    REDUNDANT_RETURN_VALUE, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
+    ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, DISCARD_RETURNS, IMPOSSIBLE_COMPARISON, INJECT_FIELD, INVISIBLE,
+    MISSING_FIELDS, MISSING_PARAMETER, MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN, PARAM_TYPE_MISMATCH,
+    REDUNDANT_PARAMETER, REDUNDANT_RETURN_VALUE, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -24,6 +24,7 @@ use super::class_tables::missing_fields;
 use super::comparisons::impossible_comparisons;
 use super::discards::discarded_returns;
 use super::doc_names::undefined_doc_names;
+use super::injected_fields::injected_fields;
 use super::nil_checks::{unchecked_nils, UncheckedNils};
 use super::returns::{mismatched_returns, missing_returns, redundant_returns};
 use super::strict_classes::undeclared_fields;
@@ -83,7 +84,7 @@ impl<'a> CheckInput<'a> {
 /// do to the linter's own.
 fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<qbx_lua_analysis::Diagnostic> {
     type Check = fn(&CheckInput) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 16] = [
+    let checks: [(&'static str, Check); 17] = [
         (UNDEFINED_DOC_NAME, |input| {
             let side = input.ws.index.file(input.doc.file).and_then(|f| f.side);
             undefined_doc_names(&input.ws.index, &input.doc.text, &input.doc.chunk, side)
@@ -97,6 +98,9 @@ fn type_diagnostics(ws: &Workspace, doc: &Document, config: &FileConfig) -> Vec<
                 return Vec::new();
             }
             undeclared_fields(input.infer, &input.doc.chunk, |file| strict_by_default(input.ws, file))
+        }),
+        (INJECT_FIELD, |input| {
+            injected_fields(input.infer, &input.doc.chunk, |file| strict_by_default(input.ws, file))
         }),
         (INVISIBLE, |input| invisible_members(input.infer, &input.doc.chunk)),
         (RETURN_TYPE_MISMATCH, |input| mismatched_returns(input.infer, &input.doc.chunk)),

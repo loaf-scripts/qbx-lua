@@ -84,6 +84,8 @@ pub const PARAM_TYPE_MISMATCH: &str = "param-type-mismatch";
 /// Reported by qbx-lua-ls, which reads the LuaCATS classes; the linter itself has no type information.
 pub const UNDECLARED_FIELD: &str = "undeclared-field";
 /// Reported by qbx-lua-ls, which reads the LuaCATS classes; the linter itself has no type information.
+pub const INJECT_FIELD: &str = "inject-field";
+/// Reported by qbx-lua-ls, which reads the LuaCATS classes; the linter itself has no type information.
 pub const INVISIBLE: &str = "invisible";
 /// Reported by qbx-lua-ls, which infers the returned values; the linter itself has no type information.
 pub const RETURN_TYPE_MISMATCH: &str = "return-type-mismatch";
@@ -165,6 +167,7 @@ pub static RULES: &[Rule] = &[
     rule(ASSIGN_TYPE_MISMATCH, Correctness, WARN, false, "A table constructor or assignment stores a value of the wrong type in a field of a LuaCATS class, or in a variable typed with @type or @param (language server only)."),
     rule(PARAM_TYPE_MISMATCH, Correctness, WARN, false, "A call passes an argument of a different type than its parameter's LuaCATS annotation declares (language server only)."),
     rule(UNDECLARED_FIELD, Correctness, WARN, false, "A field or key that a strict LuaCATS class does not declare is set or read (language server only)."),
+    rule(INJECT_FIELD, Correctness, WARN, false, "A field is set through a value whose LuaCATS class or table type does not have it, rather than through the name that owns the table (language server only)."),
     rule(INVISIBLE, Correctness, WARN, false, "A private, protected or package field or method of a LuaCATS class is used outside its class, subclasses or file (language server only)."),
     rule(RETURN_TYPE_MISMATCH, Correctness, WARN, false, "A function returns a value of a different type than its @return annotation declares (language server only)."),
     rule(MISSING_RETURN, Correctness, WARN, false, "A function with a required @return value can end, or return, without it (language server only)."),

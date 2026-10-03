@@ -4252,6 +4252,96 @@ print(own, ownLoose, vendor, vendorStrict, api)
 }
 
 #[test]
+fn inject_field_reports_fields_set_through_values_whose_type_lacks_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Gadget
+---@field name string
+---@field [integer] string
+local Gadget = {}
+Gadget.__index = Gadget
+Gadget.version = 2
+
+function Gadget.new()
+    local self = setmetatable({}, Gadget)
+    self.made = 1
+    return self
+end
+
+function Gadget:init()
+    self.ready = true
+end
+
+Tracker = {}
+
+function Tracker:reset()
+    self.count = 0
+end
+
+---@param gadget Test.Gadget
+local function tag(gadget, key)
+    gadget.name = 'tagged'
+    gadget.ready = false
+    gadget.extra = 5
+    gadget[key] = 'x'
+    gadget[1] = 'first'
+end
+
+---@class (strict) Test.Sealed
+
+---@type Test.Sealed
+local sealed = {}
+sealed.other = 1
+
+local Config = { debug = false }
+Config.verbose = true
+local alias = Config
+alias.copied = 1
+
+local rows = { { label = 'a' }, { label = 'b' } }
+for _, row in pairs(rows) do
+    row.label = 'c'
+    row.count = 0
+end
+
+local function build()
+    local result = {}
+    result.any = 1
+    local options = { size = 1 }
+    options.color = 'red'
+    function options.reset() end
+    return result, options
+end
+
+---@diagnostic disable-next-line: inject-field
+alias.allowed = 1
+print(tag, build)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let found = |needle: &str, message: &str| ("inject-field".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["inject-field"]),
+        [
+            found("self.made", "Field `made` is not declared in `Test.Gadget`"),
+            found("gadget.extra", "Field `extra` is not declared in `Test.Gadget`"),
+            found("alias.copied", "Field `copied` is not declared in the table `alias` holds"),
+            found("row.count", "Field `count` is not declared in `{ label: string }`"),
+            found("options.color", "Field `color` is not declared in `{ size: integer }`"),
+            found("options.reset", "Field `reset` is not declared in `{ size: integer }`"),
+        ],
+        "fields set through `self` in a method, also of a global declared empty, the class table, a \
+         global or a table's own local are declared, and an empty table, keys in variables and strict \
+         classes are left alone"
+    );
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "inject-field": "off" } } } } }),
+    );
+    assert_eq!(findings(&mut client, CLIENT, &["inject-field"]), [], "the rule can be turned off");
+}
+
+#[test]
 fn private_protected_and_package_members_stay_in_their_class_or_file() {
     let mut client = Client::start(fixture_root());
     const SHARED: &str = "myresource/shared/config.lua";

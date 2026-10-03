@@ -85,6 +85,7 @@ fn bad_resource_reports_every_rule() {
                 | "assign-type-mismatch"
                 | "param-type-mismatch"
                 | "undeclared-field"
+                | "inject-field"
                 | "invisible"
                 | "return-type-mismatch"
                 | "missing-return"

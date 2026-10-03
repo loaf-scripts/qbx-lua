@@ -1,8 +1,8 @@
 //! Table constructors typed as a LuaCATS class, found where their type is known: `---@type` locals
 //! and assignments, arguments to class-typed parameters, `return` in a function documented with
 //! `@return`, and the tables such fields hold. With the fields that code sets on and reads from
-//! values of a class, they drive `missing-fields`, `assign-type-mismatch`, `undeclared-field` and
-//! the completion of field names. Table constructors typed as a table type, like a shape
+//! values of a class, they drive `missing-fields`, `assign-type-mismatch`, `undeclared-field`,
+//! `inject-field` and the completion of field names. Table constructors typed as a table type, like a shape
 //! `{ value: string }`, `string[]` or `table<string, integer>`, are found in the same places for
 //! `assign-type-mismatch`. Only the language server knows the classes, so qbx-lint registers the
 //! rules and this module reports them.
@@ -761,6 +761,8 @@ fn typed_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> (Vec<ClassTable<'c>>, Ve
 pub struct Access<'c> {
     /// The type of the value whose field it is.
     pub owner: Type,
+    /// Where that value is written, like `a.b` in `a.b.c = 1`.
+    pub holder: Span,
     pub key: Key<'c>,
     /// Where the name or key is written.
     pub span: Span,
@@ -815,7 +817,7 @@ impl<'c> Visitor<'c> for Accesses<'_, '_, 'c> {
                             let on_class_table = self.is_class_table(base);
                             let owner = self.infer.expr(base);
                             let value = exprs.get(i);
-                            self.out.push(Access { owner, key, span, value, on_class_table });
+                            self.out.push(Access { owner, holder: base.span, key, span, value, on_class_table });
                             // The target's value and key are read.
                             visit::walk_expr(self, target);
                         }
@@ -836,9 +838,10 @@ impl<'c> Visitor<'c> for Accesses<'_, '_, 'c> {
                     let on_class_table = path.is_empty() && self.infer.is_class_table(&name.base);
                     let owner =
                         FuncName { base: name.base.clone(), path: path.to_vec(), method: None, span: name.base.span };
+                    let holder = Span::new(name.base.span.start, path.last().unwrap_or(&name.base).span.end);
                     let owner = self.infer.func_name_owner_type(&owner);
                     let key = Key::Name(&field.text);
-                    self.out.push(Access { owner, key, span: field.span, value: None, on_class_table });
+                    self.out.push(Access { owner, holder, key, span: field.span, value: None, on_class_table });
                 }
             }
             _ => {}
@@ -854,7 +857,7 @@ impl<'c> Visitor<'c> for Accesses<'_, '_, 'c> {
             };
             if let Some((base, key, span)) = read {
                 let owner = self.infer.expr(base);
-                self.out.push(Access { owner, key, span, value: None, on_class_table: false });
+                self.out.push(Access { owner, holder: base.span, key, span, value: None, on_class_table: false });
             }
         }
         visit::walk_expr(self, expr);

@@ -102,7 +102,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `no-unknown` and `need-check-nil`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `no-unknown`, `need-check-nil` and `inject-field`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
@@ -481,6 +481,53 @@ only covers classes declared in workspace files outside `exclude` and `ignore_di
 classes of third-party resources stay as they are unless they say `(strict)` themselves. When one
 class is declared in several places, one `(strict)` makes it strict, and otherwise one `(loose)`
 keeps it loose.
+
+## Injected fields
+
+A field belongs to a table when the code that owns the table sets it: through a global or a path
+from one, like `Config.debug = true`, on the table a `---@class` annotation declares, through
+`self` in a method, through a local declared with a table at the top of the file, and through the
+instance a constructor makes in a local, as `local self = setmetatable({}, Base)` does for a table
+without a `---@class`. As in TypeScript, what is set through other values adds no field: a
+parameter or local typed as a class, a loop variable over another file's tables, or another local
+that holds the same table. Hover and completion leave such fields out, and lua-language-server
+leaves them out of a class too.
+
+`inject-field` reports the fields that assignments and `function value:name()` statements set
+through a value whose type does not have them: a class, a table type such as the `{ label: string }`
+a table constructor gives, or a table declared under another name, as TypeScript and
+lua-language-server do. To turn it off:
+
+```toml
+[rules]
+"inject-field" = "off"
+```
+
+```lua
+---@class Thing
+---@field name string
+local Thing = {}
+
+function Thing:init()
+    self.ready = true -- declares `ready`
+end
+
+---@param thing Thing
+local function tag(thing)
+    thing.ready = false
+    thing.extra = 5 -- inject-field: Field `extra` is not declared in `Thing`
+end
+
+local rows = { { label = 'a' }, { label = 'b' } }
+for _, row in pairs(rows) do
+    row.count = 0 -- inject-field: Field `count` is not declared in `{ label: string }`
+end
+```
+
+An empty table, such as `local result = {}`, takes any field, and so do values of unknown type,
+`table` and `any`. Keys held in variables are not checked, and strict classes are left to
+`undeclared-field`. lua-language-server's `inject-field` checks classes only, and its
+`---@diagnostic disable: inject-field` comments and `diagnostics.disable` entries apply here too.
 
 ## Member visibility
 
