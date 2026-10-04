@@ -344,7 +344,10 @@ impl Resolver {
                     self.expr(step);
                 }
                 self.scopes.push(Scope { names: Vec::new() });
-                self.declare(var, LocalKind::LoopVar, None, body.span.start, stmt.span.end, true);
+                // Visible from the end of the header, as parameters are from the `)`, so a comment
+                // above the first statement of the body, like a `---@cast`, sees the variable.
+                let header_end = step.as_ref().unwrap_or(limit).span.end;
+                self.declare(var, LocalKind::LoopVar, None, header_end, stmt.span.end, true);
                 self.block(body, stmt.span.end);
                 self.scopes.pop();
             }
@@ -353,8 +356,9 @@ impl Resolver {
                     self.expr(expr);
                 }
                 self.scopes.push(Scope { names: Vec::new() });
+                let header_end = exprs.last().map_or(body.span.start, |expr| expr.span.end);
                 for name in names {
-                    self.declare(name, LocalKind::LoopVar, None, body.span.start, stmt.span.end, true);
+                    self.declare(name, LocalKind::LoopVar, None, header_end, stmt.span.end, true);
                 }
                 self.block(body, stmt.span.end);
                 self.scopes.pop();

@@ -3483,6 +3483,29 @@ print(added) -- added on one way
 }
 
 #[test]
+fn casts_above_the_first_statement_of_a_loop_change_its_variables() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type table
+local list = {}
+for _, item in ipairs(list) do
+    ---@cast item string
+    print(item) -- generic
+end
+for i = 1, 2 do
+    ---@cast i string
+    print(i) -- numeric
+end
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [("item) -- generic", "item: string\n"), ("i) -- numeric", "i: string\n")] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn casts_that_add_or_remove_types_keep_the_guards_before_them() {
     let mut client = Client::start(fixture_root());
     let text = "\
