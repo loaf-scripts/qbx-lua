@@ -144,6 +144,7 @@ fn escrowed_resources_are_not_second_guessed() {
     let actual = render(&fixtures().join("escrowed_resource"), &config_with_everything_enabled());
     assert!(!actual.contains("escrowed.lua"), "encrypted files are never parsed: {actual}");
     assert!(!actual.contains("undefined-global"), "globals may be defined by the encrypted part: {actual}");
+    assert!(!actual.contains("implicit-global"), "and declared at file scope there: {actual}");
     assert!(!actual.contains("unused-locale-key"), "keys may be used by the encrypted part: {actual}");
 }
 

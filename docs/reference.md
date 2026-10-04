@@ -1136,7 +1136,8 @@ at least 4096 bytes long and contains the `function` keyword. Long data lines, s
 encoded strings, do not count. To skip other generated files, use `exclude`.
 
 A `.fxap` marker or a skipped or unreadable script makes the resource opaque to checks that need
-complete knowledge of its globals or locale usage. Readable scripts are still analyzed.
+complete knowledge of its globals or locale usage, such as `undefined-global`, `implicit-global` and
+`unused-locale-key`. Readable scripts are still analyzed.
 
 Unknown-export checks are suppressed for opaque resources and resources with non-Lua scripts.
 An opaque resource may also handle events named with its `resource:` prefix, so a wrong-side

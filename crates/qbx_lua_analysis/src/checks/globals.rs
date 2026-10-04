@@ -180,8 +180,9 @@ fn check_definition(input: &FileInput, global: &GlobalRef, meta: bool, sink: &mu
         }
         return;
     }
+    // An encrypted script of an opaque resource may declare it at file scope.
     let declared = match &input.resource {
-        Some(resource) => resource.env.declared_at_file_scope(name),
+        Some(resource) => resource.env.opaque || resource.env.declared_at_file_scope(name),
         None => input.summary.global_defs.iter().any(|d| d.at_file_scope && d.name == name),
     };
     if !declared {
