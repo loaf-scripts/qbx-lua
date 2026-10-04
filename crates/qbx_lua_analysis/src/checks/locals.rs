@@ -14,13 +14,24 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let ignored = |local: &Local| {
         local.name == "_" || local.name == "_ENV" || (!prefix.is_empty() && local.name.starts_with(prefix))
     };
-    let mut shapes =
-        Shapes { input, tables: FxHashSet::default(), field_sets: FxHashSet::default(), functions: Vec::new() };
+    let mut shapes = Shapes {
+        input,
+        tables: FxHashSet::default(),
+        field_sets: FxHashSet::default(),
+        functions: Vec::new(),
+        empty_functions: FxHashSet::default(),
+    };
     shapes.visit_block(&input.chunk.block);
-    // Definition files only declare signatures, which lua-language-server does not check for use.
-    let only_used_by_unused = match is_meta_file(input.source, input.chunk) {
+    // Definition files declare signatures, which lua-language-server does not check for use: the
+    // parameters of their empty functions, and their local functions.
+    let meta = is_meta_file(input.source, input.chunk);
+    let only_used_by_unused = match meta {
         true => FxHashSet::default(),
         false => used_only_by_unused(input, &shapes, ignored),
+    };
+    let declares = |local: &Local| {
+        let function = &input.resolution.functions[local.func as usize];
+        meta && local.kind == LocalKind::Param && shapes.empty_functions.contains(&function.span.start)
     };
     for (id, local) in input.resolution.locals.iter().enumerate() {
         if local.name.is_empty() {
@@ -30,7 +41,9 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
         if ignored(local) || local.kind == LocalKind::ImplicitSelf {
             continue;
         }
-        check_unused(local, &shapes, sink);
+        if !declares(local) {
+            check_unused(local, &shapes, sink);
+        }
         if only_used_by_unused.contains(&(id as LocalId)) {
             let code =
                 if local.kind == LocalKind::LocalFunction { rules::UNUSED_FUNCTION } else { rules::UNUSED_LOCAL };
@@ -147,6 +160,8 @@ struct Shapes<'a> {
     field_sets: FxHashSet<u32>,
     /// Where each function that a local holds starts, with where the name of that local starts.
     functions: Vec<(u32, u32)>,
+    /// Where the functions without statements start.
+    empty_functions: FxHashSet<u32>,
 }
 
 impl<'ast> Visitor<'ast> for Shapes<'_> {
@@ -180,6 +195,13 @@ impl<'ast> Visitor<'ast> for Shapes<'_> {
             _ => {}
         }
         visit::walk_stmt(self, stmt);
+    }
+
+    fn visit_func_body(&mut self, func: &'ast FuncBody) {
+        if func.body.stmts.is_empty() {
+            self.empty_functions.insert(func.span.start);
+        }
+        visit::walk_func_body(self, func);
     }
 }
 

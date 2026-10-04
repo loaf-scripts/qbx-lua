@@ -620,6 +620,31 @@ print(sandboxed)";
 }
 
 #[test]
+fn meta_files_declare_globals_and_signatures() {
+    let source = "---@meta
+function noop() end
+---@param key string
+function cache(key) end
+local function loadModule(self, module) return self end
+lib = {}
+function helper(x) print(1) end
+local function setup() Implicit = 1 end
+print(loadModule, setup)";
+    assert_eq!(reported_lines(source, "lowercase-global"), Vec::<u32>::new());
+    assert_eq!(reported_lines(source, "implicit-global"), Vec::<u32>::new());
+    assert_eq!(reported_lines(source, "unused-argument"), [5, 7], "parameters of functions with a body still count");
+    let script = source
+        .strip_prefix(
+            "---@meta
+",
+        )
+        .unwrap();
+    assert_eq!(reported_lines(script, "lowercase-global"), [1, 3, 5, 6]);
+    assert_eq!(reported_lines(script, "implicit-global"), [7]);
+    assert_eq!(reported_lines(script, "unused-argument"), [3, 4, 6]);
+}
+
+#[test]
 fn runtime_names_are_protected() {
     assert_eq!(codes("function GetEntityCoords() end"), ["builtin-overwrite"]);
     assert_eq!(codes("print = nil"), ["builtin-overwrite"]);

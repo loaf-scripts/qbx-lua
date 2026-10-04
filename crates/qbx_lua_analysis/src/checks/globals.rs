@@ -4,7 +4,7 @@ use qbx_lua_syntax::visit::{self, Visitor};
 
 use super::{FileInput, Sink};
 use crate::diagnostic::Tag;
-use crate::env::builtins;
+use crate::env::{builtins, is_meta_file};
 use crate::rules;
 use crate::scope::{GlobalRef, GlobalRefKind, Resolved, MAIN_CHUNK};
 use crate::side_guard::{other, SideRegions};
@@ -26,10 +26,13 @@ const AMBIGUOUS_IMPORT_GLOBALS: &[&str] = &["player", "_", "require"];
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let regions = SideRegions::of(input.source, input.chunk);
+    // A definition file declares the globals that other code defines, such as ox_lib's `noop` and
+    // `cache`, which lua-language-server does not report as lowercase or implicit globals.
+    let meta = is_meta_file(input.source, input.chunk);
     for global in &input.resolution.globals {
         match global.kind {
             GlobalRefKind::Read => check_read(input, global, &regions, sink),
-            GlobalRefKind::Write | GlobalRefKind::FunctionDecl => check_definition(input, global, sink),
+            GlobalRefKind::Write | GlobalRefKind::FunctionDecl => check_definition(input, global, meta, sink),
         }
     }
     for field in input.resolution.env_fields.iter().filter(|field| field.nil_env) {
@@ -153,7 +156,7 @@ fn check_read(input: &FileInput, global: &GlobalRef, regions: &SideRegions, sink
     sink.report(rules::UNDEFINED_GLOBAL, global.span, format!("undefined global '{name}'"));
 }
 
-fn check_definition(input: &FileInput, global: &GlobalRef, sink: &mut Sink) {
+fn check_definition(input: &FileInput, global: &GlobalRef, meta: bool, sink: &mut Sink) {
     let name = global.name.as_str();
     if is_configured(input, name) {
         return;
@@ -162,6 +165,9 @@ fn check_definition(input: &FileInput, global: &GlobalRef, sink: &mut Sink) {
     if is_runtime_name {
         let what = if native(name).is_some() { "native" } else { "runtime global" };
         sink.report(rules::BUILTIN_OVERWRITE, global.span, format!("overwriting {what} '{name}'"));
+        return;
+    }
+    if meta {
         return;
     }
     if global.func == MAIN_CHUNK {
