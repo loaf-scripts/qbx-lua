@@ -141,9 +141,11 @@ fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: O
     let mut out = format!("{prefix}{name}: {label}{{");
     let mut shown = Vec::new();
     for member in members.iter().take(MAX_OVERVIEW_FIELDS) {
+        // A table type that a field declares, as `{ [string]: Variation }`, is written out as
+        // lua-language-server writes it; a table the index only knows by its path is not.
         let ty = match &member.ty {
             Type::Fun(_) => "function".to_string(),
-            Type::GlobalTable(_) | Type::Shape(_) => "table".to_string(),
+            Type::GlobalTable(_) => "table".to_string(),
             other => {
                 shown.push(other.clone());
                 other.to_string()

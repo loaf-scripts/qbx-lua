@@ -9359,6 +9359,31 @@ print(car, wrapped, opts)
 }
 
 #[test]
+fn hover_overviews_write_out_the_table_types_fields_declare() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Variation
+---@field drawable number
+
+---@class Test.Clothes
+---@field components { [string]: Test.Variation }
+---@field hidden boolean
+
+---@type Test.Clothes
+local clothes = { components = {}, hidden = false }
+local nested = { inner = { value = 1 } }
+print(clothes, nested)
+";
+    client.open_with(CLIENT, text);
+    let (l, c) = pos(text, "print(clothes", 6);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("components: { [string]: Test.Variation },"), "{hover}");
+    let (l, c) = pos(text, "nested)", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("inner: table,"), "a table the index holds stays `table`: {hover}");
+}
+
+#[test]
 fn calls_through_function_aliases_use_their_signature() {
     let mut client = Client::start(fixture_root());
     let text = "\
