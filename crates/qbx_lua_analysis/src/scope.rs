@@ -69,6 +69,16 @@ impl GlobalRef {
     }
 }
 
+/// A name that would be a global, read or set while a local `_ENV` is in scope, which makes it a
+/// field of that table instead. `local _ENV = _ENV` keeps the globals.
+#[derive(Clone, Debug)]
+pub struct EnvField {
+    pub name: SmolStr,
+    pub span: Span,
+    /// The `_ENV` local is declared without a value or as `nil`, so using the name raises an error.
+    pub nil_env: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct Function {
     pub span: Span,
@@ -95,6 +105,7 @@ pub struct Resolution {
     pub functions: Vec<Function>,
     pub labels: Vec<Label>,
     pub undefined_gotos: Vec<Name>,
+    pub env_fields: Vec<EnvField>,
     by_offset: FxHashMap<u32, Resolved>,
 }
 
@@ -143,6 +154,7 @@ pub fn resolve(chunk: &Chunk) -> Resolution {
         scopes: Vec::new(),
         func_stack: vec![MAIN_CHUNK],
         label_scopes: Vec::new(),
+        envs: FxHashMap::default(),
     };
     resolver.out.functions.push(Function { span: chunk.block.span, parent: None });
     resolver.block(&chunk.block, u32::MAX);
@@ -163,6 +175,17 @@ struct Resolver {
     scopes: Vec<Scope>,
     func_stack: Vec<FuncId>,
     label_scopes: Vec<LabelScope>,
+    /// What the `local _ENV` statements give their local.
+    envs: FxHashMap<LocalId, Env>,
+}
+
+/// The table a local `_ENV` holds, which the names that are no locals read and set.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Env {
+    /// The globals, as `local _ENV = _ENV` keeps them.
+    Globals,
+    Nil,
+    Other,
 }
 
 impl Resolver {
@@ -226,6 +249,11 @@ impl Resolver {
     }
 
     fn global(&mut self, name: &Name, kind: GlobalRefKind) {
+        let env = self.lookup("_ENV").map(|id| self.envs.get(&id).copied().unwrap_or(Env::Other));
+        if let Some(env @ (Env::Nil | Env::Other)) = env {
+            self.out.env_fields.push(EnvField { name: name.text.clone(), span: name.span, nil_env: env == Env::Nil });
+            return;
+        }
         let index = self.out.globals.len() as u32;
         self.out.globals.push(GlobalRef { name: name.text.clone(), span: name.span, kind, func: self.func() });
         self.out.by_offset.insert(name.span.start, Resolved::Global(index));
@@ -281,7 +309,15 @@ impl Resolver {
                 for (i, name) in names.iter().enumerate() {
                     let has_value = i < exprs.len() || exprs.last().is_some_and(Expr::is_multi_value);
                     let attrib = name.attrib.map(|(a, _)| a);
-                    self.declare(&name.name, LocalKind::Local, attrib, stmt.span.end, scope_end, has_value);
+                    let env = (name.name.text == "_ENV").then(|| match exprs.get(i) {
+                        Some(value) => self.env_of(value),
+                        None if has_value => Env::Other,
+                        None => Env::Nil,
+                    });
+                    let id = self.declare(&name.name, LocalKind::Local, attrib, stmt.span.end, scope_end, has_value);
+                    if let Some(env) = env {
+                        self.envs.insert(id, env);
+                    }
                 }
             }
             StmtKind::LocalFunction { name, func } => {
@@ -375,6 +411,21 @@ impl Resolver {
             }
             StmtKind::Goto(name) => self.goto(name),
             StmtKind::Break | StmtKind::Label(_) | StmtKind::Error => {}
+        }
+    }
+
+    /// What a `local _ENV` declared with `value` holds.
+    fn env_of(&self, value: &Expr) -> Env {
+        match &value.unparen().kind {
+            ExprKind::Nil => Env::Nil,
+            ExprKind::Name(name) if matches!(name.text.as_str(), "_ENV" | "_G") => {
+                match self.out.by_offset.get(&name.span.start) {
+                    Some(Resolved::Global(_)) => Env::Globals,
+                    Some(Resolved::Local(id)) => self.envs.get(id).copied().unwrap_or(Env::Other),
+                    None => Env::Other,
+                }
+            }
+            _ => Env::Other,
         }
     }
 

@@ -69,3 +69,8 @@ print(entries)
 
 local total = Config.Count + Config.Extra or 0
 print(total)
+
+do
+    local _ENV = nil
+    print('blocked')
+end

@@ -20,6 +20,7 @@ const ALIASES: &[(&str, &[&str])] =
 const EQUIVALENT_CODES: &[&str] = &[
     "undefined-global",
     "lowercase-global",
+    "global-in-nil-env",
     "unused-local",
     "unused-function",
     "unused-label",

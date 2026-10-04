@@ -32,6 +32,13 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
             GlobalRefKind::Write | GlobalRefKind::FunctionDecl => check_definition(input, global, sink),
         }
     }
+    for field in input.resolution.env_fields.iter().filter(|field| field.nil_env) {
+        sink.report(
+            rules::GLOBAL_IN_NIL_ENV,
+            field.span,
+            format!("'{}' is looked up in the local _ENV, which is nil here, so this raises an error", field.name),
+        );
+    }
     Fields { input, sink }.visit_block(&input.chunk.block);
 }
 

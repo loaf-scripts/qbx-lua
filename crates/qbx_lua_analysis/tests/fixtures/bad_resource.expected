@@ -56,3 +56,4 @@ shared/config.lua:56:35 warning unknown-diag-code
 shared/config.lua:59:20 hint unused-vararg
 shared/config.lua:65:5 warning newfield-call
 shared/config.lua:70:15 warning ambiguity-1
+shared/config.lua:75:5 warning global-in-nil-env

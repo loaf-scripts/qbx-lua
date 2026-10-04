@@ -10,7 +10,10 @@ use crate::scope::{FuncId, Local, LocalId, LocalKind, LocalRef, Resolved};
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let prefix = input.config.ignore_unused_prefix.as_str();
-    let ignored = |local: &Local| local.name == "_" || (!prefix.is_empty() && local.name.starts_with(prefix));
+    // Like lua-language-server, an `_ENV` local is in use by every name that is no local.
+    let ignored = |local: &Local| {
+        local.name == "_" || local.name == "_ENV" || (!prefix.is_empty() && local.name.starts_with(prefix))
+    };
     let mut shapes =
         Shapes { input, tables: FxHashSet::default(), field_sets: FxHashSet::default(), functions: Vec::new() };
     shapes.visit_block(&input.chunk.block);

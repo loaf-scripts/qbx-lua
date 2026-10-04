@@ -594,6 +594,32 @@ fn ignore_prefix_silences_unused() {
 }
 
 #[test]
+fn names_under_a_local_env_are_its_fields() {
+    let source = "do
+    local _ENV = nil
+    print(1)
+    Created = 1
+end
+do
+    local _ENV = { print = print }
+    print(missingName)
+    lowered = 1
+end
+local function sandboxed(_ENV) return undefinedThing end
+do
+    local _ENV = _ENV
+    print(alsoUndefined)
+end
+print(sandboxed)";
+    assert_eq!(codes(source), ["global-in-nil-env", "global-in-nil-env", "undefined-global"]);
+    assert_eq!(reported_lines(source, "global-in-nil-env"), [3, 4]);
+    assert_eq!(
+        findings(source, "global-in-nil-env")[0].1,
+        "'print' is looked up in the local _ENV, which is nil here, so this raises an error"
+    );
+}
+
+#[test]
 fn runtime_names_are_protected() {
     assert_eq!(codes("function GetEntityCoords() end"), ["builtin-overwrite"]);
     assert_eq!(codes("print = nil"), ["builtin-overwrite"]);

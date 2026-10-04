@@ -131,6 +131,7 @@ pub const IMPOSSIBLE_COMPARISON: &str = "impossible-comparison";
 pub const NEED_CHECK_NIL: &str = "need-check-nil";
 pub const LOWERCASE_GLOBAL: &str = "lowercase-global";
 pub const IMPLICIT_GLOBAL: &str = "implicit-global";
+pub const GLOBAL_IN_NIL_ENV: &str = "global-in-nil-env";
 pub const BUILTIN_OVERWRITE: &str = "builtin-overwrite";
 pub const DEPRECATED: &str = "deprecated";
 pub const LOOP_NEVER_YIELDS: &str = "fivem/loop-never-yields";
@@ -223,6 +224,7 @@ pub static RULES: &[Rule] = &[
     rule(LOWERCASE_GLOBAL, Suspicious, WARN, false, "A global with a lowercase first letter is defined; this is usually a missing 'local'."),
     rule(IMPLICIT_GLOBAL, Suspicious, WARN, false, "A global is created from inside a function and never declared at file scope."),
     rule(BUILTIN_OVERWRITE, Suspicious, WARN, false, "A runtime global or native is overwritten."),
+    rule(GLOBAL_IN_NIL_ENV, Correctness, WARN, false, "A global is read or set where a local _ENV that is nil is in scope, which raises an error."),
     rule(DEPRECATED, Style, WARN, false, "A deprecated runtime function is used or, in the language server, a global, field or method whose definitions are all marked @deprecated."),
     rule(LOOP_NEVER_YIELDS, FiveM, ERROR, false, "An infinite loop has no Wait and will freeze the game or server thread."),
     rule(SOURCE_AFTER_YIELD, FiveM, WARN, false, "The global 'source' is read after a yield or inside a deferred callback, where it may belong to another event."),
