@@ -5,11 +5,11 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
-    ASSIGN_TYPE_MISMATCH, CAST_LOCAL_TYPE, CAST_TYPE_MISMATCH, CIRCLE_DOC_CLASS, CLOSE_NON_OBJECT, DISCARD_RETURNS,
-    IMPOSSIBLE_COMPARISON, INCOMPLETE_SIGNATURE_DOC, INJECT_FIELD, INVISIBLE, MISSING_FIELDS, MISSING_GLOBAL_DOC,
-    MISSING_LOCAL_EXPORT_DOC, MISSING_PARAMETER, MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN, PARAM_TYPE_MISMATCH,
-    REDUNDANT_PARAMETER, REDUNDANT_RETURN_VALUE, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
-    UNDEFINED_FIELD,
+    ASSIGN_TYPE_MISMATCH, CAST_LOCAL_TYPE, CAST_TYPE_MISMATCH, CIRCLE_DOC_CLASS, CLOSE_NON_OBJECT, DEPRECATED,
+    DISCARD_RETURNS, IMPOSSIBLE_COMPARISON, INCOMPLETE_SIGNATURE_DOC, INJECT_FIELD, INVISIBLE, MISSING_FIELDS,
+    MISSING_GLOBAL_DOC, MISSING_LOCAL_EXPORT_DOC, MISSING_PARAMETER, MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN,
+    PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER, REDUNDANT_RETURN_VALUE, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD,
+    UNDEFINED_DOC_NAME, UNDEFINED_FIELD,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -26,6 +26,7 @@ use super::class_cycles::circular_classes;
 use super::class_tables::missing_fields;
 use super::closes::unclosable_values;
 use super::comparisons::impossible_comparisons;
+use super::deprecated::deprecated_uses;
 use super::discards::discarded_returns;
 use super::doc_names::undefined_doc_names;
 use super::injected_fields::injected_fields;
@@ -85,8 +86,9 @@ impl<'a> CheckInput<'a> {
 }
 
 /// Adds to `found`, the linter's findings, those of rules qbx-lint registers but cannot check,
-/// because they need the LuaCATS types only the server indexes, and the parts of `missing-parameter`
-/// and `redundant-parameter` that depend on the handler a `@callback` wrapper call reaches. Inline
+/// because they need the LuaCATS types only the server indexes, and the parts of `missing-parameter`,
+/// `redundant-parameter` and `deprecated` that depend on the handler a `@callback` wrapper call
+/// reaches or on the `---@deprecated` annotations of other files. Inline
 /// suppression comments apply to them as they do to the linter's own. Removes the linter's findings
 /// of parameters without `@param` that those types document.
 fn type_diagnostics(
@@ -96,7 +98,7 @@ fn type_diagnostics(
     found: &mut Vec<qbx_lua_analysis::Diagnostic>,
 ) {
     type Check = fn(&CheckInput) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 21] = [
+    let checks: [(&'static str, Check); 22] = [
         (UNDEFINED_DOC_NAME, |input| {
             let side = input.ws.index.file(input.doc.file).and_then(|f| f.side);
             undefined_doc_names(&input.ws.index, &input.doc.text, &input.doc.chunk, side)
@@ -123,6 +125,7 @@ fn type_diagnostics(
         (MISSING_RETURN, |input| missing_returns(input.infer, &input.doc.chunk)),
         (REDUNDANT_RETURN_VALUE, |input| redundant_returns(input.infer, &input.doc.chunk)),
         (DISCARD_RETURNS, |input| discarded_returns(input.infer, &input.doc.chunk)),
+        (DEPRECATED, |input| deprecated_uses(input.infer, &input.doc.chunk)),
         (CAST_TYPE_MISMATCH, |input| mismatched_casts(input.infer)),
         (CAST_LOCAL_TYPE, |input| retyped_locals(input.infer, &input.doc.chunk)),
         (CLOSE_NON_OBJECT, |input| unclosable_values(input.infer, &input.doc.chunk)),
@@ -156,9 +159,13 @@ fn type_diagnostics(
     }
     for (code, check) in checks {
         let Some(severity) = config.severity(code) else { continue };
-        found.extend(check(&input).into_iter().filter(|(span, _)| !input.is_suppressed(code, *span)).map(
-            |(span, message)| qbx_lua_analysis::Diagnostic { code, severity, span, message, tag: None, fix: None },
-        ));
+        let tag = (code == DEPRECATED).then_some(Tag::Deprecated);
+        found.extend(
+            check(&input)
+                .into_iter()
+                .filter(|(span, _)| !input.is_suppressed(code, *span))
+                .map(|(span, message)| qbx_lua_analysis::Diagnostic { code, severity, span, message, tag, fix: None }),
+        );
     }
 }
 

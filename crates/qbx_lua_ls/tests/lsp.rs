@@ -7848,6 +7848,82 @@ tostring(5)
 }
 
 #[test]
+fn uses_of_deprecated_globals_fields_and_methods_are_reported() {
+    let mut client = Client::start(fixture_root());
+    client.open_with(
+        "myresource/shared/config.lua",
+        "\
+---@deprecated use NewThing
+function OldThing() end
+
+DepLib = {}
+---@deprecated
+function DepLib.old() end
+function DepLib.new() end
+---@deprecated use DepLib:fresh
+function DepLib:stale() end
+
+---@class DepClass
+---@field kept fun()
+local DepClass = {}
+---@deprecated
+function DepClass:legacy() end
+---@deprecated
+function DepClass.kept() end
+---@deprecated
+function DepClass.twice() end
+function DepClass.twice() end
+",
+    );
+    let text = "\
+OldThing()
+local alias = OldThing
+DepLib.old()
+DepLib:stale()
+DepLib.new()
+print(DepLib['old'], alias)
+---@type DepClass
+local value = DepClass
+value:legacy()
+value.kept()
+value.twice()
+local M = {}
+---@deprecated
+function M.gone() end
+M.gone()
+---@deprecated
+local function hidden() end
+hidden()
+RegisterServerEvent('x')
+---@diagnostic disable-next-line: deprecated
+OldThing()
+";
+    client.open_with(CLIENT, text);
+    let finding =
+        |needle: &str, message: &str| ("deprecated".to_string(), pos(text, needle, 0).0 as u64, message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["deprecated"]),
+        [
+            finding("OldThing()", "'OldThing' is deprecated: use NewThing"),
+            finding("local alias", "'OldThing' is deprecated: use NewThing"),
+            finding("DepLib.old()", "'DepLib.old' is deprecated"),
+            finding("DepLib:stale()", "'DepLib:stale' is deprecated: use DepLib:fresh"),
+            finding("print(DepLib", "'DepLib.old' is deprecated"),
+            finding("value:legacy()", "'value:legacy' is deprecated"),
+            finding("value.kept()", "'value.kept' is deprecated"),
+            finding(
+                "M.gone()
+---@deprecated",
+                "'M.gone' is deprecated"
+            ),
+            finding("RegisterServerEvent", "'RegisterServerEvent' is deprecated"),
+        ],
+        "a `---@field` does not keep a field from being deprecated, another definition does, locals are left \
+         alone, and the runtime's `RegisterServerEvent` is reported once, by the linter"
+    );
+}
+
+#[test]
 fn returns_with_more_values_than_declared_are_reported() {
     let mut client = Client::start(fixture_root());
     let text = "\

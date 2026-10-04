@@ -15,8 +15,8 @@ pub const FILE_NAMES: &[&str] = &[".luarc.json", ".luarc.jsonc", ".emmyrc.json"]
 const ALIASES: &[(&str, &[&str])] =
     &[("unused", &["unused-local", "unused-function", "unused-argument", "unused-loop-variable"])];
 
-/// Codes that check the same thing in both tools. `deprecated` only shares the name: projects often
-/// turn off the broad LuaLS check, which must not turn off the narrow one here.
+/// Codes that check the same thing in both tools. `deprecated` is left out: projects often turn off
+/// the LuaLS check, which must not turn off the deprecated runtime functions reported here.
 const EQUIVALENT_CODES: &[&str] = &[
     "undefined-global",
     "lowercase-global",

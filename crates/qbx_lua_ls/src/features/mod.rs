@@ -10,6 +10,7 @@ pub mod code_action;
 pub mod comparisons;
 pub mod completion;
 pub mod definition;
+pub mod deprecated;
 pub mod diagnostics;
 pub mod discards;
 pub mod doc_names;

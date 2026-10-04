@@ -85,7 +85,9 @@ Available features depend on the editor's LSP client.
   `undefined-field` fields read from one, and
   `need-check-nil` a value that may be `nil` used where a missing value raises an error.
   `close-non-object` reports a `<close>` local whose value cannot be closed, such as a number, and
-  `circle-doc-class` a `---@class` that inherits from itself through classes of any file. The opt-in
+  `circle-doc-class` a `---@class` that inherits from itself through classes of any file.
+  `deprecated` reports reads of globals, fields and methods whose definitions all have
+  `---@deprecated` above them, in any file, with the reason it gives. The opt-in
   `no-unknown` reports parameters, locals and loop variables that have no type.
 - Signature help, parameter hints, semantic tokens, folding and document/workspace symbols.
 - QB-Core and ESX server callback completion, navigation and payload hints from local handlers.

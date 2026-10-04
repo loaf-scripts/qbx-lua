@@ -217,7 +217,7 @@ pub static RULES: &[Rule] = &[
     rule(LOWERCASE_GLOBAL, Suspicious, WARN, false, "A global with a lowercase first letter is defined; this is usually a missing 'local'."),
     rule(IMPLICIT_GLOBAL, Suspicious, WARN, false, "A global is created from inside a function and never declared at file scope."),
     rule(BUILTIN_OVERWRITE, Suspicious, WARN, false, "A runtime global or native is overwritten."),
-    rule(DEPRECATED, Style, WARN, false, "A deprecated runtime function is used."),
+    rule(DEPRECATED, Style, WARN, false, "A deprecated runtime function is used or, in the language server, a global, field or method whose definitions are all marked @deprecated."),
     rule(LOOP_NEVER_YIELDS, FiveM, ERROR, false, "An infinite loop has no Wait and will freeze the game or server thread."),
     rule(SOURCE_AFTER_YIELD, FiveM, WARN, false, "The global 'source' is read after a yield or inside a deferred callback, where it may belong to another event."),
     rule(NATIVE_WRONG_SIDE, FiveM, ERROR, false, "A native or runtime global is used on a side that lacks it, such as a client-only native in a server script, or the server's `os` and `io` libraries in client or unguarded shared code."),

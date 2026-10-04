@@ -70,7 +70,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `lowercase-global` | warning | A global definition starts with a lowercase letter. |
 | `implicit-global` | warning | A function creates a global without a file-scope declaration. |
 | `builtin-overwrite` | warning | Code overwrites a known runtime global or native. |
-| `deprecated` | warning | A call uses a deprecated runtime function. |
+| `deprecated` | warning | Code uses a deprecated runtime function, such as `RegisterServerEvent`. qbx-lua-ls also reports reads of a global, field or method whose definitions all have `---@deprecated` above them, such as `Lib.old()` after `---@deprecated use Lib.new` `function Lib.old() end`, with the reason it gives. A `---@field` of a class does not count as a definition, and locals are not reported, as in lua-language-server. |
 
 ## FiveM and Qbox
 

@@ -67,6 +67,11 @@ pub fn render_doc(doc: &DocGroup) -> Option<Arc<str>> {
     (!out.is_empty()).then(|| Arc::from(out))
 }
 
+/// The reason that the `---@deprecated` of a doc `render_doc` wrote gives, empty when it gives none.
+pub fn deprecation_reason(doc: &str) -> Option<&str> {
+    doc.lines().find_map(|line| line.strip_prefix("**Deprecated**")).map(str::trim)
+}
+
 /// Values listed by `---|` lines, one indented line each, with their descriptions as comments.
 pub fn described_values(values: &[DescribedValue]) -> String {
     let mut out = String::new();
