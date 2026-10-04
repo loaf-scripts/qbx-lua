@@ -1533,6 +1533,23 @@ print(f, later, x)";
 }
 
 #[test]
+fn directives_name_known_codes() {
+    let source = "---@diagnostic disable-next-line: unused-local, no-such-code
+local a = 1
+-- qbx-lint: disable-next-line fivem/loop-never-yields unused-locals
+local b = 2
+---@diagnostic disable: unused-vararg, miss-end, codestyle-check
+---@diagnostic enable: undefined-globl
+-- luacheck: ignore 211
+print(a, b)";
+    assert_eq!(reported_lines(source, "unknown-diag-code"), [1, 3, 6]);
+    let messages: Vec<String> = findings(source, "unknown-diag-code").into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages[0], "unknown diagnostic code 'no-such-code'");
+    assert_eq!(messages[1], "unknown diagnostic code 'unused-locals'; did you mean 'unused-local'?");
+    assert_eq!(messages[2], "unknown diagnostic code 'undefined-globl'; did you mean 'undefined-global'?");
+}
+
+#[test]
 fn returns_without_values_that_end_a_function() {
     let source = "local function a() return end
 local function b() if a then return end end

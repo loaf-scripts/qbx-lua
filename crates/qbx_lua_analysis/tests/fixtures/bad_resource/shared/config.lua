@@ -52,3 +52,6 @@ local vector = {}
 print(vector)
 
 ---@cast missing string
+
+---@diagnostic disable-next-line: no-such-rule
+print(Config.Debug)

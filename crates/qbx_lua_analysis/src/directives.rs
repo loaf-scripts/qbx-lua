@@ -1,4 +1,4 @@
-use qbx_lua_syntax::{Comment, LineIndex};
+use qbx_lua_syntax::{Comment, LineIndex, Span};
 
 #[derive(Debug)]
 struct LineRule {
@@ -28,18 +28,19 @@ enum Action {
     DisableNextLine,
 }
 
-fn parse_directive(text: &str, own_line: bool) -> Option<(Action, Vec<String>)> {
-    let text = text.trim_start_matches('-').trim();
-    if let Some(luacheck) = text.strip_prefix("luacheck:") {
+/// What a directive comment does, and the codes it names with the byte of `text` each starts at.
+fn parse_directive(text: &str, own_line: bool) -> Option<(Action, Vec<(usize, &str)>)> {
+    let body = text.trim_start_matches('-').trim_start();
+    if let Some(luacheck) = body.strip_prefix("luacheck:") {
         let ignores = luacheck.split_whitespace().next() == Some("ignore");
         let action = if own_line { Action::Disable } else { Action::DisableLine };
         return ignores.then_some((action, Vec::new()));
     }
-    let rest = text
+    let rest = body
         .strip_prefix("qbx-lint:")
-        .or_else(|| text.strip_prefix("qbxlint:"))
-        .or_else(|| text.strip_prefix("@diagnostic"))?
-        .trim();
+        .or_else(|| body.strip_prefix("qbxlint:"))
+        .or_else(|| body.strip_prefix("@diagnostic"))?
+        .trim_start();
     // Any whitespace separates, so a non-breaking space pasted in where a space was meant still works.
     let (action, codes) = rest.split_once(|c: char| c == ':' || c.is_whitespace()).unwrap_or((rest, ""));
     let action = match action {
@@ -49,14 +50,32 @@ fn parse_directive(text: &str, own_line: bool) -> Option<(Action, Vec<String>)> 
         "disable-next-line" => Action::DisableNextLine,
         _ => return None,
     };
-    let codes = codes
-        .trim_start_matches(':')
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|c| !c.is_empty())
-        .take_while(|c| !c.starts_with("--"))
-        .map(str::to_string)
-        .collect();
+    let is_separator = |c: char| c == ',' || c.is_whitespace();
+    let mut rest = codes.trim_start_matches(':');
+    let mut codes = Vec::new();
+    loop {
+        rest = rest.trim_start_matches(is_separator);
+        if rest.is_empty() || rest.starts_with("--") {
+            break;
+        }
+        let end = rest.find(is_separator).unwrap_or(rest.len());
+        codes.push((text.len() - rest.len(), &rest[..end]));
+        rest = &rest[end..];
+    }
     Some((action, codes))
+}
+
+/// The codes that inline directive comments name, with where each is written.
+pub fn directive_codes<'s>(source: &'s str, comments: &[Comment]) -> Vec<(Span, &'s str)> {
+    let mut out = Vec::new();
+    for comment in comments {
+        let Some((_, codes)) = parse_directive(comment.span.text(source), true) else { continue };
+        for (offset, code) in codes {
+            let start = comment.span.start + offset as u32;
+            out.push((Span::new(start, start + code.len() as u32), code));
+        }
+    }
+    out
 }
 
 impl Suppressions {
@@ -69,6 +88,7 @@ impl Suppressions {
             let Some((action, codes)) = parse_directive(comment.span.text(source), before.trim().is_empty()) else {
                 continue;
             };
+            let codes: Vec<String> = codes.into_iter().map(|(_, code)| code.to_string()).collect();
             match action {
                 Action::DisableLine => out.lines.push(LineRule { line, codes }),
                 Action::DisableNextLine => out.lines.push(LineRule { line: line + 1, codes }),
@@ -136,6 +156,24 @@ function B() end",
         assert!(s.is_suppressed("undefined-global", 1));
         assert!(!s.is_suppressed("undefined-global", 3));
         assert!(s.is_suppressed("unused-local", 5));
+    }
+
+    #[test]
+    fn codes_keep_their_position() {
+        let source = "local a ---@diagnostic disable-line: unused-local,  empty-block -- why\n-- qbx-lint: disable\u{a0}fivem/loop-never-yields\n-- luacheck: ignore 211";
+        let chunk = parse(source);
+        let codes: Vec<(&str, &str)> = directive_codes(source, &chunk.comments)
+            .into_iter()
+            .map(|(span, code)| (span.text(source), code))
+            .collect();
+        assert_eq!(
+            codes,
+            [
+                ("unused-local", "unused-local"),
+                ("empty-block", "empty-block"),
+                ("fivem/loop-never-yields", "fivem/loop-never-yields")
+            ]
+        );
     }
 
     #[test]
