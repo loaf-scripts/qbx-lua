@@ -1,19 +1,27 @@
 //! `inject-field`: fields that an assignment or a `function value:name()` statement sets through a
-//! value whose type does not have them, as TypeScript reports a property its type does not
-//! declare. The type is a class, a table type such as the `{ label: string }` a table constructor
-//! gives a local, or a table that another name declares, like the rows of another file's table
-//! that a loop goes through. What is set through the names that own their tables declares the
-//! field instead, so it is never reported: a global and the paths from it, the table a `---@class`
-//! annotation declares, `self` in a method, a local declared with a table at the top of the file,
-//! and the instance a constructor makes in a local. An empty table such as `local result = {}`
-//! takes any field, and so do values of unknown type, `table` and `any`. Only names are checked,
-//! not keys held in variables, and strict classes are left to `undeclared-field`.
+//! value whose type does not have them, as lua-language-server and TypeScript report a property its
+//! type does not declare. The type is a class, or a table type that an annotation declares, such as
+//! the `{ label: string }` of a `---@type`. What is set through the names that own their tables
+//! declares the field instead, so it is never reported: a global and the paths from it, the table a
+//! `---@class` annotation declares, `self` in a method, a local declared with a table at the top of
+//! the file, and the instance a constructor makes in a local. An empty table such as
+//! `local result = {}` takes any field, and so do values of unknown type, `table` and `any`. Only
+//! names are checked, not keys held in variables, and strict classes are left to
+//! `undeclared-field`.
+//!
+//! As in lua-language-server, a table whose type no annotation declares takes any field: one a
+//! table constructor builds, what a function without `@return` returns, a loop variable over such
+//! tables, and a global or local table read through another name. With `strict`, as in TypeScript,
+//! such a table has the fields its constructor and the names that own it give it, so a table built
+//! inside a function is closed, and a field set through a loop variable over another file's tables
+//! is reported.
 
 use qbx_lua_analysis::scope::Resolved;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::Span;
 
 use super::class_tables::{accesses, Classes, Key};
+use super::comparisons::Declared;
 use crate::index::FileId;
 use crate::infer::{Decl, Infer};
 use crate::types::Type;
@@ -26,6 +34,7 @@ const MAX_HOLDER_LEN: usize = 40;
 /// `strict_classes` applies to a class declared in a file.
 pub fn injected_fields(infer: &Infer, chunk: &Chunk, by_default: impl Fn(FileId) -> bool) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
+    let annotated = Declared::annotations(infer);
     let mut out = Vec::new();
     for access in accesses(infer, chunk, false).into_iter().filter(|access| !access.on_class_table) {
         let Key::Name(name) = access.key else { continue };
@@ -36,12 +45,53 @@ pub fn injected_fields(infer: &Infer, chunk: &Chunk, by_default: impl Fn(FileId)
             Type::Union(types) => types.iter().filter(|ty| !matches!(ty, Type::Nil)).cloned().collect(),
             ty => vec![ty],
         };
-        let lacks = |ty: &Type| has(infer, &classes, ty, &access.key, name, &by_default) == Some(false);
+        let lacks = |ty: &Type| {
+            !takes_any_field(infer, &classes, &annotated, access.base, ty)
+                && has(infer, &classes, ty, &access.key, name, &by_default) == Some(false)
+        };
         if !parts.is_empty() && parts.iter().all(lacks) {
             out.push((access.span, message(infer, name, &access.owner, access.holder)));
         }
     }
     out
+}
+
+/// Whether, without `strict`, a value of type `ty` that `base` gives may have any field, as
+/// lua-language-server reads it: a table whose type no annotation declares, such as one a table
+/// constructor builds, a global or local table read through another name, and a local without an
+/// annotation that may hold a value of unknown type there, as `Player` after `local Player = ''`
+/// and `Player = GetPlayer()` does. Classes, table types that annotations declare, strings and the
+/// like have the fields their type gives them.
+pub(super) fn takes_any_field(
+    infer: &Infer,
+    classes: &Classes,
+    annotated: &Declared,
+    base: Option<&Expr>,
+    ty: &Type,
+) -> bool {
+    if infer.strict() {
+        return false;
+    }
+    if let Some(ExprKind::Name(name)) = base.map(|base| &base.unparen().kind) {
+        if let Some(Resolved::Local(id)) = infer.ctx.resolution.resolve_at(name.span.start) {
+            if infer.annotation(id).is_none() && infer.may_hold_unknown(id, name.span.start) {
+                return true;
+            }
+        }
+    }
+    let file = classes.file();
+    if classes.class_of(ty, file).is_some() {
+        return false;
+    }
+    if classes.table_type_of(ty, file).is_some() {
+        let Some(base) = base else { return true };
+        let mut parts = Vec::new();
+        classes.flatten(&annotated.of(base), file, &mut parts, 0);
+        let is_table_type =
+            |part: &Type| matches!(part, Type::Shape(_) | Type::Array(_) | Type::Map(..) | Type::Tuple(_));
+        return !parts.iter().any(is_table_type);
+    }
+    matches!(infer.resolve_alias(ty), Type::GlobalTable(_))
 }
 
 /// Whether the value written at `holder` is `self` in a method, or a path from it, whose fields the

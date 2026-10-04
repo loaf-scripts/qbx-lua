@@ -43,6 +43,7 @@ struct RawConfig {
     globals: Vec<String>,
     ignore_unused_prefix: Option<String>,
     strict_classes: bool,
+    strict: Option<bool>,
     rules: BTreeMap<String, Level>,
     overrides: Vec<RawOverride>,
     imports: Imports,
@@ -91,6 +92,7 @@ impl From<ScriptSide> for Side {
 struct RawOverride {
     files: Vec<String>,
     globals: Vec<String>,
+    strict: Option<bool>,
     rules: BTreeMap<String, Level>,
     imports: Imports,
     side: Option<ScriptSide>,
@@ -100,6 +102,7 @@ struct RawOverride {
 struct Override {
     files: GlobSet,
     globals: Vec<String>,
+    strict: Option<bool>,
     rules: BTreeMap<String, Level>,
     imports: Imports,
     side: Option<Side>,
@@ -115,6 +118,9 @@ pub struct Config {
     /// Whether a `---@class` without `(strict)` or `(loose)` is strict. Only classes declared in
     /// files whose diagnostics are reported follow it; qbx-lua-ls applies it.
     pub strict_classes: bool,
+    /// Whether the type checks of qbx-lua-ls report what TypeScript's strict mode does beyond
+    /// lua-language-server. `None` leaves it to the editor's setting.
+    strict: Option<bool>,
     pub format: qbx_lua_fmt::FormatOptions,
     /// Whether `format` comes from a `qbxlint.toml`. Editors keep their own indentation otherwise.
     pub format_configured: bool,
@@ -245,6 +251,7 @@ impl Config {
                 Ok(Override {
                     files: build_globset(o.files.iter().map(String::as_str))?,
                     globals: o.globals,
+                    strict: o.strict,
                     rules: o.rules,
                     imports: o.imports,
                     side: o.side.map(Side::from),
@@ -258,6 +265,7 @@ impl Config {
             globals: raw.globals,
             ignore_unused_prefix: raw.ignore_unused_prefix.unwrap_or_else(|| "_".to_string()),
             strict_classes: raw.strict_classes,
+            strict: raw.strict,
             format: raw.format,
             format_configured: false,
             notes: Vec::new(),
@@ -295,11 +303,13 @@ impl Config {
         let relative = self.relative(path);
         let mut rules = self.rules.clone();
         let mut globals = self.globals.clone();
+        let mut strict = self.strict;
         for entry in self.overrides.iter().filter(|o| o.files.is_match(relative)) {
             rules.extend(entry.rules.iter().map(|(k, v)| (k.clone(), *v)));
             globals.extend(entry.globals.iter().cloned());
+            strict = entry.strict.or(strict);
         }
-        FileConfig { rules, globals, ignore_unused_prefix: self.ignore_unused_prefix.clone() }
+        FileConfig { rules, globals, ignore_unused_prefix: self.ignore_unused_prefix.clone(), strict }
     }
 
     /// The configured `imports` of the resource whose manifest is `manifest_path`. The scripts of a
@@ -340,6 +350,7 @@ pub struct FileConfig {
     rules: BTreeMap<String, Level>,
     pub globals: Vec<String>,
     pub ignore_unused_prefix: String,
+    strict: Option<bool>,
 }
 
 impl Default for FileConfig {
@@ -363,6 +374,18 @@ impl FileConfig {
     /// Sets the level of a rule the configuration file leaves alone, as an editor setting does.
     pub fn set_default(&mut self, code: &str, level: Level) {
         self.rules.entry(code.to_string()).or_insert(level);
+    }
+
+    /// Whether the rules report what TypeScript's strict mode does where lua-language-server
+    /// reports nothing, such as `n + 1` for a `number?` in `need-check-nil`. Off unless the
+    /// configuration file or the editor turns it on.
+    pub fn strict(&self) -> bool {
+        self.strict.unwrap_or(false)
+    }
+
+    /// Sets `strict` unless the configuration file sets it, as an editor setting does.
+    pub fn set_strict_default(&mut self, strict: bool) {
+        self.strict.get_or_insert(strict);
     }
 }
 
@@ -395,6 +418,38 @@ mod tests {
         assert_eq!(config.for_file(Path::new("/repo/tests/a.lua")).severity("undefined-global"), None);
         assert!(!config.strict_classes);
         assert!(Config::parse("strict_classes = true", PathBuf::from("/repo")).unwrap().strict_classes);
+    }
+
+    #[test]
+    fn strict_comes_from_the_last_override_that_sets_it() {
+        let config = Config::parse(
+            r#"
+            strict = true
+            [[overrides]]
+            files = ["vendor/**"]
+            strict = false
+            [[overrides]]
+            files = ["vendor/ours/**"]
+            strict = true
+            [[overrides]]
+            files = ["vendor/ours/**"]
+            globals = ["Later"]
+            "#,
+            PathBuf::from("/repo"),
+        )
+        .unwrap();
+        let strict = |path: &str| config.for_file(Path::new(&format!("/repo/{path}"))).strict();
+        assert!(strict("client/main.lua"));
+        assert!(!strict("vendor/lib.lua"));
+        assert!(strict("vendor/ours/lib.lua"), "a later override without `strict` keeps it");
+
+        let mut file = config.for_file(Path::new("/repo/vendor/lib.lua"));
+        file.set_strict_default(true);
+        assert!(!file.strict(), "the configuration file wins over the editor");
+        let mut file = FileConfig::default();
+        assert!(!file.strict());
+        file.set_strict_default(true);
+        assert!(file.strict());
     }
 
     #[test]

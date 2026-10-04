@@ -16,6 +16,10 @@ ignore_unused_prefix = "_"
 # is reported as undeclared-field. Classes in ignore_diagnostics paths are not affected.
 strict_classes = false
 
+# Report what TypeScript's strict mode does beyond lua-language-server, such as `n + 1` for a
+# `number?`. Overrides can set it per folder. Without it, the editor's setting decides.
+strict = false
+
 # Files resources run without an fxmanifest.lua entry, for example through load(LoadResourceFile(...)).
 # Put them in an [[overrides]] entry instead to limit them to some resources.
 [imports]

@@ -1,11 +1,13 @@
 //! `need-check-nil`: a local that may hold `nil` or `false` where code reads a field of it, calls
-//! it, uses it as a key it stores a value under, does arithmetic, concatenation, `#` or a `<`, `<=`,
-//! `>` or `>=` comparison with it, or gives it as a bound of a numeric `for`, all of which raise an
-//! error for such a value. `name:upper()` after `local name = GetName()`, for a function declared
-//! to return `string?`, is one. A local that may hold `nil` is also reported where a call passes it
-//! for a parameter that does not take `nil` in any signature the call may use, as
-//! `param-type-mismatch` reads them; natives are left out, as their arguments are. lua-language-server
-//! reports those arguments as `param-type-mismatch`, so suppressing that rule silences them too.
+//! it or uses it as a key it stores a value under, all of which raise an error for such a value, as
+//! lua-language-server checks them. `name:upper()` after `local name = GetName()`, for a function
+//! declared to return `string?`, is one. With `strict`, as TypeScript does, so is arithmetic,
+//! concatenation, `#` or a `<`, `<=`, `>` or `>=` comparison with it, which raise the error too,
+//! and a bound of a numeric `for` it gives. A local that may hold `nil` is also reported where a
+//! call passes it for a parameter that does not take `nil` in any signature the call may use, as
+//! `param-type-mismatch` reads them; natives are left out, as their arguments are.
+//! lua-language-server reports those arguments as `param-type-mismatch`, so suppressing that rule
+//! silences them too.
 //!
 //! As for `impossible-comparison`, only declared types count, whatever declares them: an
 //! annotation of the local, the `@return` or `@field` of a function, class or stub, or the value
@@ -28,6 +30,9 @@
 //!   field has the type that the guards on the field leave.
 //! - A value whose type is not declared, as `name = name or 'none'` gives, and the missing value of
 //!   `local name` before something gives it one.
+//! - Without `strict`, as in lua-language-server, the `nil` that code running at other times, such
+//!   as another function, gives a local without `---@type` or `@param`, and the `nil` that the `?`
+//!   of an optional parameter of a callback adds, as `Declared` reads them.
 
 use qbx_lua_analysis::scope::{LocalKind, Resolved};
 use qbx_lua_syntax::ast::*;
@@ -182,6 +187,7 @@ fn needs_value(op: BinOp) -> bool {
 
 impl<'c> Visitor<'c> for Finder<'_, '_> {
     fn visit_stmt(&mut self, stmt: &'c Stmt) {
+        let strict = self.infer.strict();
         match &stmt.kind {
             // Storing a value under a `nil` key raises an error, while reading one gives `nil`.
             StmtKind::Assign { targets, .. } => {
@@ -191,8 +197,8 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
                     }
                 }
             }
-            StmtKind::CompoundAssign { op, expr, .. } if needs_value(*op) => self.check(expr),
-            StmtKind::NumericFor { start, limit, step, .. } => {
+            StmtKind::CompoundAssign { op, expr, .. } if strict && needs_value(*op) => self.check(expr),
+            StmtKind::NumericFor { start, limit, step, .. } if strict => {
                 for bound in [Some(start), Some(limit), step.as_ref()].into_iter().flatten() {
                     self.check(bound);
                 }
@@ -209,8 +215,10 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
             | ExprKind::Index { base, safe: false, .. }
             | ExprKind::MethodCall { base, safe: false, .. } => self.check(base),
             ExprKind::Call { callee, .. } => self.check(callee),
-            ExprKind::Unary { op: UnOp::Len | UnOp::Neg | UnOp::BNot, expr: operand } => self.check(operand),
-            ExprKind::Binary { op, lhs, rhs, .. } if needs_value(*op) => {
+            ExprKind::Unary { op: UnOp::Len | UnOp::Neg | UnOp::BNot, expr: operand } if self.infer.strict() => {
+                self.check(operand)
+            }
+            ExprKind::Binary { op, lhs, rhs, .. } if self.infer.strict() && needs_value(*op) => {
                 self.check(lhs);
                 self.check(rhs);
             }

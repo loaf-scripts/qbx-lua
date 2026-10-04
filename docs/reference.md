@@ -26,6 +26,7 @@ ignore_diagnostics = ['\[standalone\]/', 'third_party/']
 globals = ["SomeRuntimeGlobal"]
 ignore_unused_prefix = "_"
 strict_classes = false
+strict = false
 
 [rules]
 "unused-argument" = "off"
@@ -55,8 +56,9 @@ quote_style = "preserve"
 | `imports` | Files every resource runs without an fxmanifest.lua entry, grouped as `shared`, `client` and `server`. See [Runtime imports](#runtime-imports). |
 | `ignore_unused_prefix` | Locals and arguments with this prefix are exempt from unused checks; defaults to `_`. |
 | `strict_classes` | Makes every `---@class` without `(loose)` strict, as if it said `(strict)`. Only classes declared in files whose diagnostics are reported follow it. See [Strict classes](#strict-classes). Defaults to `false`. |
+| `strict` | Makes the type rules of qbx-lua-ls report what TypeScript's strict mode does beyond lua-language-server, such as `n + 1` for a `number?`. See [Strict mode](#strict-mode). Defaults to the editor's setting, which is `false` unless it is turned on. |
 | `rules` | Per-rule levels: `off`, `hint`, `info`, `warning` (or `warn`), and `error`. |
-| `overrides` | Per-file globals, rule levels and `side`, selected by the `files` patterns, and imports for the resources whose `fxmanifest.lua` the patterns match. Later matching overrides take precedence for rule levels and sides. See [Sides of unlisted scripts](#sides-of-unlisted-scripts). |
+| `overrides` | Per-file globals, rule levels, `strict` and `side`, selected by the `files` patterns, and imports for the resources whose `fxmanifest.lua` the patterns match. Later matching overrides take precedence for rule levels, `strict` and sides. See [Sides of unlisted scripts](#sides-of-unlisted-scripts). |
 | `format` | Formatting options, shown with their defaults above. |
 
 The default exclusions include `node_modules`, `.git`, and `[builders]` directory contents.
@@ -109,8 +111,10 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | `workspace.ignoreGlobs` | Exclusions, as glob patterns |
 
 Codes that only share a name with a rule here, such as `deprecated`, are ignored, as are all other
-settings. Keys may be dotted (`"diagnostics.globals"`), nested, or prefixed with `Lua.`. Comments
-and trailing commas are accepted. Formatting keeps its defaults; in the language server, the
+settings. None of them stands for [`strict`](#strict-mode): LuaLS's `type.weakNilCheck` and
+`type.weakUnionCheck` only make its checks laxer than its defaults. Keys may be dotted
+(`"diagnostics.globals"`), nested, or prefixed with `Lua.`. Comments and trailing commas are
+accepted. Formatting keeps its defaults; in the language server, the
 editor's indentation settings still apply. Discovery skips a file or
 exclusion pattern it cannot read and says so on stderr; pass the file with `--config` to make that
 an error.
@@ -296,6 +300,60 @@ The globals of well-known imports, such as `lib` or `MySQL`, are reported by
 above the workspace or library root that holds a file do not count for its side or resource. The
 CLI does not read definition files outside resources.
 
+## Strict mode
+
+By default the type rules of qbx-lua-ls report what lua-language-server reports on the same code.
+`strict = true` in `qbxlint.toml`, or `diagnostics.strict` in the editor's settings
+(`qbxLua.diagnostics.strict` in VS Code), makes them also report what TypeScript's strict mode
+reports, for code that wants more checks. A `strict` in `qbxlint.toml`, also one that an
+`[[overrides]]` entry sets for some files, takes precedence over the editor's. It changes how rules
+check, not which ones run: rules that are off by default, such as `no-unknown`, are turned on in
+`[rules]`.
+
+```toml
+strict = true
+
+[[overrides]]
+files = ["resources/[standalone]/**"]
+strict = false
+```
+
+With `strict`:
+
+- `need-check-nil` also reports arithmetic, concatenation, `#` and a `<`, `<=`, `>` or `>=`
+  comparison with a value that may be `nil`, and a numeric `for` bound that may be. An item that a
+  loop from 1 to the `#` of a table reads, as `rows[i]` in `for i = 1, #rows do`, has the type the
+  table declares for it, `nil` included, and a function without `@return` also gives the `nil` of
+  running past the end of its body, and that of a `return nil` when it is called through `exports`.
+  See [Nil checks](#nil-checks).
+- A local without `---@type` or `@param` may hold the `nil` that code running at other times gives
+  it, such as `coords = nil` in another function, and a parameter of a callback marked optional,
+  such as the `body?: string` of `PerformHttpRequest`, may hold `nil`. lua-language-server leaves
+  both out, and so do `need-check-nil` and `param-type-mismatch` without `strict`.
+- `param-type-mismatch` counts the `nil` and `false` of a value read from a field or a key, as
+  `self.handle` for a `handle? number`, which lua-language-server leaves out because it does not
+  narrow fields, and so do `assign-type-mismatch` and `return-type-mismatch`. A native takes no
+  number or boolean for a string parameter, also one written out or a player's server id, and
+  numbers and booleans no longer pass for each other. See [Function arguments](#function-arguments).
+- `assign-type-mismatch` reports `field = nil` for a field whose type does not allow `nil`. See
+  [Return values](#return-values).
+- `unreachable-code` reports the code after a call of `error` or `os.exit` of its own, as
+  TypeScript reports the code after a `throw`.
+- `cast-local-type` reports clearing a local declared with a table, as `cache = nil` after
+  `local cache = {}`, the `nil` or `false` of a field, as in `total = counter.count`, and a `nil`
+  that no annotation declares, such as one a function without `@return` gives. It
+  also checks the parameters of a function passed for a function type. See [Local types](#local-types).
+- `missing-fields` requires the fields of shapes, such as `{ name: string }` and the aliases of
+  them, and of classes given type arguments, such as `List<string>`. See
+  [Typed variables](#typed-variables).
+- `inject-field` and `undefined-field` check tables whose type no annotation declares. A table that
+  a constructor builds has the fields that it and the names that own it give it, so one built
+  inside a function is closed, a field set through a loop variable over such tables is an
+  `inject-field`, and a field set through a local is still missing from the local's type where it
+  is read. A local without an annotation that is given a value of unknown type keeps the type it is
+  declared with, so `Player.PlayerData` after `local Player = ''` and `Player = GetPlayer()` reads
+  a `string`. See [Injected fields](#injected-fields) and [Undefined fields](#undefined-fields).
+
 ## Function arguments
 
 `missing-parameter` compares calls with the LuaCATS annotations of the function they call. A
@@ -398,7 +456,12 @@ change, so it passes for `"fast" | "slow"`, while `local count = 5` is still no 
 As in LuaLS, `nil`, written out or as the `?` of a `string?`, needs a parameter that takes it: one
 marked optional, or typed with `nil`, `any` or `unknown`. A guard such as `if name then` rules the
 `nil` out first. `false` is a `boolean` like any other, also where code passes it to skip a
-parameter, as in `AddItem(source, item, 1, false, info)`.
+parameter, as in `AddItem(source, item, 1, false, info)`. Also as in LuaLS, the `nil` and `false`
+of an argument read from a field or a key, as `self.handle` or `data['name']`, and of `self` are
+left out, as no guard narrows them for it, and so is the `nil` that the `?` of an optional
+parameter of a callback adds, as for `body` in
+`PerformHttpRequest(url, function(status, body) json.decode(body) end)`. With
+[`strict`](#strict-mode), as in TypeScript, both count.
 
 ```lua
 ---@param name string
@@ -420,6 +483,9 @@ Natives are checked as the runtime passes their arguments on:
   parameter for the server id of a player, such as the `playerSrc` of `DropPlayer`, takes any
   number. Other numbers and booleans are reported: `ReleaseNamedRendertarget(GetHashKey(name))`
   passes a hash, not the name.
+- With [`strict`](#strict-mode), as TypeScript reads the declared types, numbers and booleans no
+  longer pass for each other, and a string parameter takes no number or boolean at all, while `nil`,
+  hashed strings and vectors still pass.
 - A hash parameter takes a string, which the wrappers hash.
 - A vector fills a number parameter for each of its parts, as in `SetEntityCoords(ped, coords, ...)`.
   The values after a value of unknown type that may be a vector are not checked when the call
@@ -534,9 +600,13 @@ that holds the same table. Hover and completion leave such fields out, and lua-l
 leaves them out of a class too.
 
 `inject-field` reports the fields that assignments and `function value:name()` statements set
-through a value whose type does not have them: a class, a table type such as the `{ label: string }`
-a table constructor gives, or a table declared under another name, as TypeScript and
-lua-language-server do. To turn it off:
+through a value whose type does not have them: a class, or a table type that an annotation
+declares, such as `---@type { label: string }`, as lua-language-server and TypeScript do. As in
+lua-language-server, a table whose type no annotation declares takes any field: one a table
+constructor builds, what a function without `@return` returns, a loop variable over such tables,
+and a global or local table read through another name, as `local cfg = Config`. With
+[`strict`](#strict-mode), as in TypeScript, such a table has the fields that its constructor and the
+names that own it give it, so a table built inside a function is closed. To turn it off:
 
 ```toml
 [rules]
@@ -560,28 +630,31 @@ end
 
 local rows = { { label = 'a' }, { label = 'b' } }
 for _, row in pairs(rows) do
-    row.count = 0 -- inject-field: Field `count` is not declared in `{ label: string }`
+    row.count = 0 -- with `strict`: Field `count` is not declared in `{ label: string }`
 end
 ```
 
 An empty table, such as `local result = {}`, takes any field, and so do values of unknown type,
 `table` and `any`. Keys held in variables are not checked, and strict classes are left to
-`undeclared-field`. lua-language-server's `inject-field` checks classes only, and its
-`---@diagnostic disable: inject-field` comments and `diagnostics.disable` entries apply here too.
+`undeclared-field`. lua-language-server's `---@diagnostic disable: inject-field` comments and
+`diagnostics.disable` entries apply here too.
 
 ## Undefined fields
 
-`undefined-field` reports a field read from a value whose type does not have it, as TypeScript
-reports a property its type does not declare. Outside the language server it covers the standard
-library tables, such as `string.nope`. In qbx-lua-ls it also covers values whose type the language
-server knows, with the fields that `inject-field` lets code set: those a class or table type
-declares, including the `{ label: string }` a table constructor gives, and those set through the
-names that own a table. Reads with `.`, `['name']` and `:` count, also in conditions such as
-`if point.z then`. A union lacks a field when none of its parts has it, and a local that is
-assigned again has the types of all the values that may reach the read. A value that is surely
-`nil` has no fields at all: what a call of a function that returns nothing gives, as a function
-whose body has no `return` with a value does, and a local declared with such a call, `nil` or no
-value that is never assigned again.
+`undefined-field` reports a field read from a value whose type does not have it, as
+lua-language-server and TypeScript report a property its type does not declare. Outside the
+language server it covers the standard library tables, such as `string.nope`. In qbx-lua-ls it also
+covers values whose type the language server knows, with the fields that `inject-field` lets code
+set: those a class or table type declares and those set through the names that own a table, and,
+as in lua-language-server, a field that the code sets through a local is one that local has, also
+where `inject-field` reports setting it. With [`strict`](#strict-mode), as in TypeScript, the table
+that a constructor builds has the fields it and its owners give it, such as the `{ label: string }`
+of `{ label = 'a' }`, and a field set through a local is still missing from its type. Reads with
+`.`, `['name']` and `:` count, also in conditions such as `if point.z then`. A union lacks a field
+when none of its parts has it, and a local that is assigned again has the types of all the values
+that may reach the read. A value that is surely `nil` has no fields at all: what a call of a
+function that returns nothing gives, as a function whose body has no `return` with a value does,
+and a local declared with such a call, `nil` or no value that is never assigned again.
 
 ```lua
 ---@class Point
@@ -595,7 +668,7 @@ end
 
 local rows = { { label = 'a' }, { label = 'b' } }
 for _, row in pairs(rows) do
-    print(row.count) -- undefined-field: Field `count` is not declared in `{ label: string }`
+    print(row.count) -- with `strict`: Field `count` is not declared in `{ label: string }`
 end
 ```
 
@@ -603,6 +676,9 @@ Some values may have any field, so reads from them are not checked:
 
 - values of unknown type, `table` and `any`, empty tables such as `local result = {}`, and classes
   with an index that takes the name or a parent that is no class, such as `table`;
+- without `strict`, tables whose type no annotation declares, as for `inject-field`, and locals
+  without an annotation that may hold a value of unknown type, as `Player` does after
+  `local Player = ''` and `Player = GetPlayer()`;
 - global tables and the paths from them, such as `Config.debug` or `ESX.PlayerData`, whose fields
   other files and resources set, and the instances made from them, unless an annotation types them;
   the exports of a resource are checked only against a type declared for them, as `---@type
@@ -612,8 +688,9 @@ Some values may have any field, so reads from them are not checked:
 - numbers, booleans and functions whose type is only inferred, not declared;
 - strict classes, whose fields `undeclared-field` checks.
 
-lua-language-server's `undefined-field` does not check tables built from table constructors, and
-it counts a field set through any value of a class, which `inject-field` reports instead. Its
+Like qbx-lua-ls without `strict`, lua-language-server's `undefined-field` does not check tables
+built from table constructors. It counts a field set through any value of a class, which
+qbx-lua-ls counts only for the local it is set through, and which `inject-field` reports. Its
 `---@diagnostic disable: undefined-field` comments and `diagnostics.disable` entries apply here too,
 also to the standard library tables. To turn it off:
 
@@ -683,7 +760,7 @@ function written in a table, whose doc comment goes above its field. qbx-lua-ls 
   different kind of value, such as `return 5` for `---@return string`, or a literal the type does
   not list. Each type a union lists has to fit, `nil` included, so `return maybe()` is no `number`
   for a `maybe` that returns a `number?`; the `nil` that the type of a field read allows does not
-  count, as lua-language-server reads fields. A trailing `---@return ...string`, or
+  count, as lua-language-server reads fields, unless [`strict`](#strict-mode) asks for it. A trailing `---@return ...string`, or
   `---@return string ...`, covers every further value.
 - `missing-return` for a `return` with fewer values than the function requires, and at the `end`
   of a function whose body can run past it without returning. A value is required unless its type
@@ -732,8 +809,9 @@ the locals a call declares; see its [type guards](../crates/qbx_lua_ls/README.md
 Only clear cases count. Values whose type is not known are skipped, including a local that one of
 the values that may reach the `return` leaves without a known type; see
 [locals that are assigned again](../crates/qbx_lua_ls/README.md#locals-that-are-assigned-again). The
-same applies to the values `assign-type-mismatch` checks, where `nil` is a value like any other:
-`abc.field = nil` needs a field type that allows it, such as `string?` or `string|nil`.
+same applies to the values `assign-type-mismatch` checks. `abc.field = nil` clears any field, as in
+lua-language-server; with [`strict`](#strict-mode), as in TypeScript, only one whose type allows
+`nil`, such as `string?` or `string|nil`.
 
 `discard-returns` reports a call on a line of its own whose function is marked `@nodiscard`, as
 its values are what it is called for. The runtime stubs mark the functions that only compute a
@@ -805,20 +883,23 @@ lua-language-server, such a table may set fields its type does not name, and the
 typed as a union are not checked.
 
 `missing-fields` reports a table typed as a shape that leaves out a field the shape requires, one
-without `?` whose type does not allow `nil`, as TypeScript does and lua-language-server does not.
-The tables that an array, a `table<K, V>` or a tuple holds need the fields of the type of their
-entry, so the `{}` of `{ {} }` for `Dog[]` and of `{ rex = {} }` for `table<string, Dog>` are
+without `?` whose type does not allow `nil`, only with [`strict`](#strict-mode), as TypeScript does
+and lua-language-server does not. The same goes for a class given type arguments, as
+`---@type List<string>`, while `---@type List` requires the fields of `List` in both modes. The
+tables that an array, a `table<K, V>`, a tuple or a shape holds need the fields of the type of
+their entry, so the `{}` of `{ {} }` for `Dog[]` and of `{ rex = {} }` for `table<string, Dog>` are
 reported, as in both. An entry whose key the type does not take, like the `{}` of `{ {} }` for
 `table<string, Dog>`, is not checked.
 
 A table typed as a union of classes and shapes needs the required fields of one of them, and the
-report has a line for each, as lua-language-server's does. Types that hold no table are left out,
-so a table for `Dog|string` needs the fields of `Dog`, and as in TypeScript, a union that also
-lists an array, a `table<K, V>`, a tuple or a type that takes any table, such as `table` or `any`,
-is not reported. A table that a table typed as a union holds, like the `{}` of `{ pet = {} }`,
-needs the fields of one of the types that its members declare for its key, as `Dog|Cat` for an
-entry of `Dog[]|Cat[]`. As in TypeScript and unlike in lua-language-server, the tables held by one
-that may be a `table` or `any`, as for `Dog[]|table`, are not checked.
+report has a line for each, as lua-language-server's does. Without `strict`, a shape requires no
+field, so a union that lists one is not reported, as in lua-language-server. Types that hold no
+table are left out, so a table for `Dog|string` needs the fields of `Dog`, and as in TypeScript, a
+union that also lists an array, a `table<K, V>`, a tuple or a type that takes any table, such as
+`table` or `any`, is not reported. A table that a table typed as a union holds, like the `{}` of
+`{ pet = {} }`, needs the fields of one of the types that its members declare for its key, as
+`Dog|Cat` for an entry of `Dog[]|Cat[]`. As in TypeScript and unlike in lua-language-server, the
+tables held by one that may be a `table` or `any`, as for `Dog[]|table`, are not checked.
 
 ## Local types
 
@@ -843,24 +924,30 @@ name = 5      -- Cannot assign `integer` to `name`, defined as `string?`
 ```
 
 The check is that of `assign-type-mismatch`, for each type the value may be: a different kind of
-value, or a literal the type does not list. So a `string?` needs a local that may be `nil`, and
-clearing a local with `nil` needs a type that allows it, also for a table, as in TypeScript and
-unlike in lua-language-server. A local that starts as `false` or `true` is a `boolean`, and one
-declared with a table constructor takes any table. A literal that a function declares it returns,
-as the `"a"|"b"` of `---@return "a"|"b"`, is one of the only values its local takes, while a literal
-written out, also through `and` and `or`, widens to its kind. Each name of an assignment is checked
-against its own local, also inside the functions that a local is assigned in.
+value, or a literal the type does not list. So a `string?` needs a local that may be `nil`, and so
+does clearing a local with `nil`, but as in lua-language-server, a local declared with a table
+constructor may be cleared. A value read from a field or a key has no `nil` or `false` for the
+check, as lua-language-server does not narrow fields, and only a `nil` that an annotation or a stub
+declares counts: lua-language-server leaves out the one a function without `@return` gives, as
+`nextFreePoint()` does by running past its end when it finds none, also where a local passes it on.
+With [`strict`](#strict-mode), as in TypeScript, all of those count. A local that starts as `false`
+or `true` is a `boolean`, and one declared with a table constructor takes any table. A literal that
+a function declares it returns, as the `"a"|"b"` of `---@return "a"|"b"`, is one of the only values
+its local takes, while a literal written out, also through `and` and `or`, widens to its kind. Each
+name of an assignment is checked against its own local, also inside the functions that a local is
+assigned in.
 
 A local declared without a value, as `nil`, or with a value of unknown type or `any`, takes any
-value, and so do `_`, `self` and parameters without `@param`. A loop variable has the type its loop
-gives it, such as the `integer` of `for i, v in ipairs(list)`, and a parameter of a function passed
-for a function type, such as the handler of `fun(id: integer)`, has the type the function type
-declares, as in TypeScript. Locals with a `---@type` or `@param` are left to
-[`assign-type-mismatch`](#typed-variables), and `<const>` and `<close>` locals to `const-reassign`.
-A `---@cast` changes what a local holds from its line on, but not the type it is declared with, as
-in lua-language-server, so assigning a value of the cast type is still reported; a `---@type` above
-an assignment is the type of the value it stores. A `BOOL` that a native returns may be a boolean
-or an integer, so either passes for the other where a native gives it.
+value, and so do `_`, `self` and parameters without `@param`, as in lua-language-server. A loop
+variable has the type its loop gives it, such as the `integer` of `for i, v in ipairs(list)`. With
+`strict`, a parameter of a function passed for a function type, such as the handler of
+`fun(id: integer)`, has the type the function type declares, as in TypeScript. Locals with a
+`---@type` or `@param` are left to [`assign-type-mismatch`](#typed-variables), and `<const>` and
+`<close>` locals to `const-reassign`. A `---@cast` changes what a local holds from its line on, but
+not the type it is declared with, as in lua-language-server, so assigning a value of the cast type
+is still reported; a `---@type` above an assignment is the type of the value it stores. A `BOOL`
+that a native returns may be a boolean or an integer, so either passes for the other where a native
+gives it.
 
 ## Casts
 
@@ -996,11 +1083,12 @@ not reported again: typing the local types the value.
 
 ## Nil checks
 
-`need-check-nil` reports a local that may hold `nil` where code indexes it, calls it, stores a value
-under it as a key, uses it in arithmetic, concatenation, `#` or a `<`, `<=`, `>` or `>=` comparison,
-or gives it as a bound of a numeric `for`, all of which raise an error for a missing value, as
-TypeScript and lua-language-server do. `==` and `~=` compare any values and are not reported. To
-turn it off:
+`need-check-nil` reports a local that may hold `nil` where code indexes it, calls it or stores a
+value under it as a key, all of which raise an error for a missing value, as lua-language-server
+does. With [`strict`](#strict-mode), as in TypeScript, so does using it in arithmetic,
+concatenation, `#` or a `<`, `<=`, `>` or `>=` comparison, or giving it as a bound of a numeric
+`for`, which raise the error too. `==` and `~=` compare any values and are not reported. To turn it
+off:
 
 ```toml
 [rules]
@@ -1016,8 +1104,9 @@ print(name:upper()) -- `name` may be nil: its type here is `string?`
 print(name:lower()) -- `name` may be nil: its type here is `string?`
 ```
 
-As TypeScript does for a value that may be `undefined`, every such read is reported, also after one
-that would raise the error first, until a guard or cast rules the missing value out.
+As TypeScript and lua-language-server do for a value that may be missing, every such read is
+reported, also after one that would raise the error first, until a guard or cast rules the missing
+value out.
 
 A local may hold `nil` when its declared type allows it: its `---@type` or `@param`, the
 `@return` or `@field` of the function or class its value comes from, the value type of a map or an
@@ -1026,9 +1115,12 @@ of a function passed to a call, what the callee declares for it, whoever declare
 other resources included. `false`, as in `false|string`, counts as well. A function without
 `@return` declares the `nil` or `false` that one of its `return`s writes out or leaves out, as
 `return`, `return nil` or `return print(...)` do, as lua-language-server infers it; running past
-the end of its body does not count, nor does the `nil` that the type of another value it returns
-may hold. In a loop from 1 to the `#` of a table, or back, as `for i = 1, #rows do`, `rows[i]` is
-an item the table holds, which is not `nil`. The
+the end of its body does not count, unless [`strict`](#strict-mode) asks for what TypeScript
+infers, nor does the `nil` that the type of another value it returns may hold. Nor do they count
+for a function called through `exports`, as `exports['qb-core']:GetPlayer(source)`, unless with
+`strict`: lua-language-server does not see what resources export. In a loop from 1 to
+the `#` of a table, or back, as `for i = 1, #rows do`, `rows[i]` is an item the table holds, which
+is not `nil`, except with `strict`, as TypeScript reads the declared type of an item. The
 [type guards](../crates/qbx_lua_ls/README.md#type-guards) and casts around the read narrow the
 type first, so `if not name then return end`, `if name then`, `name and name:upper()`,
 `assert(name)` and `---@cast name -?` all check it, as does a condition that reads from it, such as
@@ -1072,13 +1164,15 @@ Only clear cases count, and the rest is left alone:
   is checked with the values that reach the read, as described for
   [locals that are assigned again](../crates/qbx_lua_ls/README.md#locals-that-are-assigned-again),
   and `local name` declares no missing value: only the values given later count.
+- Without `strict`, as in lua-language-server, the `nil` that code running at other times gives a
+  local without `---@type` or `@param`: `coords = nil` in one function leaves `coords.x` in another,
+  or after a call that may yield such as `Wait(0)`, unchecked, while a `nil` assigned in the same
+  function counts. So is the `nil` that the `?` of an optional parameter of a callback adds, as for
+  the `body` of `PerformHttpRequest`.
 
 Guards only narrow the code after them, so a read inside a function defined before the guard is
 reported, as `return name:upper()` is in a `local function` above `if not name then return end`:
 the function may run before the guard does. lua-language-server reports it as well.
-
-Unlike lua-language-server, qbx-lua-ls also checks arithmetic, concatenation, `#`, `<`, `<=`, `>`,
-`>=` and `for` bounds.
 
 ## Missing documentation
 

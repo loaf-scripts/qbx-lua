@@ -92,7 +92,7 @@ impl Finder<'_, '_> {
                 }
                 continue;
             }
-            let given = checked_value(value_at(exprs, index), given);
+            let given = checked_value(self.infer, value_at(exprs, index), given);
             if let Some(part) = self.classes.rejected_part(expected, from, &given) {
                 let shown = self.classes.shown(expected, from, &given, &part);
                 let name = target.name.text(self.infer.ctx.source);

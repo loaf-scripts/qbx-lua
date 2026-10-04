@@ -40,7 +40,7 @@ local HttpRequestOptions = {}
 
 ---Starts an asynchronous HTTP request. The callback receives the status code, the response body (nil on failure), the response headers and an error description when the request failed.
 ---@param url string
----@param cb fun(status: integer, body: string?, headers: table<string, string>, errorData: string?)
+---@param cb fun(status: integer, body?: string, headers: table<string, string>, errorData?: string)
 ---@param method? string
 ---@param data? string
 ---@param headers? table<string, string>

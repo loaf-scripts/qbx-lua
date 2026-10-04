@@ -1745,6 +1745,21 @@ print(1)";
 }
 
 #[test]
+fn code_after_error_is_unreachable_with_strict() {
+    let source = "local function f() error('x') print(1) end
+local function g() os.exit(1) print(1) end
+local function error() end
+local function h() error() print(1) end
+print(f, g, h)";
+    assert_eq!(reported_lines(source, "unreachable-code"), Vec::<u32>::new(), "as in lua-language-server");
+    let mut config = FileConfig::default();
+    config.set_strict_default(true);
+    let lines: Vec<u32> =
+        findings_with(source, "unreachable-code", &config).into_iter().map(|(line, _)| line).collect();
+    assert_eq!(lines, [1, 2], "with `strict`, as TypeScript reports the code after a `throw`");
+}
+
+#[test]
 fn table_entries_called_with_arguments_on_the_next_line() {
     let source = "local list = {
     print

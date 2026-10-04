@@ -11,7 +11,10 @@
 //! `---@callback` wrapper call is compared with the handlers registered under its name.
 //!
 //! As in LuaLS, `nil`, and a value whose type allows it like a `string?`, needs a parameter that takes
-//! `nil`, and `false` is a boolean like any other.
+//! `nil`, and `false` is a boolean like any other. Also as in LuaLS, the `nil` and `false` that a
+//! value read from a field or a key, such as `self.handle` or `list[1]`, or `self` itself allows are
+//! left out, as no guard narrows those for it; with `strict` they count too, as TypeScript reads
+//! them.
 //!
 //! Natives are checked as the runtime passes their arguments on: numbers and booleans pass for each
 //! other, as a `BOOL` is an integer to them, a hash parameter hashes a string, and a vector fills
@@ -19,7 +22,10 @@
 //! NULL for string parameters, and only for those, and other values into their text, so a string
 //! parameter takes a number or a boolean written out, and the server id of a player, but not
 //! another number, such as a hash. A value of unknown type that may be a vector leaves where the
-//! values after it go unknown, when the call passes fewer values than the native takes.
+//! values after it go unknown, when the call passes fewer values than the native takes. With
+//! `strict`, as TypeScript reads the declared types, numbers and booleans no longer pass for each
+//! other, and a string parameter takes no number or boolean, also one written out, while `nil`,
+//! hashed strings and vectors still pass as the runtime takes them.
 //!
 //! Parameters typed with a generic of the function called are left out, as the arguments of the
 //! call bind them. The function a callee passes to a callback, such as `resolve` of
@@ -29,7 +35,7 @@
 
 use std::sync::Arc;
 
-use qbx_lua_analysis::scope::Resolved;
+use qbx_lua_analysis::scope::{LocalKind, Resolved};
 use qbx_lua_analysis::signature::{most_arguments, Requirement};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
@@ -159,7 +165,14 @@ impl Calls<'_, '_> {
 
     /// The declared type of an argument, or the type a `--[[@as T]]` right after it gives it.
     fn value(&self, arg: &Expr) -> Type {
-        self.infer.cast_after(arg.span.end).unwrap_or_else(|| self.declared.of(arg))
+        if let Some(cast) = self.infer.cast_after(arg.span.end) {
+            return cast;
+        }
+        let ty = self.declared.of(arg);
+        match self.infer.strict() || !(reads_field(arg) || is_self(self.infer, arg)) {
+            true => ty,
+            false => self.infer.without_falsy(&ty),
+        }
     }
 
     /// Reports the arguments that the signature closest to taking them does not take, unless one of
@@ -206,7 +219,7 @@ impl Calls<'_, '_> {
                 }
             }
             let message = match native {
-                true => native_mismatch(&self.classes, param, arg, given),
+                true => native_mismatch(&self.classes, param, arg, given, self.infer.strict()),
                 false => mismatch(&self.classes, fun, param, given),
             };
             out.extend(message.map(|message| (arg.span, message)));
@@ -242,6 +255,19 @@ impl Calls<'_, '_> {
             ty => parts(&ty),
         }
     }
+}
+
+/// Whether `expr` reads a field or a key, as `self.handle` and `list[1]` do. lua-language-server
+/// leaves the `nil` and `false` of such a value out of its type checks, as it does not narrow it.
+pub fn reads_field(expr: &Expr) -> bool {
+    matches!(expr.unparen().kind, ExprKind::Field { safe: false, .. } | ExprKind::Index { safe: false, .. })
+}
+
+/// Whether `expr` is the `self` of a method defined with `:`.
+fn is_self(infer: &Infer, expr: &Expr) -> bool {
+    let ExprKind::Name(name) = &expr.unparen().kind else { return false };
+    let Some(Resolved::Local(id)) = infer.ctx.resolution.resolve_at(name.span.start) else { return false };
+    infer.ctx.resolution.local(id).kind == LocalKind::ImplicitSelf
 }
 
 /// The signatures that a call of `base`, or of its `method`, with `args` may use: those of each
@@ -334,7 +360,7 @@ pub fn mismatch(classes: &Classes, fun: &FunType, param: &Param, given: &Type) -
 /// boolean written out, and the number of a player's server id; other numbers and booleans, such as
 /// the hash that `GetHashKey` gives, are no string it is meant to get. Each type a union lists has
 /// to pass.
-fn native_mismatch(classes: &Classes, param: &Param, arg: &Expr, given: &Type) -> Option<String> {
+fn native_mismatch(classes: &Classes, param: &Param, arg: &Expr, given: &Type, strict: bool) -> Option<String> {
     let expected = expected(param);
     if matches!(given, Type::Unknown | Type::Any) {
         return None;
@@ -345,13 +371,15 @@ fn native_mismatch(classes: &Classes, param: &Param, arg: &Expr, given: &Type) -
     }
     let given = given.without_nil();
     let written = is_literal(arg) || PLAYER_ID_PARAMS.contains(&param.name.as_str());
+    // With `strict`, as TypeScript reads a declared type, a number or a boolean is no string, and
+    // a `BOOL` is no number.
     let converts = |part: &Type| {
         let converted = |kind: Type| !classes.rejects(&kind, from, part);
         match expected {
-            Type::String => written && (converted(Type::Number) || converted(Type::Boolean)),
+            Type::String => !strict && written && (converted(Type::Number) || converted(Type::Boolean)),
             Type::Handle(name) if name == "Hash" => converted(Type::String) || converted(Type::Boolean),
-            Type::Number | Type::Integer | Type::Handle(_) => converted(Type::Boolean),
-            Type::Boolean => converted(Type::Number),
+            Type::Number | Type::Integer | Type::Handle(_) => !strict && converted(Type::Boolean),
+            Type::Boolean => !strict && converted(Type::Number),
             _ => false,
         }
     };

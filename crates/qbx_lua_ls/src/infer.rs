@@ -102,6 +102,8 @@ struct Returned {
     /// For values inferred from the `return`s of a body, what those `return`s alone pass, without
     /// the `nil` of a body that runs past its end.
     inferred: Option<Vec<Type>>,
+    /// An annotation gives the values, also as the generics bound from the arguments make them.
+    annotated: bool,
 }
 
 pub enum Decl<'a> {
@@ -554,6 +556,8 @@ pub struct Infer<'a> {
     /// The functions of this file whose types are inferred for the index, by the name that declares
     /// each and its range, as `typing` sets them.
     typing: RefCell<Vec<(SmolStr, Range)>>,
+    /// Whether the diagnostics this inference serves follow `strict`; see `Infer::strict`.
+    strict: bool,
 }
 
 /// Natives call their handles `Vehicle`, `Ped` and so on. They are integers, and resources (ox_lib,
@@ -604,7 +608,22 @@ impl<'a> Infer<'a> {
             depth: Cell::new(0),
             truncated: Cell::new(false),
             typing: RefCell::new(Vec::new()),
+            strict: false,
         }
+    }
+
+    /// An inference for the diagnostics of a file whose configuration sets `strict` so.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// Whether the diagnostics of the file follow the `strict` setting, reporting what TypeScript's
+    /// strict mode reports where lua-language-server does not, such as `n + 1` for a `number?`.
+    /// Rules that check something only in strict mode, or less of it outside, ask here. Only the
+    /// diagnostics set it: what the index, hover and completion infer never depends on it.
+    pub fn strict(&self) -> bool {
+        self.strict
     }
 
     /// Runs `infer` while the function that `name` at `range` declares in this file is the one
@@ -800,6 +819,24 @@ impl<'a> Infer<'a> {
     pub fn known_local_type_at(&self, id: LocalId, offset: u32) -> Type {
         let origin = |origin| self.origin_bases(id, origin).map(|bases| self.with_metatables_all(id, offset, bases));
         self.narrowed_with(id, offset, &origin, true)
+    }
+
+    /// Whether an assignment may give the local `id` a value of unknown type that reaches its read at
+    /// `offset`. `origin_type` gives such a value the type the local is declared with, as the type of
+    /// `local name = ''` stays a `string` in TypeScript, while lua-language-server reads the local as
+    /// unknown there.
+    pub fn may_hold_unknown(&self, id: LocalId, offset: u32) -> bool {
+        let flow = self.ctx.flow();
+        let unknown = |origin: u32| {
+            let Origin::Assignment { stmt, index } = flow.origin(origin) else { return false };
+            let StmtKind::Assign { exprs, .. } = &stmt.kind else { return false };
+            self.ctx.doc_at(stmt.span.start).type_at(index).is_none()
+                && assigned_value(exprs, index, |expr| self.expr(expr), |expr| self.expr_multi(expr)).is_unknown()
+        };
+        flow.at(id, offset).iter().any(|value| match flow.origin(value.origin) {
+            Origin::Others(set) => flow.others(set).iter().any(|origin| unknown(*origin)),
+            _ => unknown(value.origin),
+        })
     }
 
     /// `bases`, the types of values of the local `id`, with what the `setmetatable` calls on the local
@@ -1480,7 +1517,9 @@ impl<'a> Infer<'a> {
     /// parameter is a `` `T` ``. A generic they leave unbound is unknown: the values the call passes
     /// bind it otherwise, which tells nothing declared. So is the parameter when the signatures that
     /// the call fits equally well, such as two `@overload`s for the same action, type it differently.
-    /// `None` when a `@param` line types the parameter.
+    /// The `?` of an optional parameter, as the `body?: string` that `PerformHttpRequest` passes,
+    /// adds `nil` only with `strict`: lua-language-server gives the parameter the type alone. `None`
+    /// when a `@param` line types the parameter.
     pub fn declared_callback_param(&self, id: LocalId, declared: impl Fn(&Expr) -> Type) -> Option<Type> {
         let local = self.ctx.resolution.local(id);
         let Some(Decl::Param { func, index, doc_anchor, expected: Some(Expected::Arg { call, arg_index }) }) =
@@ -1512,7 +1551,7 @@ impl<'a> Infer<'a> {
             let callback = self.fun_of(&callee.params.get((arg_index + skip_params).checked_sub(skip_args)?)?.ty)?;
             let param = callback.params.get(*index)?;
             let ty = substitute(&param.ty, &self.bind_generics(callee, &args, via_method, false));
-            Some(if param.optional { ty.optional() } else { ty })
+            Some(if param.optional && self.strict { ty.optional() } else { ty })
         });
         let first = types.next()?;
         if types.all(|ty| ty == first) {
@@ -1824,18 +1863,7 @@ impl<'a> Infer<'a> {
     fn for_in_type(&self, stmt: &Stmt, index: usize) -> Type {
         let StmtKind::GenericFor { exprs, .. } = &stmt.kind else { return Type::Unknown };
         let Some(first) = exprs.first() else { return Type::Unknown };
-        let iterated = match &first.kind {
-            ExprKind::Call { callee, args, .. } => match (callee.dotted_path().as_deref(), args.first()) {
-                (Some(iterator @ ("pairs" | "ipairs" | "next" | "each")), Some(arg)) => {
-                    Some((arg, iterator == "ipairs"))
-                }
-                _ => None,
-            },
-            // `for k, v in next, t`
-            _ if first.dotted_path().as_deref() == Some("next") => exprs.get(1).map(|arg| (arg, false)),
-            _ => None,
-        };
-        if let Some((arg, ipairs)) = iterated {
+        if let Some((arg, ipairs)) = iterated_table(stmt) {
             let (key, value) = match &arg.unparen().kind {
                 ExprKind::Table(fields) => self.inline_table_key_values(fields, ipairs),
                 _ => self.key_value_types(&self.expr(arg), ipairs),
@@ -2511,6 +2539,18 @@ impl<'a> Infer<'a> {
         out
     }
 
+    /// `ty` without the `nil` and `false` it allows, as lua-language-server checks a value read from
+    /// a field, which it does not narrow. A type that holds nothing else stays as it is.
+    pub fn without_falsy(&self, ty: &Type) -> Type {
+        let expanded = self.expand_aliases(ty, 0);
+        let Type::Union(parts) = &expanded else { return ty.clone() };
+        let is_falsy = |part: &&Type| matches!(part, Type::Nil | Type::BooleanLit(false));
+        if !parts.iter().any(|part| is_falsy(&part)) || parts.iter().all(|part| is_falsy(&part)) {
+            return ty.clone();
+        }
+        expanded.rebuilt(parts.iter().filter(|part| !is_falsy(part)).cloned())
+    }
+
     /// What `ty` holds when it holds a true value, which `a or b` gives for an `a` of that type: all
     /// of it but `nil` and `false`, and `true` of a `boolean`.
     fn truthy_part(&self, ty: &Type) -> Type {
@@ -2596,6 +2636,20 @@ impl<'a> Infer<'a> {
         })
     }
 
+    /// What `call` returns when an annotation of its function gives it, also one whose generics the
+    /// arguments of the call bind, as `@return T[]` for `T`, and `None` when the values are inferred
+    /// or `call` is no call.
+    pub fn annotated_returns(&self, call: &Expr) -> Option<Vec<Type>> {
+        self.guarded(|| {
+            let returned = match &call.kind {
+                ExprKind::Call { callee, args, .. } => self.call_values(callee, None, args),
+                ExprKind::MethodCall { base, method, args, .. } => self.call_values(base, Some(method), args),
+                _ => return None,
+            };
+            returned.annotated.then_some(returned.values)
+        })
+    }
+
     /// Whether `call` runs a function that returns nothing, so what it gives is surely `nil`.
     pub fn returns_nothing(&self, call: &Expr) -> bool {
         self.guarded(|| match &call.unparen().kind {
@@ -2605,17 +2659,18 @@ impl<'a> Infer<'a> {
         })
     }
 
-    /// What `call` returns when its function infers it from the `return`s of its body, without the
-    /// `nil` of a body that runs past its end, and `None` when the values are declared or `call` is
-    /// no call.
-    pub fn inferred_returns_of(&self, call: &Expr) -> Option<Vec<Type>> {
+    /// What `call` returns when its function infers it from the `return`s of its body, with the `nil`
+    /// of a body that runs past its end only when `past_end` asks for it, and `None` when the values
+    /// are declared or `call` is no call.
+    pub fn inferred_returns_of(&self, call: &Expr, past_end: bool) -> Option<Vec<Type>> {
         self.guarded(|| {
             let returned = match &call.kind {
                 ExprKind::Call { callee, args, .. } => self.call_values(callee, None, args),
                 ExprKind::MethodCall { base, method, args, .. } => self.call_values(base, Some(method), args),
                 _ => return None,
             };
-            returned.inferred
+            let Returned { values, inferred, .. } = returned;
+            inferred.map(|returned| if past_end { values } else { returned })
         })
     }
 
@@ -2659,6 +2714,7 @@ impl<'a> Infer<'a> {
             declared,
             nothing: false,
             inferred: None,
+            annotated: declared,
         };
         if method.is_none() {
             match (base.dotted_path().as_deref(), args.first()) {
@@ -2711,6 +2767,7 @@ impl<'a> Infer<'a> {
                         declared: !handler.returns_inferred,
                         nothing: false,
                         inferred: handler.returns_inferred.then(|| inferred.clone()),
+                        annotated: !handler.returns_inferred,
                     };
                 }
             }
@@ -2727,6 +2784,7 @@ impl<'a> Infer<'a> {
             declared: !fun.returns_inferred && fun.generics.is_empty(),
             nothing: false,
             inferred: fun.returns_inferred.then(|| bound(fun.explicit_returns.as_ref().unwrap_or(&fun.returns))),
+            annotated: !fun.returns_inferred,
         }
     }
 
@@ -4259,6 +4317,22 @@ pub fn distinct_bases(given: impl Iterator<Item = Option<Type>>) -> (Rc<[Type]>,
         }
     }
     (types.into(), complete)
+}
+
+/// The table that the generic `for` statement `stmt` goes through with `pairs`, `ipairs`, `next` or
+/// `each`, and whether it does with `ipairs`.
+pub fn iterated_table(stmt: &Stmt) -> Option<(&Expr, bool)> {
+    let StmtKind::GenericFor { exprs, .. } = &stmt.kind else { return None };
+    let first = exprs.first()?;
+    match &first.kind {
+        ExprKind::Call { callee, args, .. } => match (callee.dotted_path().as_deref(), args.first()) {
+            (Some(iterator @ ("pairs" | "ipairs" | "next" | "each")), Some(arg)) => Some((arg, iterator == "ipairs")),
+            _ => None,
+        },
+        // `for k, v in next, t`
+        _ if first.dotted_path().as_deref() == Some("next") => exprs.get(1).map(|arg| (arg, false)),
+        _ => None,
+    }
 }
 
 /// The union of the types of the values a local may hold. A literal gives way to its kind when

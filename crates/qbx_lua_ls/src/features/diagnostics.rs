@@ -51,6 +51,27 @@ pub struct FixData {
     pub edits: Vec<(lsp_types::Range, String)>,
 }
 
+/// The diagnostic settings of the editor, which apply where the configuration file leaves them out.
+#[derive(Clone, Debug, Default)]
+pub struct RuleSettings {
+    /// The level of each rule named, by code.
+    pub levels: Vec<(String, Level)>,
+    /// Whether the rules report what TypeScript's strict mode does beyond lua-language-server.
+    pub strict: Option<bool>,
+}
+
+impl RuleSettings {
+    /// Gives `config`, the configuration of one file, the settings it leaves out.
+    pub fn apply(&self, config: &mut FileConfig) {
+        for (code, level) in &self.levels {
+            config.set_default(code, *level);
+        }
+        if let Some(strict) = self.strict {
+            config.set_strict_default(strict);
+        }
+    }
+}
+
 pub fn is_silenced(ws: &Workspace, path: &Path) -> bool {
     ws.lint_config.is_excluded(path) || ws.lint_config.ignores_diagnostics(path)
 }
@@ -171,10 +192,10 @@ fn type_diagnostics<'a>(
 pub fn diagnostics(
     ws: &Workspace,
     doc: &Document,
-    rule_overrides: &[(String, Level)],
+    settings: &RuleSettings,
     crossrefs: &qbx_lua_analysis::crossref::CrossRefs,
 ) -> Vec<Diagnostic> {
-    diagnostics_with_support(ws, doc, rule_overrides, crossrefs, None)
+    diagnostics_with_support(ws, doc, settings, crossrefs, None)
 }
 
 pub(crate) struct DiagnosticSupport<'a> {
@@ -188,7 +209,7 @@ pub(crate) struct DiagnosticSupport<'a> {
 pub(crate) fn diagnostics_with_support(
     ws: &Workspace,
     doc: &Document,
-    rule_overrides: &[(String, Level)],
+    settings: &RuleSettings,
     crossrefs: &qbx_lua_analysis::crossref::CrossRefs,
     support: Option<&DiagnosticSupport<'_>>,
 ) -> Vec<Diagnostic> {
@@ -197,9 +218,7 @@ pub(crate) fn diagnostics_with_support(
         return Vec::new();
     }
     let mut config = ws.lint_config.for_file(&doc.path);
-    for (code, level) in rule_overrides {
-        config.set_default(code, *level);
-    }
+    settings.apply(&mut config);
     if support.is_some_and(|support| !support.inventory_complete) {
         config.set(qbx_lua_analysis::rules::MANIFEST_MISSING_FILE, Level::Off);
     }
@@ -260,7 +279,7 @@ pub(crate) fn diagnostics_with_support(
             None
         };
         let ctx = FileContext::new(doc.file, &doc.text, &doc.chunk, &doc.resolution);
-        let infer = Infer::new(&ctx, &ws.index);
+        let infer = Infer::new(&ctx, &ws.index).with_strict(config.strict());
         let mut found = check_file(&FileInput {
             relative_path: &relative_path,
             source: &doc.text,

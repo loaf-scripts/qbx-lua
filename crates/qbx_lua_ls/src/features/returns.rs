@@ -1,7 +1,8 @@
 //! `return-type-mismatch`, `missing-return` and `redundant-return-value`: a function documented with
 //! `@return` has to return values of those types. A value of a different kind, or a literal the type
 //! does not list, is a mismatch, for each type a union lists, `nil` included, though not the `nil`
-//! that the type of a field read allows, as lua-language-server reads fields; a `return` with fewer
+//! that the type of a field read allows, as lua-language-server reads fields, unless `strict` asks
+//! for what TypeScript reports; a `return` with fewer
 //! values than the required ones, or a body that can run past its end, is missing one; a `return`
 //! with more values than declared returns values nobody expects. A value is required unless its
 //! type allows `nil`. An empty body is missing its values too, except in a `---@meta` file, whose
@@ -36,8 +37,9 @@ pub fn mismatched_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     for function in documented(infer, chunk) {
         for (_, exprs) in return_stmts(&function.func.body) {
             let values = classes.values(exprs).into_iter().enumerate();
-            let values: Vec<(Type, Span)> =
-                values.map(|(index, (given, span))| (checked_value(value_at(exprs, index), given), span)).collect();
+            let values: Vec<(Type, Span)> = values
+                .map(|(index, (given, span))| (checked_value(infer, value_at(exprs, index), given), span))
+                .collect();
             out.extend(mismatches(&classes, function.closest(&classes, exprs, &values), &values));
         }
     }

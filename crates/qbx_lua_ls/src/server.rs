@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::document::Document;
+use crate::features::diagnostics::RuleSettings;
 use crate::features::{
     code_action, completion, definition, diagnostics, folding, hover, inlay, on_type, reference, references,
     semantic_tokens, signature, symbols,
@@ -32,6 +33,8 @@ pub struct DiagnosticSettings {
     pub enable: Option<bool>,
     pub workspace: Option<bool>,
     pub rules: FxHashMap<String, String>,
+    /// Whether the rules report what TypeScript's strict mode does beyond lua-language-server.
+    pub strict: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -58,7 +61,11 @@ pub struct Settings {
 }
 
 impl Settings {
-    fn rule_overrides(&self) -> Vec<(String, Level)> {
+    fn rule_settings(&self) -> RuleSettings {
+        RuleSettings { levels: self.rule_levels(), strict: self.diagnostics.strict }
+    }
+
+    fn rule_levels(&self) -> Vec<(String, Level)> {
         self.diagnostics
             .rules
             .iter()
@@ -478,7 +485,7 @@ impl Server {
             }
         }
 
-        let overrides = self.settings.rule_overrides();
+        let rule_settings = self.settings.rule_settings();
         // A client spells the URI of a file in its own way, as VS Code does with `file:///c%3A/...`,
         // so the documents it has open are found by path. Reporting an open file here as well would
         // replace what it shows with this list, which has no hints.
@@ -507,7 +514,7 @@ impl Server {
             if let Some(resource) = resource {
                 locale_usage.entry(resource).or_default().push(qbx_lua_analysis::locale::locale_usage(&doc.chunk));
             }
-            let mut found = diagnostics::diagnostics(&self.ws, &doc, &overrides, &crossrefs);
+            let mut found = diagnostics::diagnostics(&self.ws, &doc, &rule_settings, &crossrefs);
             found.retain(|d| d.severity != Some(DiagnosticSeverity::HINT));
             found.sort_by_key(|d| d.severity.map_or(4, |s| if s == DiagnosticSeverity::ERROR { 0 } else { 1 }));
             found.truncate(MAX_PROBLEMS_PER_CLOSED_FILE);
@@ -533,7 +540,7 @@ impl Server {
                 continue;
             }
             let mut config = self.ws.lint_config.for_file(&locale.path);
-            overrides.iter().for_each(|(code, level)| config.set_default(code, *level));
+            rule_settings.apply(&mut config);
             let Some(severity) = config.severity(qbx_lua_analysis::rules::UNUSED_LOCALE_KEY) else { continue };
             let lines = qbx_lua_syntax::LineIndex::new(&locale.source);
             let found: Vec<Diagnostic> = qbx_lua_analysis::lint::unused_locale_keys_from(&locale, usages.into_iter())
@@ -586,7 +593,7 @@ impl Server {
     fn publish(&self, uri: &Url, crossrefs: &qbx_lua_analysis::crossref::CrossRefs) {
         let Some(doc) = self.docs.get(uri) else { return };
         let diagnostics = if self.settings.diagnostics.enable.unwrap_or(true) {
-            diagnostics::diagnostics(&self.ws, doc, &self.settings.rule_overrides(), crossrefs)
+            diagnostics::diagnostics(&self.ws, doc, &self.settings.rule_settings(), crossrefs)
         } else {
             Vec::new()
         };
@@ -946,7 +953,7 @@ impl Server {
                     &self.docs,
                     params(raw)?,
                     self.settings.diagnostics.enable.unwrap_or(true),
-                    &self.settings.rule_overrides(),
+                    &self.settings.rule_settings(),
                 )?)
             }
             "qbx/symbolReferences" => {

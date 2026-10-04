@@ -157,6 +157,14 @@ impl Client {
         );
     }
 
+    /// Turns the `strict` setting on or off, as the editor does, which checks the open documents again.
+    fn set_strict(&self, strict: bool) {
+        self.notify(
+            "workspace/didChangeConfiguration",
+            json!({ "settings": { "qbxLua": { "diagnostics": { "strict": strict } } } }),
+        );
+    }
+
     /// Diagnostics are published once the server is idle, so round-trip a request first.
     fn diagnostics_for(&mut self, relative: &str) -> Vec<(String, u64)> {
         self.request("qbx/status", Value::Null);
@@ -2662,6 +2670,12 @@ print(add, later)
     };
     assert_eq!(
         findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [],
+        "as in lua-language-server, the `nil` of a field passed as an argument does not count without `strict`"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
         [finding("function() needsNumber(entry.length)"), finding("needsNumber(entry.length)\nend")],
         "a field holds the value assigned to it until a function that runs later, or a yield, may find another"
     );
@@ -3149,6 +3163,8 @@ print(build({}))
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
     let (line, _) = pos(text, "data.extra", 0);
+    // A table that a constructor builds has the fields it gives only with `strict`.
+    client.set_strict(true);
     assert_eq!(
         findings(&mut client, CLIENT, &["inject-field"]),
         [(
@@ -4084,6 +4100,11 @@ local declared = {}
 /// The `missing-fields` diagnostics of `text`, with the line of each.
 fn missing_field_messages(client: &mut Client, text: &str) -> Vec<(u64, String)> {
     client.open_with(CLIENT, text);
+    missing_field_findings(client)
+}
+
+/// The `missing-fields` findings of `CLIENT` as it is open, as (line, message).
+fn missing_field_findings(client: &mut Client) -> Vec<(u64, String)> {
     client.diagnostics_for(CLIENT);
     let uri = client.uri(CLIENT).to_string();
     client.diagnostics[&uri]
@@ -4198,8 +4219,15 @@ walk({ pet = {} })
 print(untagged, unnamed, kennel, named)
 ";
     let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    // As in lua-language-server, a shape requires no field, but a class it types a field with does.
     assert_eq!(
         missing_field_messages(&mut client, text),
+        [(line("walk({"), "Missing required fields in type `Test.Dog`: `bark`".to_string())]
+    );
+    // With `strict`, as in TypeScript, the fields of a shape are required too.
+    client.set_strict(true);
+    assert_eq!(
+        missing_field_findings(&mut client),
         [
             (line("local unnamed"), "Missing required fields in type `{ name: string }`: `name`".into()),
             (
@@ -4576,9 +4604,14 @@ local holder = {}
             finding("local child", "Missing required fields in type `Test.Child`: `StartPhase`, `Dict`, `Player`"),
             finding("local merged", "Missing required fields in type `Test.Merged`: `First`, `Second`"),
             finding("local narrowed", "Missing required fields in type `Test.Narrowed`: `Dict`"),
-            finding("local holder", "Missing required fields in type `Test.Holder`: `value`"),
         ]
     );
+    // A class given type arguments requires its fields only with `strict`, as in TypeScript, not as in
+    // lua-language-server.
+    client.set_strict(true);
+    let strict = findings(&mut client, CLIENT, &["missing-fields"]);
+    assert!(strict.contains(&finding("local holder", "Missing required fields in type `Test.Holder`: `value`")));
+    client.set_strict(false);
 
     client.change(SHARED, 2, &shared.replace("(partial) Test.CutAnim", "Test.CutAnim"));
     let found = findings(&mut client, CLIENT, &["missing-fields"]);
@@ -4960,14 +4993,24 @@ print(tag, build)
         [
             found("self.made", "Field `made` is not declared in `Test.Gadget`"),
             found("gadget.extra", "Field `extra` is not declared in `Test.Gadget`"),
+        ],
+        "as in lua-language-server, a table whose type no annotation declares takes any field"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["inject-field"]),
+        [
+            found("self.made", "Field `made` is not declared in `Test.Gadget`"),
+            found("gadget.extra", "Field `extra` is not declared in `Test.Gadget`"),
             found("alias.copied", "Field `copied` is not declared in the table `alias` holds"),
             found("row.count", "Field `count` is not declared in `{ label: string }`"),
             found("options.color", "Field `color` is not declared in `{ size: integer }`"),
             found("options.reset", "Field `reset` is not declared in `{ size: integer }`"),
         ],
-        "fields set through `self` in a method, also of a global declared empty, the class table, a \
-         global or a table's own local are declared, and an empty table, keys in variables and strict \
-         classes are left alone"
+        "with `strict`, as in TypeScript, a table that a constructor builds has the fields it and its \
+         owners give it: fields set through `self` in a method, also of a global declared empty, the class \
+         table, a global or a table's own local are declared, and an empty table, keys in variables and \
+         strict classes are left alone"
     );
     client.notify(
         "workspace/didChangeConfiguration",
@@ -5069,8 +5112,21 @@ print(read, build, show)
     client.open_with(CLIENT, text);
     let line = |needle: &str| pos(text, needle, 0).0 as u64;
     let found = |needle: &str, message: &str| ("undefined-field".to_string(), line(needle), message.to_string());
+    let relaxed = findings(&mut client, CLIENT, &["undefined-field"]);
+    client.set_strict(true);
+    let strict = findings(&mut client, CLIENT, &["undefined-field"]);
     assert_eq!(
-        findings(&mut client, CLIENT, &["undefined-field"]),
+        added(&relaxed, &strict),
+        [
+            found("Settings.missing", "Field `missing` is not declared in the table `Settings` holds"),
+            found("row.count", "Field `count` is not declared in `{ label: string }`"),
+            found("options.color", "Field `color` is not declared in `{ size: integer }`"),
+        ],
+        "as in lua-language-server, a table whose type no annotation declares may have any field, while \
+         with `strict`, as in TypeScript, it has those its constructor and its owners give it"
+    );
+    assert_eq!(
+        strict,
         [
             found("point.y", "Field `y` is not declared in `Test.Point`"),
             found("point.y", "Field `w` is not declared in `Test.Point`"),
@@ -5953,8 +6009,24 @@ handle(1)
     client.open_with(CLIENT, text);
     let line = |needle: &str| pos(text, needle, 0).0 as u64;
     let finding = |needle: &str, message: &str| ("need-check-nil".to_string(), line(needle), message.to_string());
+    let relaxed = findings(&mut client, CLIENT, &["need-check-nil"]);
+    client.set_strict(true);
+    let strict = findings(&mut client, CLIENT, &["need-check-nil"]);
     assert_eq!(
-        findings(&mut client, CLIENT, &["need-check-nil"]),
+        added(&relaxed, &strict),
+        [
+            finding("#list", "`list` may be nil: its type here is `string[]?`"),
+            finding("amount + 1", "`amount` may be nil: its type here is `number?`"),
+            finding("count > 0", "`count` may be nil: its type here is `number?`"),
+            finding("count > 0", "`count` may be nil: its type here is `number?`"),
+            finding("1, limit", "`limit` may be nil: its type here is `number?`"),
+            finding("'id:' .. suffix", "`suffix` may be nil: its type here is `string?`"),
+        ],
+        "as in lua-language-server, only indexing, calls and keys are checked, while with `strict`, as in \
+         TypeScript, so are operators and `for` bounds"
+    );
+    assert_eq!(
+        strict,
         [
             finding("holder.name", "`holder` may be nil: its type here is `Probe.Holder?`"),
             // Every read is reported, also after one that would raise the error first.
@@ -6411,6 +6483,21 @@ fn findings(client: &mut Client, file: &str, codes: &[&str]) -> Vec<(String, u64
     found
 }
 
+/// What `after` holds beyond `before`, in order, each finding counted as often as it is listed.
+fn added<T: PartialEq + Clone>(before: &[T], after: &[T]) -> Vec<T> {
+    let mut left = before.to_vec();
+    let mut out = Vec::new();
+    for item in after {
+        match left.iter().position(|other| other == item) {
+            Some(index) => {
+                left.remove(index);
+            }
+            None => out.push(item.clone()),
+        }
+    }
+    out
+}
+
 #[test]
 fn reads_through_declared_index_types_are_checked_for_nil() {
     let mut client = Client::start(fixture_root());
@@ -6461,8 +6548,9 @@ print(read)
     let finding = |needle: &str, message: &str| {
         ("need-check-nil".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
     };
+    let relaxed = findings(&mut client, CLIENT, &["need-check-nil"]);
     assert_eq!(
-        findings(&mut client, CLIENT, &["need-check-nil"]),
+        relaxed,
         [
             finding("found.name", "`found` may be nil: its type here is `Probe.Row?`"),
             finding("first.name", "`first` may be nil: its type here is `Probe.Row?`"),
@@ -6472,6 +6560,15 @@ print(read)
         ],
         "the values of maps, indexed tables and shape fields are read as declared, while a loop from 1 to \
          the `#` of a table, or back, only reads values the table holds, and `T[]` holds no `nil`"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &["need-check-nil"])),
+        [
+            finding("row.name", "`row` may be nil: its type here is `Probe.Row?`"),
+            finding("back.name", "`back` may be nil: its type here is `Probe.Row?`"),
+        ],
+        "with `strict`, as TypeScript reads an indexed type, an item of such a loop may be `nil` too"
     );
 }
 
@@ -6532,8 +6629,9 @@ print(h.id)
     let finding = |needle: &str, message: &str| {
         ("need-check-nil".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
     };
+    let relaxed = findings(&mut client, CLIENT, &["need-check-nil"]);
     assert_eq!(
-        findings(&mut client, CLIENT, &["need-check-nil"]),
+        relaxed,
         [
             finding("a.id", "`a` may be nil: its type here is `{ id: unknown }?`"),
             finding("b.id", "`b` may be nil: its type here is `{ id: unknown }?`"),
@@ -6544,6 +6642,12 @@ print(h.id)
         ],
         "a `return` that gives `nil` or `false`, or leaves its value out, counts, as lua-language-server \
          infers it, while running past the end of the body and the `nil` a returned value may hold do not"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &["need-check-nil"])),
+        [finding("e.id", "`e` may be nil: its type here is `{ id: unknown }?`")],
+        "with `strict`, running past the end of the body counts, as TypeScript infers `undefined` there"
     );
 }
 
@@ -6629,18 +6733,28 @@ for i = 1, 2 do print(tuple[i]) end
             finding(undeclared, "'positional'", "Field `[1]` is not declared in strict class `Test.Closed`"),
             finding(undeclared, "closed.nope", "Field `nope` is not declared in strict class `Test.Closed`"),
             finding(undeclared, "closed:missing", "Field `missing` is not declared in strict class `Test.Closed`"),
-            finding(mismatch, "closed.name = nil", "Cannot assign `nil` to field `name` of type `string`"),
             finding(mismatch, "a = 'x'", "Cannot assign `string` to field `a` of type `integer`"),
-            finding(mismatch, "abc.test = nil", "Cannot assign `nil` to field `test` of type `string`"),
             finding(mismatch, "'swapped'", "Cannot assign `string` to field `[1]` of type `number`"),
             finding(mismatch, "12,", "Cannot assign `integer` to field `[2]` of type `string`"),
             finding(undeclared, "false,", "Field `[3]` is not declared in strict class `Test.Tuple`"),
             finding(undeclared, "tuple[3]", "Field `[3]` is not declared in strict class `Test.Tuple`"),
             finding(mismatch, "tuple[1] = 'x'", "Cannot assign `string` to field `[1]` of type `number`"),
         ],
-        "a string variable may name a field, loose classes take any key, `= nil` only clears fields whose \
-         type allows `nil`, tuple fields like `[1]` check their own key and value, and an `integer` \
+        "a string variable may name a field, loose classes take any key, `= nil` clears any field, as in \
+         lua-language-server, tuple fields like `[1]` check their own key and value, and an `integer` \
          variable may be any of them"
+    );
+    client.set_strict(true);
+    let cleared = |needle: &str| line(needle);
+    let strict: Vec<u64> = findings(&mut client, CLIENT, &[mismatch])
+        .into_iter()
+        .filter(|(_, _, message)| message.starts_with("Cannot assign `nil`"))
+        .map(|(_, at, _)| at)
+        .collect();
+    assert_eq!(
+        strict,
+        [cleared("closed.name = nil"), cleared("abc.test = nil")],
+        "with `strict`, as in TypeScript, `= nil` only clears fields whose type allows `nil`"
     );
 }
 
@@ -7250,7 +7364,6 @@ print(hit, struck, part)
             finding(local, "first, second = 'x'", "Cannot assign `integer` to `second`, defined as `string`"),
             finding(local, "i = 'x'", "Cannot assign `string` to `i`, defined as `number`"),
             finding(local, "index = 'x'", "Cannot assign `string` to `index`, defined as `integer`"),
-            finding(local, "id = 'x'", "Cannot assign `string` to `id`, defined as `integer`"),
             finding(local, "fn = 5", "Cannot assign `integer` to `fn`, defined as `fun()`"),
             finding(local, "point = 5", "Cannot assign `integer` to `point`, defined as `Test.Point`"),
             finding(local, "mode = 'c'", "Cannot assign `\"c\"` to `mode`, defined as `Test.Mode`"),
@@ -7260,11 +7373,412 @@ print(hit, struck, part)
             finding(local, "part = 1", "Cannot assign `integer` to `part`, defined as `string`"),
         ],
         "a `---@type` or `@param` local is left to `assign-type-mismatch`, a cast or a `---@type` above an \
-         assignment does not change the type a local is declared with, loop variables and the parameters of a \
-         function passed for a function type have the type they are given, and the literals a function declares \
-         it returns are the only ones its local takes; parameters without a type, `<const>` locals and `_` take \
-         anything, and a `BOOL` a native returns may be an integer"
+         assignment does not change the type a local is declared with, loop variables have the type they are \
+         given, and the literals a function declares it returns are the only ones its local takes; parameters, \
+         `<const>` locals and `_` take anything, as in lua-language-server, and a `BOOL` a native returns may \
+         be an integer"
     );
+    client.set_strict(true);
+    let at_id: Vec<_> =
+        findings(&mut client, CLIENT, &[local]).into_iter().filter(|(_, at, _)| *at == line("id = 'x'")).collect();
+    assert_eq!(
+        at_id,
+        [finding(local, "id = 'x'", "Cannot assign `string` to `id`, defined as `integer`")],
+        "with `strict`, as in TypeScript, the parameters of a function passed for a function type have the \
+         type it gives them"
+    );
+}
+
+#[test]
+fn nil_that_other_code_gives_a_local_counts_with_strict() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param cb fun(status: integer, body?: string)
+local function fetch(cb) end
+fetch(function(status, body)
+    print(status, body:len())
+end)
+
+local coords = { x = 1 }
+function Clear() coords = nil end
+function Use() print(coords.x) end
+
+local cleared = { x = 1 }
+if math.random() > 0.5 then cleared = nil end
+print(cleared.x)
+
+---@type table?
+local typed
+function Fill() typed = {} end
+function UseTyped() print(typed.x) end
+
+local stats = { health = 1 }
+function Drop() stats = nil end
+function Restore()
+    if stats then
+        Wait(1000)
+        print(stats.health)
+    end
+end
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("need-check-nil".to_string(), line(needle), message.to_string());
+    let relaxed = findings(&mut client, CLIENT, &["need-check-nil"]);
+    assert_eq!(
+        relaxed,
+        [
+            finding("cleared.x", "`cleared` may be nil: its type here is `{ x: integer }?`"),
+            finding("typed.x", "`typed` may be nil: its type here is `table?`"),
+        ],
+        "as in lua-language-server, a local without `---@type` read in another function holds no `nil` that \
+         other code gives it, and an optional parameter of a callback holds no `nil` either"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &["need-check-nil"])),
+        [
+            finding("body:len", "`body` may be nil: its type here is `string?`"),
+            finding("coords.x", "`coords` may be nil: its type here is `{ x: integer }?`"),
+            finding("stats.health", "`stats` may be nil: its type here is `{ health: integer }?`"),
+        ],
+        "with `strict`, as in TypeScript, they do"
+    );
+}
+
+#[test]
+fn arguments_read_from_fields_may_be_nil_unless_strict() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param s string
+local function str(s) end
+---@param n number
+local function num(n) end
+---@param t table
+local function tab(t) end
+
+---@class Test.Holder
+---@field name string?
+---@field count number?
+---@field flag boolean?
+local holder = {}
+function holder:show()
+    str(self.name)
+end
+str(holder.name)
+str(holder['name'])
+num(holder.count)
+tab(holder.flag)
+local name = holder.name
+str(name)
+
+---@param cb fun(status: integer, body?: string)
+local function fetch(cb) end
+fetch(function(status, body) str(body) end)
+
+local cam
+function Make() cam = 5 end
+function Drop() cam = nil end
+local function later(fn) end
+later(function() num(cam) end)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("param-type-mismatch".to_string(), line(needle), message.to_string());
+    let relaxed = findings(&mut client, CLIENT, &["param-type-mismatch"]);
+    assert_eq!(
+        relaxed,
+        [
+            finding("tab(holder.flag)", "Cannot assign `boolean` to parameter `t` of type `table`"),
+            finding("str(name)", "Cannot assign `string?` to parameter `s` of type `string`"),
+        ],
+        "as in lua-language-server, a value read from a field or a key has no `nil` or `false`, and neither has \
+         an optional parameter of a callback or what other code gives a local without `---@type`"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &["param-type-mismatch"])),
+        [
+            finding("str(self.name)", "Cannot assign `string?` to parameter `s` of type `string`"),
+            finding("str(holder.name)", "Cannot assign `string?` to parameter `s` of type `string`"),
+            finding("str(holder['name'])", "Cannot assign `string?` to parameter `s` of type `string`"),
+            finding("num(holder.count)", "Cannot assign `number?` to parameter `n` of type `number`"),
+            finding("tab(holder.flag)", "Cannot assign `boolean?` to parameter `t` of type `table`"),
+            finding("str(body)", "Cannot assign `string?` to parameter `s` of type `string`"),
+            finding("num(cam)", "Cannot assign `integer?` to parameter `n` of type `number`"),
+        ],
+        "with `strict`, as in TypeScript, they do"
+    );
+}
+
+#[test]
+fn locals_may_be_cleared_and_take_optional_fields_unless_strict() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Counter
+---@field count number?
+local counter = {}
+local total = 1
+total = counter.count
+local box = {}
+box = nil
+local name = 'a'
+name = nil
+local function nextFree()
+    if math.random() > 0.5 then return 1 end
+end
+local free = 1
+free = nextFree()
+local found = nextFree()
+local copy = 1
+copy = found
+---@return number?
+local function maybe() end
+local declared = 1
+declared = maybe()
+print(total, box, name, free, copy, declared)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("cast-local-type".to_string(), line(needle), message.to_string());
+    let relaxed = findings(&mut client, CLIENT, &["cast-local-type"]);
+    assert_eq!(
+        relaxed,
+        [
+            finding("name = nil", "Cannot assign `nil` to `name`, defined as `string`"),
+            finding("declared = maybe()", "Cannot assign `number?` to `declared`, defined as `integer`"),
+        ],
+        "as in lua-language-server, a table may be cleared, a field gives no `nil`, and neither does a \
+         function without `@return` that runs past its end, also through a local"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &["cast-local-type"])),
+        [
+            finding("total = counter.count", "Cannot assign `number?` to `total`, defined as `integer`"),
+            finding("box = nil", "Cannot assign `nil` to `box`, defined as `table`"),
+            finding("free = nextFree()", "Cannot assign `integer?` to `free`, defined as `integer`"),
+            finding("copy = found", "Cannot assign `integer?` to `copy`, defined as `integer`"),
+        ],
+        "with `strict`, as in TypeScript, they do"
+    );
+}
+
+#[test]
+fn fields_set_through_a_local_are_read_from_it_unless_strict() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Note
+---@field title string
+
+---@param note Test.Note
+local function tag(note)
+    note.extra = 1
+    print(note.extra, note.other)
+end
+print(tag)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |code: &str, at: &str, message: &str| (code.to_string(), line(at), message.to_string());
+    let codes = ["inject-field", "undefined-field"];
+    let relaxed = findings(&mut client, CLIENT, &codes);
+    assert_eq!(
+        relaxed,
+        [
+            finding("inject-field", "note.extra = 1", "Field `extra` is not declared in `Test.Note`"),
+            finding("undefined-field", "print(note.extra", "Field `other` is not declared in `Test.Note`"),
+        ],
+        "as in lua-language-server, a field set through a local is one the local has, though setting it is \
+         reported"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &codes)),
+        [finding("undefined-field", "print(note.extra", "Field `extra` is not declared in `Test.Note`")],
+        "with `strict`, as in TypeScript, the type of the local still lacks it"
+    );
+}
+
+#[test]
+fn locals_given_values_of_unknown_type_have_any_field_unless_strict() {
+    let mut client = Client::start(fixture_root());
+    let text = "local function find(source, lookup)
+    local player = ''
+    player = lookup(source)
+    print(player.PlayerData)
+    local name = ''
+    print(name.PlayerData)
+end
+print(find)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |at: &str, message: &str| ("undefined-field".to_string(), line(at), message.to_string());
+    let relaxed = findings(&mut client, CLIENT, &["undefined-field"]);
+    assert_eq!(
+        relaxed,
+        [finding("name.PlayerData", "Field `PlayerData` is not declared in `string`")],
+        "as in lua-language-server, a local that may hold a value of unknown type may have any field"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &["undefined-field"])),
+        [finding("player.PlayerData", "Field `PlayerData` is not declared in `string`")],
+        "with `strict`, as in TypeScript, it keeps the type it is declared with"
+    );
+}
+
+#[test]
+fn loop_variables_over_annotated_tables_are_checked_unless_built_by_a_constructor() {
+    let mut client = Client::start(fixture_root());
+    let text = "---@generic T
+---@param value T[]
+---@return T[]
+local function copy(value) return value end
+
+---@param rows { label: string }[]
+local function show(rows)
+    for _, row in ipairs(rows) do
+        print(row.label, row.count)
+    end
+    for _, copied in ipairs(copy(rows)) do
+        print(copied.count)
+    end
+    for i = 1, #rows do
+        rows[i].count = i
+    end
+    local built = { { label = 'a' } }
+    for _, item in ipairs(built) do
+        print(item.count)
+    end
+end
+print(show)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |at: &str| {
+        ("undefined-field".to_string(), line(at), "Field `count` is not declared in `{ label: string }`".to_string())
+    };
+    let relaxed = findings(&mut client, CLIENT, &["undefined-field"]);
+    assert_eq!(
+        relaxed,
+        [finding("row.count"), finding("copied.count")],
+        "as in lua-language-server, a loop variable over a table an annotation types, also through a generic          function, has the fields of its entries"
+    );
+    let injected = (
+        "inject-field".to_string(),
+        line("rows[i].count"),
+        "Field `count` is not declared in `{ label: string }`".to_string(),
+    );
+    assert_eq!(findings(&mut client, CLIENT, &["inject-field"]), [injected], "and so does an entry read by its index");
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &["undefined-field"])),
+        [finding("item.count")],
+        "with `strict`, as in TypeScript, so does one over a table a constructor builds"
+    );
+}
+
+#[test]
+fn nil_that_an_export_returns_counts_with_strict() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-strict-exports-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    let write = |relative: &str, text: &str| {
+        let path = fixture.0.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("core/fxmanifest.lua", "fx_version 'cerulean'\ngame 'gta5'\nserver_scripts { 'player.lua' }\n");
+    write(
+        "core/player.lua",
+        "Players = {}\nlocal function build(player)\n    if not player then return nil end\n    return { PlayerData = player }\nend\nexports('GetPlayer', function(source)\n    return build(Players[source])\nend)\n",
+    );
+    write("admin/fxmanifest.lua", "fx_version 'cerulean'\ngame 'gta5'\nserver_scripts { 'server.lua' }\n");
+    let text = "\
+local function find(id)
+    if not id then return nil end
+    return { id = id }
+end
+RegisterNetEvent('admin:check', function()
+    local player = exports['core']:GetPlayer(source)
+    print(player.PlayerData)
+    local found = find(source)
+    print(found.id)
+end)
+";
+    write("admin/server.lua", text);
+    let mut client = Client::start(fixture.0.clone());
+    client.open_with("admin/server.lua", text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let lines = |client: &mut Client| -> Vec<u64> {
+        findings(client, "admin/server.lua", &["need-check-nil"]).into_iter().map(|(_, at, _)| at).collect()
+    };
+    assert_eq!(
+        lines(&mut client),
+        [line("found.id")],
+        "as in lua-language-server, which does not see what resources export, only the `return nil` of a \
+         function the file can see counts"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        lines(&mut client),
+        [line("player.PlayerData"), line("found.id")],
+        "with `strict`, as TypeScript infers it, so does that of an export"
+    );
+}
+
+#[test]
+fn qbxlint_toml_sets_strict_per_folder_over_the_editor() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-strict-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    let write = |relative: &str, text: &str| {
+        let path = fixture.0.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("qbxlint.toml", "strict = true\n[[overrides]]\nfiles = ['loose/**']\nstrict = false\n");
+    write("fxmanifest.lua", "fx_version 'cerulean'\ngame 'gta5'\nclient_scripts { 'main.lua', 'loose/main.lua' }\n");
+    let text = "local n = tonumber('5')\nprint(n + 1)\n";
+    write("main.lua", text);
+    write("loose/main.lua", text);
+    let options = json!({ "diagnostics": { "strict": false } });
+    let mut client = Client::start_with_options(fixture.0.clone(), json!({}), options);
+    client.open_with("main.lua", text);
+    client.open_with("loose/main.lua", text);
+    let codes = |client: &mut Client, file: &str| -> Vec<String> {
+        findings(client, file, &["need-check-nil"]).into_iter().map(|(code, ..)| code).collect()
+    };
+    assert_eq!(codes(&mut client, "main.lua"), ["need-check-nil"], "the configuration file wins over the editor");
+    assert!(codes(&mut client, "loose/main.lua").is_empty(), "an override turns it off for its files");
+    client.set_strict(true);
+    assert!(codes(&mut client, "loose/main.lua").is_empty(), "also when the editor turns it on");
 }
 
 #[test]
@@ -7414,8 +7928,10 @@ print(describe, amount)
     let finding = |code: &str, needle: &str, message: &str| {
         (code.to_string(), pos(text, needle, 0).0 as u64, message.to_string())
     };
+    let codes = ["assign-type-mismatch", "param-type-mismatch", "return-type-mismatch"];
+    let relaxed = findings(&mut client, CLIENT, &codes);
     assert_eq!(
-        findings(&mut client, CLIENT, &["assign-type-mismatch", "param-type-mismatch", "return-type-mismatch"]),
+        relaxed,
         [
             finding("assign-type-mismatch", "size = maybe()", "Cannot assign `number?` to `size` of type `number`"),
             finding(
@@ -7452,6 +7968,16 @@ print(describe, amount)
         ],
         "each type a union lists has to fit, `nil` too, except the `nil` of a field read, as \
          lua-language-server reads fields"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &codes)),
+        [finding(
+            "assign-type-mismatch",
+            "box.size = other.extra",
+            "Cannot assign `number?` to field `size` of type `number`"
+        )],
+        "with `strict`, as TypeScript reads it, the `nil` of a field read counts too"
     );
 }
 
@@ -7524,8 +8050,9 @@ TaskStartScenarioInPlace(PlayerPedId(), 'WORLD_HUMAN_SMOKING', true)
     let finding = |needle: &str, message: &str| {
         ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
     };
+    let relaxed = findings(&mut client, CLIENT, &["param-type-mismatch"]);
     assert_eq!(
-        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        relaxed,
         [
             finding("GetHashKey(name)", "Cannot assign `Hash` to parameter `name` of type `string`"),
             finding("volume', volume)", "Cannot assign `number` to parameter `value` of type `string`"),
@@ -7534,6 +8061,20 @@ TaskStartScenarioInPlace(PlayerPedId(), 'WORLD_HUMAN_SMOKING', true)
         "`nil`, `0` and `false` are NULL to a native and a literal is the text it is written as, while \
          other numbers and booleans are no string; a boolean still passes for a number"
     );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &["param-type-mismatch"])),
+        [
+            finding("ReleaseNamedRendertarget(0)", "Cannot assign `integer` to parameter `name` of type `string`"),
+            finding("ReleaseNamedRendertarget(false)", "Cannot assign `boolean` to parameter `name` of type `string`"),
+            finding("'volume', 30", "Cannot assign `integer` to parameter `value` of type `string`"),
+            finding("'volume', true", "Cannot assign `boolean` to parameter `value` of type `string`"),
+            finding("TaskStartScenarioInPlace", "Cannot assign `boolean` to parameter `timeToLeave` of type `integer`"),
+        ],
+        "with `strict`, as TypeScript reads the declared types, no number or boolean is a string, and a boolean \
+         is no number"
+    );
+    client.set_strict(false);
     let server = "\
 ---@type number
 local src = 1
@@ -7543,6 +8084,12 @@ DropPlayer(src, 'kicked')
     assert!(
         findings(&mut client, SERVER, &["param-type-mismatch"]).is_empty(),
         "a player's server id is a number to scripts"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        findings(&mut client, SERVER, &["param-type-mismatch"]).len(),
+        1,
+        "with `strict`, it is no string either"
     );
 }
 
@@ -9461,7 +10008,6 @@ print(count, half, bare)
                 "holder.value = 2",
                 "Cannot assign `integer` to field `value` of type `string`"
             ),
-            finding("missing-fields", "half = {", "Missing required fields in type `Test.Pair`: `right`"),
             finding("missing-fields", "bare = {", "Missing required fields in type `Test.Holder`: `value`"),
             finding(
                 "return-type-mismatch",
@@ -9470,7 +10016,17 @@ print(count, half, bare)
             ),
             finding("impossible-comparison", "if holder", "Comparing `string` with `1` is always false"),
         ],
-        "`right` of `Test.Pair<string>` and `value` of a `Test.Holder` without arguments take any value, but are required"
+        "`value` of a `Test.Holder` without arguments takes any value, but is required, while a class given \
+         type arguments requires no field, as in lua-language-server"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["missing-fields"]),
+        [
+            finding("missing-fields", "half = {", "Missing required fields in type `Test.Pair`: `right`"),
+            finding("missing-fields", "bare = {", "Missing required fields in type `Test.Holder`: `value`"),
+        ],
+        "with `strict`, as in TypeScript, `right` of `Test.Pair<string>` takes any value, but is required"
     );
 }
 

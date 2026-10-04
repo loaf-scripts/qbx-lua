@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lsp_types::{DiagnosticSeverity, Location, NumberOrString, Position, Range, Url};
+use qbx_lua_analysis::locale;
 use qbx_lua_analysis::startup::StartOrder;
-use qbx_lua_analysis::{locale, Level};
 use serde::{Deserialize, Serialize};
 
 use super::resource_assets::SOURCE_BYTES;
@@ -409,7 +409,7 @@ pub fn diagnostic_snapshot(
     docs: &Documents,
     params: DiagnosticsParams,
     enabled: bool,
-    overrides: &[(String, Level)],
+    settings: &diagnostics::RuleSettings,
 ) -> Result<Page<DiagnosticItem>, String> {
     let (offset, limit) = paging(params.offset, params.limit, 200)?;
     let requested = params.uri.as_ref().map(local_path).transpose()?.map(|path| normalized(&path));
@@ -530,7 +530,7 @@ pub fn diagnostic_snapshot(
             start_order,
             start_order_complete,
         };
-        for diagnostic in diagnostics::diagnostics_with_support(ws, doc, overrides, &crossrefs, Some(&support)) {
+        for diagnostic in diagnostics::diagnostics_with_support(ws, doc, settings, &crossrefs, Some(&support)) {
             if items.len() >= MAX_RESULTS {
                 break;
             }
@@ -565,7 +565,7 @@ pub fn diagnostic_snapshot(
                 continue;
             }
             let mut config = ws.lint_config.for_file(&locale.path);
-            overrides.iter().for_each(|(code, level)| config.set_default(code, *level));
+            settings.apply(&mut config);
             let Some(severity) = config.severity(qbx_lua_analysis::rules::UNUSED_LOCALE_KEY) else { continue };
             let positions = InspectionPositions::new(&locale.source);
             for diagnostic in qbx_lua_analysis::lint::unused_locale_keys_from(locale, usage.into_iter()) {

@@ -15,7 +15,8 @@ For example:
   "diagnostics": {
     "enable": true,
     "workspace": true,
-    "rules": { "unused-argument": "off" }
+    "rules": { "unused-argument": "off" },
+    "strict": false
   },
   "inlayHints": { "enable": true },
   "semanticTokens": { "enable": true },
@@ -31,6 +32,7 @@ Use absolute paths in `library`; Windows paths such as `C:/server/resources` wor
 | `diagnostics.enable` | `true` | Publish diagnostics. |
 | `diagnostics.workspace` | `true` | Also report diagnostics for closed files in the workspace. |
 | `diagnostics.rules` | `{}` | Rule levels, as `off`, `hint`, `info`, `warning` or `error`, for the rules the config file does not set. |
+| `diagnostics.strict` | `false` | Report what TypeScript's strict mode does beyond lua-language-server, in the files whose config file does not set `strict`. See [Strict mode](../../../docs/reference.md#strict-mode). |
 | `inlayHints.enable` | `true` | Return parameter hints. |
 | `semanticTokens.enable` | `true` | Return semantic highlighting tokens. |
 | `hover.verbosity` | `1` | The [hover level](#client-capabilities-and-file-changes), from `0` to `5`, of hover requests that ask for none. |
@@ -53,7 +55,8 @@ The server discovers `qbxlint.toml` from the first workspace root and its ancest
 `[format]` section controls formatting. Without a discovered config file, the editor's formatting
 request supplies indentation width and tabs/spaces. The rule levels of the config file, in
 `[rules]`, in `[[overrides]]` or taken from LuaLS or EmmyLua settings, take precedence over
-`diagnostics.rules` from the client, which sets the level of the remaining rules.
+`diagnostics.rules` from the client, which sets the level of the remaining rules. Its `strict`,
+also one an `[[overrides]]` entry sets, takes precedence over `diagnostics.strict` in the same way.
 
 On-type formatting triggers on a newline and only touches LuaCATS lines. Enter at the end of a
 `---@tag ...` line starts the new line with `---@` at the same indentation. Enter on a line that

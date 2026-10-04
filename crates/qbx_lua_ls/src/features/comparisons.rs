@@ -21,7 +21,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::class_tables::{Classes, Key};
 use super::unknown_types::has_param_line;
-use crate::infer::{assigned_value, distinct_bases, Bases, Decl, Expected, Infer, SetTypes};
+use crate::infer::{assigned_value, distinct_bases, iterated_table, Bases, Decl, Expected, Infer, SetTypes};
 use crate::narrow::{Origin, DECLARATION};
 use crate::types::Type;
 
@@ -48,6 +48,12 @@ pub struct Declared<'a, 'b> {
     keeps_annotations: bool,
     /// Whether the `nil` or `false` that a function without `@return` returns on some path counts.
     returned_nils: bool,
+    /// Whether only what annotations declare counts: a table constructor then gives the table it
+    /// builds no type, rather than the `{ label: string }` of `{ label = 'x' }`, a generic function
+    /// returns what its `@return` gives with the generics the arguments bind, and an entry such as
+    /// `list[i]` or a loop variable has the type it is read as when an annotation declares the table
+    /// it comes from.
+    annotations_only: bool,
     /// Where the expression that each `--[[@as T]]` casts starts, by where it ends.
     cast_starts: OnceCell<FxHashMap<u32, u32>>,
     /// The table whose sequence each numeric `for` variable walks, by the variable.
@@ -70,6 +76,7 @@ impl<'a, 'b> Declared<'a, 'b> {
             classes: Classes::new(infer),
             keeps_annotations: false,
             returned_nils: false,
+            annotations_only: false,
             cast_starts: OnceCell::new(),
             sequences: OnceCell::new(),
             declarations: RefCell::default(),
@@ -88,9 +95,16 @@ impl<'a, 'b> Declared<'a, 'b> {
 
     /// Also takes a function without `@return` at its word where a `return` of it gives `nil` or
     /// `false`, as `return` and `return nil` do, as lua-language-server infers it. Running past the
-    /// end of its body is no such `return`.
+    /// end of its body is no such `return`, unless `strict` asks for what TypeScript infers.
     pub fn with_returned_nils(infer: &'a Infer<'b>) -> Self {
         Self { returned_nils: true, ..Self::new(infer) }
+    }
+
+    /// Reads only what annotations declare: a table constructor gives the table it builds no type,
+    /// as lua-language-server leaves the fields of such a table open, while a loop variable over a
+    /// table an annotation declares has the type its loop gives it.
+    pub fn annotations(infer: &'a Infer<'b>) -> Self {
+        Self { annotations_only: true, ..Self::new(infer) }
     }
 
     /// The type of `expr` as far as it is declared, and `unknown` beyond that.
@@ -119,7 +133,7 @@ impl<'a, 'b> Declared<'a, 'b> {
                 Some(name) => self.narrowed_field(expr, self.field(base, &Key::Name(name), true, depth)),
                 None => {
                     let ty = self.field(base, &Key::Typed(self.key(index, depth)), true, depth);
-                    match self.in_sequence(base, index) {
+                    match !self.infer.strict() && self.in_sequence(base, index) {
                         true => ty.without_nil(),
                         false => ty,
                     }
@@ -152,6 +166,7 @@ impl<'a, 'b> Declared<'a, 'b> {
                     Type::Unknown
                 }
             }
+            ExprKind::Table(_) if self.annotations_only => Type::Unknown,
             // Literals, and operators whose result is of one kind whatever their operands are.
             _ => self.infer.expr(expr),
         }
@@ -192,13 +207,25 @@ impl<'a, 'b> Declared<'a, 'b> {
     /// The declared types of the values that `origin` gives the local `id`: that of its value, or for
     /// a set of `Origin::Others` those of the values in it, each once. `None` while they are being
     /// found.
+    ///
+    /// Without `strict`, the values that code running at other times gives a local without
+    /// `---@type` or `@param` hold no `nil`: lua-language-server reads such a local in another
+    /// function as its declaration gives it, so `coords = nil` in one function leaves `coords.x` in
+    /// another unchecked, as a `nil` assigned in the same function is not.
     fn bases(&self, id: LocalId, origin: u32, depth: u32) -> Option<Bases> {
         let flow = self.infer.ctx.flow();
         let Origin::Others(set) = flow.origin(origin) else { return self.origin(id, origin, depth).map(Bases::One) };
         if let Some(types) = self.others.borrow().get(&(id, origin)) {
             return Some(Bases::Set(types.clone()));
         }
-        let (types, complete) = distinct_bases(flow.others(set).iter().map(|other| self.origin(id, *other, depth)));
+        let drops_nil = !self.infer.strict() && self.infer.annotation(id).is_none();
+        let given = flow.others(set).iter().map(|other| self.origin(id, *other, depth));
+        let given = given.filter_map(|ty| match ty {
+            Some(Type::Nil) if drops_nil => None,
+            Some(ty) if drops_nil => Some(Some(ty.without_nil())),
+            ty => Some(ty),
+        });
+        let (types, complete) = distinct_bases(given);
         if complete {
             self.others.borrow_mut().insert((id, origin), types.clone());
         }
@@ -328,6 +355,10 @@ impl<'a, 'b> Declared<'a, 'b> {
             Some(Decl::Param { expected: Some(Expected::Arg { .. }), .. }) => self.callback_param(id, depth),
             Some(Decl::LocalFunction { .. } | Decl::SelfParam { .. }) => self.infer.local_type(id),
             Some(Decl::NumericFor) => Type::Number,
+            Some(Decl::GenericFor { stmt, .. }) if self.annotations_only => match iterated_table(stmt) {
+                Some((table, _)) if !self.declared(table, depth + 1).is_unknown() => self.infer.local_type(id),
+                _ => Type::Unknown,
+            },
             _ => Type::Unknown,
         }
     }
@@ -450,7 +481,9 @@ impl<'a, 'b> Declared<'a, 'b> {
 
     /// Whether `base[index]` reads an item of the sequence a numeric `for` walks, as `rows[i]` in
     /// `for i = 1, #rows do` or `for i = #rows, 1, -1 do`: the `#` of a sequence is a border of it,
-    /// so the loop only reads values it holds, unless it assigns the table or the loop variable.
+    /// so the loop only reads values it holds, unless it assigns the table or the loop variable. With
+    /// `strict`, such an item has the type the table declares for it, `nil` included, as TypeScript
+    /// reads an indexed type.
     fn in_sequence(&self, base: &Expr, index: &Expr) -> bool {
         let resolution = self.infer.ctx.resolution;
         let local = |expr: &Expr| match &expr.unparen().kind {
@@ -472,11 +505,11 @@ impl<'a, 'b> Declared<'a, 'b> {
     /// What `call` returns when its function declares it. A native documented as `boolean` can
     /// give scripts `1` instead of `true`, so code compares its result with either.
     fn returned(&self, call: &Expr) -> Option<Vec<Type>> {
-        let values = self
-            .infer
-            .declared_returns(call)
-            .or_else(|| self.callback_returns(call))
-            .or_else(|| self.returned_nils(call))?;
+        let declared = match self.annotations_only {
+            true => self.infer.annotated_returns(call),
+            false => self.infer.declared_returns(call),
+        };
+        let values = declared.or_else(|| self.callback_returns(call)).or_else(|| self.returned_nils(call))?;
         if !self.is_native_call(call) {
             return Some(values);
         }
@@ -504,17 +537,37 @@ impl<'a, 'b> Declared<'a, 'b> {
 
     /// With `returned_nils`, what `call` returns where its function, without `@return`, returns
     /// `nil` or `false` on some path and something else on another: the values its `return`s pass
-    /// there. Where it never returns either, the value it returns is not declared.
+    /// there, and with `strict` the `nil` of running past the end of its body, as TypeScript infers
+    /// `undefined` there. Where it never returns either, the value it returns is not declared.
+    ///
+    /// Without `strict`, a call through `exports` gives none: lua-language-server does not see the
+    /// functions that resources export, as `exports['qb-core']:GetPlayer(source)` runs one whose
+    /// `return nil` TypeScript would count.
     fn returned_nils(&self, call: &Expr) -> Option<Vec<Type>> {
-        if !self.returned_nils {
+        if !self.returned_nils || (!self.infer.strict() && self.through_exports(call)) {
             return None;
         }
         let missing = |part: &Type| matches!(part, Type::Nil | Type::BooleanLit(false));
-        let values = self.infer.inferred_returns_of(call)?.into_iter().map(|ty| match &ty {
+        let values = self.infer.inferred_returns_of(call, self.infer.strict())?.into_iter().map(|ty| match &ty {
             Type::Union(parts) if parts.iter().any(missing) && !parts.iter().all(missing) => ty,
             _ => Type::Unknown,
         });
         Some(values.collect())
+    }
+
+    /// Whether `call` reaches its function through `exports`, as `exports.res:Fn()` does.
+    fn through_exports(&self, call: &Expr) -> bool {
+        let mut root = match &call.kind {
+            ExprKind::Call { callee, .. } => &**callee,
+            ExprKind::MethodCall { base, .. } => &**base,
+            _ => return false,
+        };
+        while let ExprKind::Field { base, .. } | ExprKind::Index { base, .. } = &root.unparen().kind {
+            root = base;
+        }
+        let ExprKind::Name(name) = &root.unparen().kind else { return false };
+        name.text == "exports"
+            && matches!(self.infer.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Global(_)))
     }
 
     fn is_native_call(&self, call: &Expr) -> bool {

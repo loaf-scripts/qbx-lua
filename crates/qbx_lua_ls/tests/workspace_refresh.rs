@@ -94,7 +94,7 @@ fn guarded_event_diagnostics_match_the_cli() {
         }
     }
     let doc = fixture.document(&mut ws, "demo/client.lua", "TriggerEvent('demo:server', 1)\n");
-    let found = diagnostics::diagnostics(&ws, &doc, &[], &ws.crossrefs());
+    let found = diagnostics::diagnostics(&ws, &doc, &Default::default(), &ws.crossrefs());
     assert!(found.iter().any(|d| d.code == Some(NumberOrString::String("fivem/event-wrong-side".into()))));
 }
 
@@ -191,7 +191,7 @@ fn configured_imports_define_globals_by_side_and_follow_the_config() {
     fixture.write("other/fxmanifest.lua", "client_script 'client.lua'\n");
     let undefined = |ws: &mut Workspace, relative: &str| -> Vec<String> {
         let doc = fixture.document(ws, relative, "print(SharedApi, ClientApi)\n");
-        let found = diagnostics::diagnostics(ws, &doc, &[], &ws.crossrefs());
+        let found = diagnostics::diagnostics(ws, &doc, &Default::default(), &ws.crossrefs());
         let undefined = found.into_iter().filter(|d| d.code == Some(NumberOrString::String("undefined-global".into())));
         undefined.map(|d| d.message.split('\'').nth(1).unwrap().to_string()).collect()
     };

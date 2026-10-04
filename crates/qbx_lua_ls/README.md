@@ -83,7 +83,10 @@ Available features depend on the editor's LSP client.
   lua-language-server and TypeScript do. `inject-field`
   reports fields set through a value whose class or table type does not have them,
   `undefined-field` fields read from one, and
-  `need-check-nil` a value that may be `nil` used where a missing value raises an error.
+  `need-check-nil` a value that may be `nil` used where a missing value raises an error. These
+  report what lua-language-server reports, and the
+  [`strict`](../../docs/reference.md#strict-mode) setting adds what TypeScript's strict mode
+  reports, such as `n + 1` for a `number?`.
   `close-non-object` reports a `<close>` local whose value cannot be closed, such as a number, and
   `circle-doc-class` a `---@class` that inherits from itself through classes of any file.
   `deprecated` reports reads of globals, fields and methods whose definitions all have
@@ -449,7 +452,8 @@ Send this object directly as LSP `initializationOptions`:
   "diagnostics": {
     "enable": true,
     "workspace": true,
-    "rules": {}
+    "rules": {},
+    "strict": false
   },
   "inlayHints": { "enable": true },
   "semanticTokens": { "enable": true }
@@ -458,7 +462,8 @@ Send this object directly as LSP `initializationOptions`:
 
 For `workspace/didChangeConfiguration`, put the same object in `settings.qbxLua` or directly in
 `settings`. Restart the server after changing `library`. A discovered `qbxlint.toml` supplies
-lint and formatting settings; its rule levels take precedence over the editor's `diagnostics.rules`.
+lint and formatting settings; its rule levels take precedence over the editor's `diagnostics.rules`,
+and its `strict` over `diagnostics.strict`.
 
 The server relies on the editor for file-watch notifications. If the client does not send them,
 send a `qbx/reindex` request with `null` parameters or restart after external file or manifest

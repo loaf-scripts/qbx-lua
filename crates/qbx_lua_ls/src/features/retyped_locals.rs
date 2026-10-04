@@ -3,15 +3,22 @@
 //! TypeScript, such a local has the type of the value it is declared with. A literal written out
 //! stands for its kind, so `local mode = 'dev'` takes any string and `local count = 0` any number,
 //! while the literals that a function declares it returns, as the `'a'|'b'` of `getMode()`, are the
-//! only ones it takes. A loop variable has the type its loop gives it, and a parameter that of the
-//! function type its function is passed or written as. A local declared without a value, or as
-//! `nil`, `unknown` or `any`, takes any value.
+//! only ones it takes. A loop variable has the type its loop gives it. A local declared without a
+//! value, or as `nil`, `unknown` or `any`, takes any value.
 //!
 //! The check is that of `assign-type-mismatch`, for each type the value may be: a different kind of
 //! value, or a literal the type does not list, so `nil`, or a `string?`, needs a local that may be
 //! `nil`. A native returns a `BOOL` as a boolean or an integer, so either passes for the other where
 //! a native gives it. Locals typed with `---@type` or `@param` are left to `assign-type-mismatch`,
 //! `<const>` and `<close>` ones to `const-reassign`.
+//!
+//! As in lua-language-server, a local declared with a table constructor may be cleared with `nil`,
+//! and the `nil` and `false` of a value read from a field or a key are left out. So is a `nil` that
+//! no annotation or stub declares: lua-language-server leaves out the one a function without
+//! `@return` gives, as `nextFreePoint()` does by running past its end when it finds none, also where
+//! a local passes it on. Parameters are not checked. With `strict`, as in TypeScript, all of
+//! those count, and a parameter has the type of the function type its function is passed or
+//! written as.
 
 use qbx_lua_analysis::scope::{LocalId, Resolved};
 use qbx_lua_syntax::ast::*;
@@ -19,9 +26,10 @@ use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
 use rustc_hash::FxHashMap;
 
+use super::arguments::reads_field;
 use super::class_tables::Classes;
 use super::comparisons::Declared;
-use super::unknown_types::has_param_line;
+use super::unknown_types::{has_param_line, value_at};
 use crate::infer::{Decl, Expected, Infer};
 use crate::narrow::DECLARATION;
 use crate::types::Type;
@@ -79,6 +87,7 @@ impl Finder<'_, '_> {
             Decl::LocalFunction { .. } | Decl::NumericFor | Decl::GenericFor { .. } => {
                 self.infer.origin_type(id, DECLARATION)?.widen()
             }
+            Decl::Param { .. } | Decl::SelfParam { .. } if !self.infer.strict() => return None,
             // What the callee declares, rather than what the calls that reach the function pass.
             Decl::Param { expected: Some(Expected::Arg { .. }), .. } => {
                 self.infer.declared_callback_param(id, |arg| self.declared.of(arg))?
@@ -144,13 +153,55 @@ impl Finder<'_, '_> {
             }
             part => takes(part),
         };
+        // A table that a local is declared with can be dropped, as lua-language-server lets it.
+        let clears_table = |part: &Type| *part == Type::Nil && !self.infer.strict() && self.declared_with_table(id);
         let mut parts = Vec::new();
         self.classes.flatten(&given, from, &mut parts, 0);
-        if parts.iter().all(takes_part) {
+        if parts.iter().all(|part| takes_part(part) || clears_table(part)) {
             return;
         }
         let shown = if self.classes.literal_mismatch(&expected, from, &given) { given } else { given.widen() };
         self.out.push((span, format!("Cannot assign `{shown}` to `{}`, defined as `{expected}`", name.text)));
+    }
+
+    /// Whether a table constructor gives the local `id` the value it is declared with.
+    fn declared_with_table(&self, id: LocalId) -> bool {
+        let ctx = self.infer.ctx;
+        let Some(Decl::Local { stmt, index }) = ctx.decl(ctx.resolution.local(id).decl.start) else { return false };
+        let StmtKind::Local { exprs, .. } = &stmt.kind else { return false };
+        exprs.get(*index).is_some_and(|value| matches!(value.unparen().kind, ExprKind::Table(_)))
+    }
+
+    /// The type of `given`, value `index` of those that `exprs` store, as the check reads it.
+    /// Without `strict`, the `nil` and `false` of a value read from a field or a key are left out,
+    /// as lua-language-server does not narrow them, and so is a `nil` that no annotation or stub
+    /// declares: one that a function without `@return` gives, or a local that holds such a value.
+    fn checked_value(&self, exprs: &[Expr], index: usize, given: Type) -> Type {
+        let Some(value) = value_at(exprs, index).filter(|_| !self.infer.strict()) else { return given };
+        if reads_field(value) {
+            return self.infer.without_falsy(&given);
+        }
+        let from = self.classes.file();
+        let holds_nil = |ty: &Type| {
+            let mut parts = Vec::new();
+            self.classes.flatten(ty, from, &mut parts, 0);
+            parts.contains(&Type::Nil)
+        };
+        if !holds_nil(&given) {
+            return given;
+        }
+        let declared = match exprs.get(index) {
+            Some(value) => self.declared.of(value),
+            None => self
+                .infer
+                .declared_returns(value)
+                .and_then(|values| values.into_iter().nth(index + 1 - exprs.len()))
+                .unwrap_or_default(),
+        };
+        match holds_nil(&declared) {
+            true => given,
+            false => given.without_nil(),
+        }
     }
 
     /// What `target ..= value`, or another compound assignment, stores in the local `target` names.
@@ -188,6 +239,7 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
                         Some(annotated) => self.check(target, annotated.clone(), false, span),
                         None => {
                             let native = self.is_native_value(exprs, index);
+                            let given = self.checked_value(exprs, index, given);
                             self.check(target, given, native, span);
                         }
                     }

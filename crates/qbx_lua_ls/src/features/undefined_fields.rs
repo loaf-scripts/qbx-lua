@@ -1,14 +1,22 @@
 //! `undefined-field`: fields that code reads from a value whose type does not have them, as
-//! TypeScript reports a property its type does not declare. The linter reports the same code for
-//! the standard library tables, like `string.nope`; this module checks the values whose type the
-//! language server knows. A type has the fields that `inject-field` lets code set: those of a class
-//! or table type, also the `{ label: string }` a table constructor gives, and those set through the
-//! names that own its table, such as a global path, the table a `---@class` annotation declares,
-//! `self` in a method or a local declared with a table at the top of a file. Reads such as
-//! `value.name`, `value['name']` and `value:name()` are checked, also in conditions like
-//! `if value.name then`, and a union lacks a field when none of its parts has it. A local that is
-//! assigned again has the types of all the values that may reach the read. A value that is surely
-//! `nil`, as what a call of a function that returns nothing gives, has no fields at all, as in LuaLS.
+//! lua-language-server and TypeScript report a property its type does not declare. The linter
+//! reports the same code for the standard library tables, like `string.nope`; this module checks
+//! the values whose type the language server knows. A type has the fields that `inject-field` lets
+//! code set: those of a class or table type, and those set through the names that own its table,
+//! such as a global path, the table a `---@class` annotation declares, `self` in a method or a
+//! local declared with a table at the top of a file. Reads such as `value.name`, `value['name']`
+//! and `value:name()` are checked, also in conditions like `if value.name then`, and a union lacks
+//! a field when none of its parts has it. A local that is assigned again has the types of all the
+//! values that may reach the read. A value that is surely `nil`, as what a call of a function that
+//! returns nothing gives, has no fields at all, as in LuaLS.
+//!
+//! As in lua-language-server, a table whose type no annotation declares may have any field, as
+//! `inject-field` reads it, and so may a local without an annotation that may hold a value of
+//! unknown type. A field that the code sets through a local is one that the local has, also where
+//! `inject-field` reports setting it. With `strict`, as in TypeScript, the table that a constructor
+//! builds has the fields it and the names that own it give it, such as the `{ label: string }` of
+//! `{ label = 'x' }`, a local keeps the type it is declared with when it is given a value of unknown
+//! type, and a field set through a local is still missing from its type.
 //!
 //! Some values may have any field, so reads from them are left alone:
 //!
@@ -24,13 +32,14 @@
 //! - strict classes, whose fields `undeclared-field` checks.
 
 use qbx_lua_analysis::env::builtins;
-use qbx_lua_analysis::scope::Resolved;
+use qbx_lua_analysis::scope::{LocalId, Resolved};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::{SmolStr, Span};
+use rustc_hash::FxHashSet;
 
 use super::class_tables::{accesses, Classes, Key};
 use super::comparisons::Declared;
-use super::injected_fields::{message, through_self};
+use super::injected_fields::{message, takes_any_field, through_self};
 use crate::index::{instance_class, is_local_table, FileId};
 use crate::infer::{Decl, Infer};
 use crate::narrow::Origin;
@@ -41,12 +50,29 @@ use crate::types::Type;
 pub fn undefined_fields(infer: &Infer, chunk: &Chunk, by_default: impl Fn(FileId) -> bool) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
     let declared = Declared::new(infer);
+    let annotated = Declared::annotations(infer);
+    let accesses = accesses(infer, chunk, true);
+    // The fields that the code sets through each local, which it has outside `strict`.
+    let set_through: FxHashSet<(LocalId, &str)> = match infer.strict() {
+        true => FxHashSet::default(),
+        false => accesses
+            .iter()
+            .filter(|access| access.read.is_none())
+            .filter_map(|access| match access.key {
+                Key::Name(name) => Some((local_of(infer, access.base?)?, name)),
+                Key::Typed(_) => None,
+            })
+            .collect(),
+    };
     let mut out = Vec::new();
-    for access in accesses(infer, chunk, true) {
+    for access in &accesses {
         let (Some(base), Key::Name(name)) = (access.read, &access.key) else { continue };
+        if local_of(infer, base).is_some_and(|local| set_through.contains(&(local, *name))) {
+            continue;
+        }
         let owner = match base.unparen().kind {
             ExprKind::Name(_) => classes.value_type(base),
-            _ => access.owner,
+            _ => access.owner.clone(),
         };
         // `nil` has no fields, as what a function that returns nothing gives.
         if owner == Type::Nil {
@@ -63,7 +89,10 @@ pub fn undefined_fields(infer: &Infer, chunk: &Chunk, by_default: impl Fn(FileId
         if through_self(infer, access.holder) && !parts.iter().any(is_class) {
             continue;
         }
-        let lacks = |ty: &&Type| lacks(infer, &classes, &declared, base, ty, &access.key, &by_default);
+        let lacks = |ty: &&Type| {
+            !takes_any_field(infer, &classes, &annotated, Some(base), ty)
+                && lacks(infer, &classes, &declared, base, ty, &access.key, &by_default)
+        };
         if parts.is_empty() || !parts.iter().all(lacks) {
             continue;
         }
@@ -84,6 +113,15 @@ pub fn undefined_fields(infer: &Infer, chunk: &Chunk, by_default: impl Fn(FileId
         out.push((access.span, message(infer, name, &owner, access.holder)));
     }
     out
+}
+
+/// The local that `expr` names.
+fn local_of(infer: &Infer, expr: &Expr) -> Option<LocalId> {
+    let ExprKind::Name(name) = &expr.unparen().kind else { return None };
+    match infer.ctx.resolution.resolve_at(name.span.start) {
+        Some(Resolved::Local(id)) => Some(id),
+        _ => None,
+    }
 }
 
 /// Whether a value of type `ty`, read from `base`, lacks the field that `key` names. Values that

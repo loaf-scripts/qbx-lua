@@ -104,10 +104,13 @@ impl Flow<'_, '_> {
     /// Whether running `stmt` never goes on to the statement after it: a `break` or `goto`, an `if`
     /// with an `else` none of whose branches runs past its end, or a `while true` loop that nothing
     /// leaves but a `return`. A loop with a `return` in it may still run zero times, and a `do`
-    /// block is left alone, as `do return end` skips the rest of a function on purpose.
+    /// block is left alone, as `do return end` skips the rest of a function on purpose. With
+    /// `strict`, a call of `error` or `os.exit` is one too, as TypeScript reports the code after a
+    /// `throw`.
     fn never_finishes(&self, stmt: &Stmt) -> bool {
         match &stmt.kind {
             StmtKind::Break | StmtKind::Goto(_) => true,
+            StmtKind::Expr(_) if self.input.config.strict() => self.exits(stmt),
             StmtKind::If { branches, else_block: Some(else_block) } => {
                 branches.iter().map(|branch| &branch.block).chain([else_block]).all(|block| self.leaves(block))
             }
