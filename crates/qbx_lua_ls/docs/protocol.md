@@ -18,7 +18,8 @@ For example:
     "rules": { "unused-argument": "off" }
   },
   "inlayHints": { "enable": true },
-  "semanticTokens": { "enable": true }
+  "semanticTokens": { "enable": true },
+  "hover": { "verbosity": 1 }
 }
 ```
 
@@ -32,6 +33,7 @@ Use absolute paths in `library`; Windows paths such as `C:/server/resources` wor
 | `diagnostics.rules` | `{}` | Rule levels, as `off`, `hint`, `info`, `warning` or `error`, for the rules the config file does not set. |
 | `inlayHints.enable` | `true` | Return parameter hints. |
 | `semanticTokens.enable` | `true` | Return semantic highlighting tokens. |
+| `hover.verbosity` | `1` | The [hover level](#client-capabilities-and-file-changes), from `0` to `5`, of hover requests that ask for none. |
 
 Send updates using `workspace/didChangeConfiguration`. Its parameters may use either form:
 
@@ -129,6 +131,17 @@ so that the client asks again once a word is typed and gets the names in scope b
 `=` is no trigger character, so Enter right after a typed `=` still starts a new line. Inside a
 string in one of those places, or on either side of the comparison, the string values replace the
 string's contents.
+
+A hover request may carry a `level`, as lua-language-server's VS Code client sends one. Level `0`
+writes the type of a value alone, as `local clothes: Clothes`, and keeps the description. Level `1`
+also lists the fields of its tables and the aliases they use. Each level up to `5` lists more
+fields, `14·n²` at level `n`, and writes out one more step: the tables that fields hold without a
+class to name them, the signatures of functions, and below the hover the classes it names, as
+`(class) Variation { ... }`, each once. Classes of the built-in runtime, such as `vector3`, are
+left out. A request without a `level` uses `hover.verbosity`. The
+result adds `maxLevel`: the level above the requested one when that writes more, and otherwise the
+lowest level that writes the same as the requested one. A hover that levels do not change, such as
+that of a native, has `maxLevel` `0`.
 
 The server requests file watches only when
 `workspace.didChangeWatchedFiles.dynamicRegistration` is `true`. It watches Lua, lint config,

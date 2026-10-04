@@ -188,6 +188,18 @@ impl Client {
         let result = self.request("textDocument/hover", self.position_params(relative, line, character));
         result["contents"]["value"].as_str().unwrap_or_default().to_string()
     }
+
+    /// The hover asked for at `level`, or at the server's own level without one, and the `maxLevel`
+    /// it is answered with.
+    fn hover_at_level(&mut self, relative: &str, line: u32, character: u32, level: Option<u32>) -> (String, u64) {
+        let mut params = self.position_params(relative, line, character);
+        if let Some(level) = level {
+            params["level"] = json!(level);
+        }
+        let result = self.request("textDocument/hover", params);
+        let text = result["contents"]["value"].as_str().unwrap_or_default().to_string();
+        (text, result["maxLevel"].as_u64().expect("maxLevel"))
+    }
 }
 
 impl Drop for Client {
@@ -9654,6 +9666,172 @@ print(clothes, nested)
     let (l, c) = pos(text, "nested)", 0);
     let hover = client.hover_text(CLIENT, l, c);
     assert!(hover.contains("inner: table,"), "a table the index holds stays `table`: {hover}");
+}
+
+#[test]
+fn hover_levels_write_out_the_classes_fields_use() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Variation
+---@field drawable number
+---@field texture number
+
+---@alias Test.HideMethod \"none\"|\"resetFlag\"
+
+---@class Test.Clothes
+---@field components { [string]: Test.Variation }
+---@field hideHead Test.HideMethod
+---@field coords vector3
+
+---@type Test.Clothes
+local clothes = { components = {}, hideHead = 'none', coords = vector3(0, 0, 0) }
+print(clothes)
+";
+    client.open_with(CLIENT, text);
+    let (l, c) = pos(text, "print(clothes", 6);
+    let alias = "type Test.HideMethod = \"none\"|\"resetFlag\"";
+    let variation = "(class) Test.Variation {\n    drawable: number,\n    texture: number,\n}";
+
+    let (compact, max) = client.hover_at_level(CLIENT, l, c, Some(0));
+    assert_eq!(compact, "```lua\nlocal clothes: Test.Clothes\n```");
+    assert_eq!(max, 1);
+
+    let (normal, max) = client.hover_at_level(CLIENT, l, c, Some(1));
+    assert!(normal.contains("components: { [string]: Test.Variation },") && normal.contains(alias), "{normal}");
+    assert!(!normal.contains("(class)"), "{normal}");
+    assert_eq!(max, 2);
+    assert_eq!(client.hover_at_level(CLIENT, l, c, None), (normal.clone(), 2), "level 1 is the default");
+
+    let (detailed, max) = client.hover_at_level(CLIENT, l, c, Some(2));
+    assert!(detailed.starts_with(&normal[..normal.len() - 4]), "{detailed}");
+    assert!(detailed.contains(&format!("{alias}\n{variation}\n```")), "{detailed}");
+    assert!(!detailed.contains("(class) vector3"), "classes of the built-in library are left out: {detailed}");
+    assert_eq!(max, 2);
+    assert_eq!(client.hover_at_level(CLIENT, l, c, Some(4)), (detailed, 2), "nothing more to write out");
+}
+
+#[test]
+fn hover_levels_list_more_fields_and_write_out_tables_and_functions() {
+    let mut client = Client::start(fixture_root());
+    let fields: String = (1..=20).map(|n| format!("---@field f{n} number\n")).collect();
+    let text = format!(
+        "\
+---@class Test.Wide
+{fields}
+---@type Test.Wide
+local wide = {{}}
+local nested = {{ inner = {{ value = 1, deeper = {{ flag = true }} }}, run = function(a) return a end }}
+print(wide, nested)
+"
+    );
+    client.open_with(CLIENT, &text);
+    let (l, c) = pos(&text, "print(wide", 6);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(1));
+    assert!(hover.contains("f14: number,\n    ...(+6)\n}"), "{hover}");
+    assert_eq!(max, 2);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(2));
+    assert!(hover.contains("f20: number,\n}") && !hover.contains("...("), "{hover}");
+    assert_eq!(max, 2);
+
+    let (l, c) = pos(&text, "nested)", 0);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(1));
+    assert!(hover.contains("inner: table,") && hover.contains("run: function,"), "{hover}");
+    assert_eq!(max, 2);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(2));
+    let inner = "inner: {\n        value: integer = 1,\n        deeper: table,\n    },";
+    assert!(hover.contains(inner) && hover.contains("run: fun(a"), "{hover}");
+    assert_eq!(max, 3);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(3));
+    assert!(hover.contains("deeper: {\n            flag: boolean = true,\n        },"), "{hover}");
+    assert_eq!(max, 3);
+}
+
+#[test]
+fn hover_levels_write_out_tables_that_assignments_of_two_tables_merge() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local defaults = {}
+defaults.Battery = {}
+defaults.Battery.Enabled = false
+TestPhoneConfig = {}
+TestPhoneConfig.Battery = {}
+TestPhoneConfig.Battery.Enabled = true
+if not TestPhoneConfig.Battery then
+    TestPhoneConfig = defaults
+end
+print(TestPhoneConfig)
+";
+    client.open_with(CLIENT, text);
+    let (l, c) = pos(text, "print(TestPhoneConfig", 6);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(1));
+    assert!(hover.contains("Battery: table,"), "{hover}");
+    assert_eq!(max, 2);
+    let (hover, _) = client.hover_at_level(CLIENT, l, c, Some(2));
+    assert!(hover.contains("Battery: {\n        Enabled: boolean = true,\n    },"), "{hover}");
+}
+
+#[test]
+fn hover_levels_of_functions_types_and_plain_values() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Mode \"fast\"|\"slow\"
+
+---@class Test.Car
+---@field speed number
+
+---Drives the car.
+---@param car Test.Car
+---@param mode Test.Mode
+local function drive(car, mode) end
+local count = 1
+drive(nil, 'fast')
+print(count, GetPlayerPed(-1))
+";
+    client.open_with(CLIENT, text);
+    let mode = "type Test.Mode = \"fast\"|\"slow\"";
+    let car = "(class) Test.Car {\n    speed: number,\n}";
+    let (l, c) = pos(text, "drive(nil", 0);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(0));
+    assert!(hover.contains("local function drive(car: Test.Car, mode: Test.Mode)\n```"), "{hover}");
+    assert!(hover.contains("Drives the car."), "level 0 keeps the description: {hover}");
+    assert_eq!(max, 1);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(1));
+    assert!(hover.contains(mode) && !hover.contains(car), "{hover}");
+    assert_eq!(max, 2);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(2));
+    assert!(hover.contains(&format!("{mode}\n{car}")), "{hover}");
+    assert_eq!(max, 2);
+
+    let (l, c) = pos(text, "---@param car Test.Car", 18);
+    let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(0));
+    assert_eq!((hover.lines().nth(1), max), (Some("(class) Test.Car"), 1), "{hover}");
+
+    for (needle, offset) in [("count, Get", 0), ("GetPlayerPed(-1)", 0)] {
+        let (l, c) = pos(text, needle, offset);
+        for level in [0, 1, 3] {
+            let (hover, max) = client.hover_at_level(CLIENT, l, c, Some(level));
+            assert_eq!(max, 0, "{needle} at level {level}: {hover}");
+        }
+    }
+}
+
+#[test]
+fn hover_level_defaults_to_the_verbosity_setting() {
+    let options = json!({ "hover": { "verbosity": 0 } });
+    let mut client = Client::start_with_options(fixture_root(), json!({}), options);
+    let text = "\
+---@class Test.Point
+---@field x number
+
+---@type Test.Point
+local point = { x = 1 }
+print(point)
+";
+    client.open_with(CLIENT, text);
+    let (l, c) = pos(text, "print(point", 6);
+    assert_eq!(client.hover_at_level(CLIENT, l, c, None), ("```lua\nlocal point: Test.Point\n```".into(), 1));
+    let (hover, _) = client.hover_at_level(CLIENT, l, c, Some(1));
+    assert!(hover.contains("x: number,"), "a level in the request wins: {hover}");
 }
 
 #[test]

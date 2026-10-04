@@ -42,11 +42,19 @@ pub struct ToggleSettings {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase", default)]
+pub struct HoverSettings {
+    /// The level of hovers whose request asks for none.
+    pub verbosity: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub library: Vec<String>,
     pub diagnostics: DiagnosticSettings,
     pub inlay_hints: ToggleSettings,
     pub semantic_tokens: ToggleSettings,
+    pub hover: HoverSettings,
 }
 
 impl Settings {
@@ -755,9 +763,11 @@ impl Server {
             }
             req::ResolveCompletionItem::METHOD => reply(completion::resolve(params(raw)?)),
             req::HoverRequest::METHOD => {
-                let p: HoverParams = params(raw)?;
-                let doc = self.doc(&p.text_document_position_params.text_document.uri)?;
-                reply(hover::hover(&self.ws, doc, p.text_document_position_params.position))
+                let p: hover::LevelHoverParams = params(raw)?;
+                let doc = self.doc(&p.params.text_document_position_params.text_document.uri)?;
+                let level = p.level.or(self.settings.hover.verbosity).unwrap_or(1);
+                let level = level.clamp(0, hover::MAX_LEVEL.into()) as u32;
+                reply(hover::hover(&self.ws, doc, p.params.text_document_position_params.position, level))
             }
             req::SignatureHelpRequest::METHOD => {
                 let p: SignatureHelpParams = params(raw)?;
