@@ -1358,3 +1358,32 @@ fn fields_declared_twice_for_one_class() {
         assert_eq!(reported_lines(quiet, "duplicate-doc-field"), Vec::<u32>::new(), "{quiet}");
     }
 }
+
+#[test]
+fn parentheses_that_continue_the_line_above() {
+    let source = "local a = print
+(\"x\"):len()
+local b = print
+(\"x\", \"y\"):len()
+local c = print
+(\"x\")
+local d = print
+(function() end)()
+local e = print -- note
+(a).f = 1
+local f = a:m
+(\"x\"):len()
+local g = print
+():len()
+local h = print(\"x\"):len()
+local i = Config.Some.Very.Long.Path.To.A.Function.Here
+(1)()
+print(b, c, d, e, f, g, h, i)";
+    assert_eq!(reported_lines(source, "newline-call"), [1, 7, 9, 16]);
+    let messages: Vec<String> = findings(source, "newline-call").into_iter().map(|(_, m)| m).collect();
+    assert_eq!(
+        messages[0],
+        "'print' on the line above is called with the parentheses on this line; put a ';' before the '(' if this line starts a new statement"
+    );
+    assert!(messages[3].starts_with("the expression on the line above is called"), "{}", messages[3]);
+}

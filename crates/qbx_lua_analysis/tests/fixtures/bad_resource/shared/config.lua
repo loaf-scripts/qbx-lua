@@ -24,3 +24,8 @@ end
 function Config.Notify(message)
     print('replaced', message)
 end
+
+local item = Config.Item
+local fallback = print
+(item):Use()
+print(fallback)

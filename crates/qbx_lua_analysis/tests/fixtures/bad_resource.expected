@@ -44,3 +44,4 @@ shared/config.lua:13:11 warning duplicate-doc-alias
 shared/config.lua:17:11 warning duplicate-doc-field
 shared/config.lua:19:11 warning undefined-doc-param
 shared/config.lua:24:10 warning duplicate-set-field
+shared/config.lua:29:18 warning newline-call

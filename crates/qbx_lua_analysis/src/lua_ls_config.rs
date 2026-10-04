@@ -53,6 +53,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "need-check-nil",
     "inject-field",
     "undefined-field",
+    "newline-call",
 ];
 
 #[derive(Debug, Default)]

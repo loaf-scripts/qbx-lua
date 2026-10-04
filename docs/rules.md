@@ -26,6 +26,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `unreachable-code` | warning | Code follows a control-flow statement that exits the path. |
 | `empty-block` | info | A block has no statements. |
 | `unbalanced-assignments` | warning | An assignment or `local` statement has mismatched target and value counts, as in `local a, b = 1`. A last value that is a call or `...` gives any number of values. |
+| `newline-call` | warning | A line starts with an expression in parentheses that is then indexed or called, such as `(value):method()` or `(function() end)()`, so Lua reads it as the argument of a call to the expression that ends the line above. A `;` before the `(` starts a new statement. |
 | `duplicate-index` | warning | A table constructor assigns the same key twice. |
 | `duplicate-set-field` | warning | A function is assigned to the same field of the same table twice in one block of a file, so the second replaces the first. A block is the main chunk, a function body, one branch of an `if`, or the code after an `if` with a branch that returns, such as an `IsDuplicityVersion()` or `lib.context` guard. A read of the field between the two, as a wrapper has, or an assignment to the table's variable or to a field it is in, also separates them. Definitions in other files or in `---@meta` files are not compared. |
 | `duplicate-argument` | error | Function parameters share a name. |
