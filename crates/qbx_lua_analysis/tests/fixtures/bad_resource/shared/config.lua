@@ -50,3 +50,5 @@ print(orphaned)
 ---@operator eq: boolean
 local vector = {}
 print(vector)
+
+---@cast missing string

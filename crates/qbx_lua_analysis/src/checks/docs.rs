@@ -1,7 +1,7 @@
 //! Doc comment checks that need no other file: `@param` names that no parameter of the documented
 //! function has, or that one doc comment repeats, aliases, enums and class fields that one file
-//! declares twice for one side, fields that follow no class, operators that do not exist, and
-//! functions whose parameters and returned values the doc comments leave out.
+//! declares twice for one side, fields that follow no class, operators and cast variables that do
+//! not exist, and functions whose parameters and returned values the doc comments leave out.
 
 use std::cell::OnceCell;
 use std::fmt;
@@ -12,7 +12,7 @@ use qbx_fivem_data::Side;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
-use qbx_luacats::luacats::{applies_on, declared_name, has_attribute, parse_doc_lines, DocGroup};
+use qbx_luacats::luacats::{applies_on, declared_name, has_attribute, parse_cast, parse_doc_lines, DocGroup};
 use qbx_luacats::types::{FunType, Type};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -35,7 +35,8 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let repeated_params = wanted(rules::DUPLICATE_DOC_PARAM, &["@param"]);
     let classless_fields = wanted(rules::DOC_FIELD_NO_CLASS, &["@field"]);
     let operators = wanted(rules::UNKNOWN_OPERATOR, &["@operator"]);
-    let tags = repeated_params || classless_fields || operators;
+    let casts = wanted(rules::UNKNOWN_CAST_VARIABLE, &["@cast"]);
+    let tags = repeated_params || classless_fields || operators || casts;
     if !(params || aliases || fields || globals || exported || incomplete || tags) {
         return;
     }
@@ -72,6 +73,9 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     }
     if operators {
         unknown_operators(&blocks, sink);
+    }
+    if casts {
+        unknown_cast_variables(input.resolution, &blocks, sink);
     }
 }
 
@@ -1048,6 +1052,24 @@ fn unknown_operators(blocks: &[DocBlock], sink: &mut Sink) {
             let (listed, last) = OPERATORS.split_at(OPERATORS.len() - 1);
             let message = format!("unknown operator '{name}'; @operator takes {} or {}", listed.join(", "), last[0]);
             sink.report(rules::UNKNOWN_OPERATOR, block.span(index, line.len() - rest.len(), name), message);
+        }
+    }
+}
+
+/// `unknown-cast-variable`: a `---@cast` whose name is no local in scope where it is written, such as
+/// a global, a field or a local declared below it, whose type it cannot change.
+fn unknown_cast_variables(resolution: &Resolution, blocks: &[DocBlock], sink: &mut Sink) {
+    for block in blocks {
+        for (index, line) in block.lines.iter().enumerate() {
+            let Some(cast) = parse_cast(line) else { continue };
+            let comment = block.comments[index];
+            if resolution.lookup_local_at(cast.name, comment.span.start).is_some() {
+                continue;
+            }
+            let Some(rest) = line.trim_start().strip_prefix("@cast") else { continue };
+            let offset = line.len() - rest.trim_start().len();
+            let message = format!("no local '{}' is in scope here; @cast changes the type of a local", cast.name);
+            sink.report(rules::UNKNOWN_CAST_VARIABLE, block.span(index, offset, cast.name), message);
         }
     }
 }

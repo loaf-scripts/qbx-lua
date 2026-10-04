@@ -1499,6 +1499,40 @@ return Vec";
 }
 
 #[test]
+fn casts_name_a_local_in_scope() {
+    let source = "Global = 1
+---@cast Global string
+local function f(p)
+    ---@cast p string
+    ---@cast self string
+    return p
+end
+local M = {}
+function M:m()
+    ---@cast self table
+    return self
+end
+---@cast later string
+local later = 1
+---@cast later string
+local x = 1 ---@cast x string
+---@cast M.field string
+for _, item in ipairs({}) do
+    ---@cast item string
+    print(item)
+end
+for i = 1, 2 do
+    ---@cast i string
+end
+print(f, later, x)";
+    assert_eq!(reported_lines(source, "unknown-cast-variable"), [2, 5, 13, 17]);
+    assert_eq!(
+        findings(source, "unknown-cast-variable")[0].1,
+        "no local 'Global' is in scope here; @cast changes the type of a local"
+    );
+}
+
+#[test]
 fn returns_without_values_that_end_a_function() {
     let source = "local function a() return end
 local function b() if a then return end end

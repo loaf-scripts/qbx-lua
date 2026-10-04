@@ -59,6 +59,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "duplicate-doc-param",
     "doc-field-no-class",
     "unknown-operator",
+    "unknown-cast-variable",
 ];
 
 #[derive(Debug, Default)]
