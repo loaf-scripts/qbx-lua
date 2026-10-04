@@ -490,6 +490,9 @@ pub struct ResourceEntry {
 
 type Slot = (FileId, u32);
 
+/// How far a declaration is from the code that reads it, as `Index::distance` measures it.
+pub type Distance = (u8, usize);
+
 #[derive(Debug, Default)]
 pub struct Index {
     files: Vec<Option<FileEntry>>,
@@ -521,6 +524,14 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     } else {
         path.to_path_buf()
     }
+}
+
+/// How many folders up from the folder of the file `from` the nearest folder that also holds the
+/// file `to` is.
+fn folders_up(from: &Path, to: &Path) -> usize {
+    let (Some(from), Some(to)) = (from.parent(), to.parent()) else { return 0 };
+    let shared = from.components().zip(to.components()).take_while(|(a, b)| a == b).count();
+    from.components().count() - shared
 }
 
 /// Adds `slot` to the slots of `key` in file order, where a scan puts them, so that what lookups find
@@ -938,10 +949,31 @@ impl Index {
         }
     }
 
+    /// How far the file `target`, which declares a global, is from code in `from`, nearest first: the
+    /// file itself, then the other files of its resource by how many folders up from `from` the
+    /// folder holding both is, then the files of other resources and the stubs, then definition files.
+    pub fn distance(&self, from: FileId, target: FileId) -> Distance {
+        if from == target {
+            return (0, 0);
+        }
+        let (Some(source), Some(other)) = (self.file(from), self.file(target)) else { return (2, 0) };
+        if other.defines_for_all() {
+            return (3, 0);
+        }
+        match (source.resource, other.resource) {
+            (Some(a), Some(b)) if a == b => (1, folders_up(&source.path, &other.path)),
+            _ => (2, 0),
+        }
+    }
+
+    /// The declarations of the global `name` that code in `from` sees, nearest first.
     pub fn globals_named(&self, name: &str, from: FileId) -> Vec<(FileId, &Symbol)> {
         self.note(|| Read::Global(SmolStr::new(name)));
         let mut found = self.visible_first(self.globals.get(name), from, |f, i| f.index.globals.get(i as usize));
         self.prefer_own(from, &mut found, |(file, _)| *file);
+        if found.len() > 1 {
+            found.sort_by_key(|(file, _)| self.distance(from, *file));
+        }
         found
     }
 

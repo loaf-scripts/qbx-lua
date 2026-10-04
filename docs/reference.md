@@ -239,10 +239,19 @@ client scripts, `os` and `io` are not completed and have no hover. Their functio
 there is no `os.exit`, `io.input`, `io.output` or `io.read`, and CfxLua adds `os.createdir`,
 `io.readdir` and timers such as `os.nanotime`.
 
+Where a global is defined in more than one place, it takes the type of one definition. One that is
+or may be a class comes first, as lua-language-server lets a declared type win, then one that sets a
+global table. Among those, the nearest wins: in the same file, then in another file of the same
+resource, then in another resource, then in a definition file. At the same distance, a class
+declared with `---@type` comes before a value that may be of it, as `Config = Config or {}` is, and
+the nearest folder before the others. Definitions that assign `nil` or a value of unknown type only
+count when there is no other, or in the file that makes them. Hover names that definition, and go
+to definition lists the nearest first.
+
 Where client and server scripts define a global function differently, as two `GetJob`s, a call
-from code that runs on both sides takes neither definition: what it returns is unknown and passes
-every type check. Inside one of these guards the call takes that side's definition, as long as its
-arguments fit it.
+from code that runs on both sides takes the nearest definition of each side, and neither when they
+differ: what it returns is unknown and passes every type check. Inside one of these guards the call
+takes the nearest definition of that side, as long as its arguments fit it.
 
 ### Definition files outside resources
 

@@ -630,10 +630,7 @@ fn global_hover(
     called: Option<Type>,
 ) -> Option<String> {
     let symbols = ws.index.globals_named(name, infer.ctx.file);
-    let preferred = symbols
-        .iter()
-        .max_by_key(|(_, s)| (matches!(s.ty, Type::GlobalTable(_) | Type::Named(..)), s.ty.specificity()));
-    let Some((file, symbol)) = preferred else {
+    let Some((file, symbol)) = infer.preferred_global(&symbols) else {
         if let Some(hover) = native_hover(name, infer.side()) {
             return Some(hover);
         }

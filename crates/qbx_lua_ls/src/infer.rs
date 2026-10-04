@@ -12,7 +12,7 @@ use qbx_lua_syntax::{CommentKind, NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::callback_wrappers::{self, Wrapper};
-use crate::index::{instance_class, instance_owner, ClassDef, FileId, Index, SymbolKind};
+use crate::index::{instance_class, instance_owner, ClassDef, Distance, FileId, Index, Symbol, SymbolKind};
 use crate::locate::statement_at;
 use crate::luacats::{applies_on, own_type, parse_doc_lines, CastEntry, DocGroup, DocOperator};
 use crate::narrow::{Casts, Fact, Flow, Origin, Version, DECLARATION};
@@ -1102,12 +1102,7 @@ impl<'a> Infer<'a> {
             return Type::Exports(None);
         }
         let symbols = self.index.globals_named(name, self.ctx.file);
-        // `Zone = nil` declares a global that some handler sets later, not what it holds.
-        let known = symbols
-            .iter()
-            .map(|(_, s)| &s.ty)
-            .filter(|ty| !ty.is_unknown() && !matches!(ty, Type::Nil))
-            .max_by_key(|ty| (matches!(ty, Type::GlobalTable(_) | Type::Named(..)), ty.specificity()));
+        let known = self.preferred_global(&symbols).map(|(_, s)| &s.ty).filter(|ty| tells_global_value(ty));
         if let Some(ty) = known.filter(|ty| !(matches!(ty, Type::Table) && self.index.has_members(name))) {
             // `local lib = {}` published with `_ENV.lib = lib` and then extended as `function lib.x()`
             // elsewhere keeps its members under two owners.
@@ -1121,6 +1116,25 @@ impl<'a> Infer<'a> {
             Some(native) => Type::Fun(Arc::new(native_fun_type(&native.on(self.side)))),
             None => Type::Unknown,
         }
+    }
+
+    /// The declaration among `symbols`, those of one global, whose type the global takes: of the
+    /// ones that tell its value, one that is or may be a class, as lua-language-server lets a declared
+    /// type win, then one of a global table. Then the nearest: in the same file, then in its resource,
+    /// then elsewhere, where a class declared with `---@type` comes before a value that may be one, as
+    /// `Config = Config or {}` is the `LoafWrapperConfig|table` it declares, and the nearest folder
+    /// before the others. Last, the one whose type says most. A value of unknown type that the file
+    /// itself assigns tells it too, so that `GetPlayer = ESX.GetPlayerFromId` leaves the calls of its
+    /// own file unknown rather than taking another file's `GetPlayer`.
+    pub fn preferred_global<'s>(&self, symbols: &'s [(FileId, &'s Symbol)]) -> Option<&'s (FileId, &'s Symbol)> {
+        symbols.iter().max_by_key(|(file, symbol)| {
+            let own = *file == self.ctx.file && !matches!(symbol.ty, Type::Nil);
+            let (place, folders) = self.index.distance(self.ctx.file, *file);
+            let declared = matches!(symbol.ty, Type::Named(..));
+            let table = table_rank(&symbol.ty);
+            let (place, folders) = (std::cmp::Reverse(place), std::cmp::Reverse(folders));
+            (own || tells_global_value(&symbol.ty), table, place, declared, folders, symbol.ty.specificity())
+        })
     }
 
     pub fn local_type(&self, id: LocalId) -> Type {
@@ -2634,30 +2648,41 @@ impl<'a> Infer<'a> {
     }
 
     /// The definition that a call of the global function `base` uses when client and server files
-    /// define it differently, as a `shared_script` sees two `GetJob`s: the one left for the side the
-    /// call runs on, if its arguments fit it. `Some(None)` when no single definition is left or the
-    /// arguments do not fit it, and `None` when the sides do not split the global.
+    /// define it differently, as a `shared_script` sees two `GetJob`s: the nearest one of each side
+    /// the call runs on, if they are the same one and its arguments fit it. `Some(None)` when no
+    /// single definition is left or the arguments do not fit it, and `None` when the sides do not
+    /// split the global.
     fn sided_definition(&self, base: &Expr, method: Option<&Name>, args: &CallArgs) -> Option<Option<Arc<FunType>>> {
         let (None, ExprKind::Name(name)) = (method, &base.kind) else { return None };
         if !matches!(self.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Global(_))) {
             return None;
         }
         let side_of = |file: FileId| self.index.file(file).and_then(|f| f.side);
-        let defined: Vec<(Option<Side>, &Arc<FunType>)> = self
+        let defined: Vec<(Option<Side>, Distance, &Arc<FunType>)> = self
             .index
             .globals_named(&name.text, self.ctx.file)
             .into_iter()
-            .filter_map(|(file, symbol)| Some((side_of(file), symbol.ty.as_fun()?)))
+            .filter_map(|(file, symbol)| {
+                Some((side_of(file), self.index.distance(self.ctx.file, file), symbol.ty.as_fun()?))
+            })
             .collect();
-        let defined_on = |side| defined.iter().any(|(on, _)| *on == Some(side));
+        let defined_on = |side| defined.iter().any(|(on, ..)| *on == Some(side));
         if !defined_on(Side::Client) || !defined_on(Side::Server) {
             return None;
         }
-        let side = self.side_at(base.span.start);
+        let sides = match self.side_at(base.span.start) {
+            Some(Side::Client) => &[Side::Client][..],
+            Some(Side::Server) => &[Side::Server],
+            _ => &[Side::Client, Side::Server],
+        };
         let mut left: Vec<&Arc<FunType>> = Vec::new();
-        for (on, fun) in defined {
-            if applies_on(on, side) && !left.contains(&fun) {
-                left.push(fun);
+        for side in sides {
+            let applying = || defined.iter().filter(|(on, ..)| applies_on(*on, Some(*side)));
+            let nearest = applying().map(|(_, distance, _)| *distance).min();
+            for (_, _, fun) in applying().filter(|(_, distance, _)| Some(*distance) == nearest) {
+                if !left.contains(fun) {
+                    left.push(fun);
+                }
             }
         }
         let fits = |fun: &Arc<FunType>| {
@@ -3579,6 +3604,23 @@ impl<'a> Infer<'a> {
                 _ => {}
             }
         }
+    }
+}
+
+/// Whether a declaration of a global as `ty` tells what the global holds. `Zone = nil` declares a
+/// global that some handler sets later, not what it holds.
+fn tells_global_value(ty: &Type) -> bool {
+    !ty.is_unknown() && !matches!(ty, Type::Nil)
+}
+
+/// How much a global declared as `ty` says about its table: 2 for a type that is or may be a class,
+/// 1 for a global table whose members its files set, and 0 for anything else.
+fn table_rank(ty: &Type) -> u8 {
+    match ty {
+        Type::Named(..) => 2,
+        Type::GlobalTable(_) => 1,
+        Type::Union(parts) => parts.iter().map(table_rank).max().unwrap_or(0),
+        _ => 0,
     }
 }
 

@@ -12930,6 +12930,107 @@ fn a_resource_keeps_its_own_types_and_globals_over_definition_files() {
     assert!(hover.contains("(global) Vehicle") && !hover.contains("LibVehicle"), "its own global wins: {hover}");
 }
 
+/// A workspace written to a new folder in the temporary directory, removed again when dropped.
+struct TempWorkspace(PathBuf);
+
+impl TempWorkspace {
+    fn new(name: &str, files: &[(&str, &str)]) -> Self {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let workspace = Self(std::env::temp_dir().join(format!("qbx-{name}-{}-{nanos}", std::process::id())));
+        for (relative, text) in files {
+            let path = workspace.0.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        workspace
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+            if root.parent() == Some(temp.as_path()) {
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
+    }
+}
+
+#[test]
+fn globals_take_their_nearest_definition() {
+    let workspace = TempWorkspace::new(
+        "nearest",
+        &[
+            (
+                "qbxlint.toml",
+                "[[overrides]]\nfiles = ['phone/**', 'bridge/**']\n\n[overrides.imports]\nclient = ['@wrapper/client/**.lua']\n",
+            ),
+            ("wrapper/fxmanifest.lua", "fx_version 'cerulean'\ngame 'gta5'\nfiles { 'client/**.lua' }\n"),
+            (
+                "wrapper/client/job.lua",
+                "---@return string?\nfunction GetJob() end\n\n---@return number?\nfunction GetJobGrade() end\n\nQB = exports['qb-core']:GetCoreObject()\n",
+            ),
+            ("phone/fxmanifest.lua", "fx_version 'cerulean'\ngame 'gta5'\nclient_scripts { 'client/**.lua' }\n"),
+            (
+                "phone/client/frameworks/esx/services.lua",
+                "---@return number\nfunction GetJobGrade() return 1 end\n\nQB = exports['qb-core']:GetCoreObject()\n",
+            ),
+            ("phone/client/functions.lua", "local grade = GetJobGrade()\nprint(grade + 1, QB)\n"),
+            (
+                "phone/client/frameworks/esx/player.lua",
+                "GetPlayer = exports.es_extended:getSharedObject().GetPlayerFromId\n\nprint(GetPlayer(1).removeItem)\n",
+            ),
+            (
+                "phone/client/frameworks/qb/player.lua",
+                "---@return { source: number }\nfunction GetPlayer(id) return { source = id } end\n",
+            ),
+            (
+                "wrapper/types/config.lua",
+                "---@class WrapperConfig\n---@field Menu? 'menu'|'context'\n\n---@type WrapperConfig\nConfig = {}\n",
+            ),
+            ("wrapper/client/defaults.lua", "Config = Config or {}\n"),
+            ("wrapper/client/detect/menu.lua", "Config.Menu = 'qb-menu'\n"),
+            // The bridge's files are loaded by other resources, so none is a script.
+            ("bridge/fxmanifest.lua", "fx_version 'cerulean'\ngame 'gta5'\nfiles { 'phone/**.lua', 'tablet/**.lua' }\n"),
+            (
+                "bridge/phone/server/services.lua",
+                "---@return string\nfunction GetJob(source) return '' end\n\nlocal job = GetJob(1)\nprint(job)\n",
+            ),
+            ("bridge/tablet/server/job.lua", "---@return { name: string }\nfunction GetJob(source) return { name = '' } end\n"),
+            ("bridge/tablet/server/services.lua", "local name = GetJob(1).name\nprint(name)\n"),
+        ],
+    );
+    let mut client = Client::start(workspace.0.clone());
+
+    let functions = client.open("phone/client/functions.lua");
+    let (l, c) = pos(&functions, "grade", 0);
+    let grade = client.hover_text("phone/client/functions.lua", l, c);
+    assert!(grade.contains("local grade: number\n"), "its own resource's definition wins over an import: {grade}");
+    assert_eq!(findings(&mut client, "phone/client/functions.lua", &["need-check-nil"]), []);
+    let (l, c) = pos(&functions, "QB", 0);
+    let qb = client.hover_text("phone/client/functions.lua", l, c);
+    assert!(qb.contains("*defined in* `phone/client/frameworks/esx/services.lua`"), "{qb}");
+
+    let services = client.open("bridge/phone/server/services.lua");
+    let (l, c) = pos(&services, "job =", 0);
+    let job = client.hover_text("bridge/phone/server/services.lua", l, c);
+    assert!(job.contains("local job: string\n"), "its own file's definition wins: {job}");
+
+    let services = client.open("bridge/tablet/server/services.lua");
+    let (l, c) = pos(&services, "name =", 0);
+    let name = client.hover_text("bridge/tablet/server/services.lua", l, c);
+    assert!(name.contains("local name: string\n"), "the definition in its own folder wins: {name}");
+    assert_eq!(findings(&mut client, "bridge/tablet/server/services.lua", &["undefined-field"]), []);
+
+    client.open("phone/client/frameworks/esx/player.lua");
+    let found = findings(&mut client, "phone/client/frameworks/esx/player.lua", &["undefined-field"]);
+    assert_eq!(found, [], "a file that sets the global itself does not take another file's definition");
+
+    client.open("wrapper/client/detect/menu.lua");
+    let found = findings(&mut client, "wrapper/client/detect/menu.lua", &["assign-type-mismatch"]);
+    assert_eq!(found.len(), 1, "the declared class wins over a nearer `Config = Config or {{}}`: {found:?}");
+}
+
 #[test]
 fn table_hover_lists_only_the_fields_in_scope() {
     let mut client = Client::start(fixture_root());
