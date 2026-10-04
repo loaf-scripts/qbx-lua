@@ -210,6 +210,10 @@ pub struct FunType {
     /// Nothing declares what the function returns and no `return` of its body passes a value, so a
     /// call of it gives `nil`, as lua-language-server reads it. `returns` is then empty.
     pub returns_nothing: bool,
+    /// For inferred `returns`, what the `return`s of the body pass as they are written: the `nil`
+    /// and `false` they write out or leave out, but not the `nil` of running past the end of the
+    /// body, nor the one that the type of another value they pass may hold.
+    pub explicit_returns: Option<Vec<Type>>,
     pub is_method: bool,
     /// The parameters are those of a function defined with `.`, or of a plain function value, so
     /// they list every value a call passes: a `:` call gives the first one the value before the colon.
@@ -712,6 +716,7 @@ impl FunType {
             params: self.params.iter().map(|p| Param { ty: p.ty.with_self(owner), ..p.clone() }).collect(),
             returns: types(&self.returns),
             return_sets: self.return_sets.iter().map(|set| types(set)).collect(),
+            explicit_returns: self.explicit_returns.as_ref().map(|returns| types(returns)),
             overloads: self.overloads.iter().map(|overload| Arc::new(overload.with_self(owner))).collect(),
             ..self.clone()
         }

@@ -6412,6 +6412,142 @@ fn findings(client: &mut Client, file: &str, codes: &[&str]) -> Vec<(String, u64
 }
 
 #[test]
+fn reads_through_declared_index_types_are_checked_for_nil() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Row
+---@field name string
+
+---@type table<string, Probe.Row?>
+local byName = {}
+---@type { [number]: Probe.Row? }
+local rows = {}
+---@type Probe.Row[]
+local list = {}
+---@type { label?: string }
+local options = {}
+
+---@param key string
+local function read(key)
+    local found = byName[key]
+    print(found.name)
+    local first = rows[1]
+    print(first.name)
+    for i = 1, #rows do
+        local row = rows[i]
+        print(row.name)
+    end
+    for i = #rows, 1, -1 do
+        local back = rows[i]
+        print(back.name)
+    end
+    for i = 0, #rows do
+        local zeroth = rows[i]
+        print(zeroth.name)
+    end
+    for i = 1, #rows do
+        rows = {}
+        local replaced = rows[i]
+        print(replaced.name)
+    end
+    local item = list[1]
+    print(item.name)
+    local label = options.label
+    print(label:upper())
+end
+print(read)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("need-check-nil".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [
+            finding("found.name", "`found` may be nil: its type here is `Probe.Row?`"),
+            finding("first.name", "`first` may be nil: its type here is `Probe.Row?`"),
+            finding("zeroth.name", "`zeroth` may be nil: its type here is `Probe.Row?`"),
+            finding("replaced.name", "`replaced` may be nil: its type here is `Probe.Row?`"),
+            finding("label:upper", "`label` may be nil: its type here is `string?`"),
+        ],
+        "the values of maps, indexed tables and shape fields are read as declared, while a loop from 1 to \
+         the `#` of a table, or back, only reads values the table holds, and `T[]` holds no `nil`"
+    );
+}
+
+#[test]
+fn nil_checks_read_the_nil_that_functions_without_return_annotations_return() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local function find(id)
+    if not id then return nil end
+    return { id = id }
+end
+local function bare(id)
+    if not id then return end
+    return { id = id }
+end
+local function printed(id)
+    if not id then return print('none') end
+    return { id = id }
+end
+local function denied(id)
+    if not id then return false end
+    return { id = id }
+end
+local function falls(id)
+    if id then return { id = id } end
+end
+local cache = {}
+local function cached(id)
+    return cache[id]
+end
+local function forward(id)
+    return find(id)
+end
+---@return { id: integer }?
+local function declared() end
+local function passed()
+    return declared()
+end
+
+local a = find(1)
+print(a.id)
+local b = bare(1)
+print(b.id)
+local c = printed(1)
+print(c.id)
+local d = denied(1)
+print(d.id)
+local e = falls(1)
+print(e.id)
+local f = cached(1)
+print(f.id)
+local g = forward(1)
+print(g.id)
+local h = passed()
+print(h.id)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("need-check-nil".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [
+            finding("a.id", "`a` may be nil: its type here is `{ id: unknown }?`"),
+            finding("b.id", "`b` may be nil: its type here is `{ id: unknown }?`"),
+            finding("c.id", "`c` may be nil: its type here is `{ id: unknown }?`"),
+            finding("d.id", "`d` may be false: its type here is `false|{ id: unknown }`"),
+            finding("g.id", "`g` may be nil: its type here is `{ id: unknown }?`"),
+            finding("h.id", "`h` may be nil: its type here is `{ id: integer }?`"),
+        ],
+        "a `return` that gives `nil` or `false`, or leaves its value out, counts, as lua-language-server \
+         infers it, while running past the end of the body and the `nil` a returned value may hold do not"
+    );
+}
+
+#[test]
 fn index_fields_type_their_keys_and_strict_classes_check_reads() {
     let mut client = Client::start(fixture_root());
     let text = "\

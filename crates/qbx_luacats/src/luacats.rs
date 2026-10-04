@@ -221,6 +221,7 @@ impl DocGroup {
             return_values,
             return_sets: self.return_sets.clone(),
             returns_inferred: false,
+            explicit_returns: None,
             is_method,
             lists_receiver: !is_method,
             generics: self.generics.clone(),

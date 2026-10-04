@@ -8,7 +8,10 @@
 //! reports those arguments as `param-type-mismatch`, so suppressing that rule silences them too.
 //!
 //! As for `impossible-comparison`, only declared types count, whatever declares them: an
-//! annotation of the local, or the `@return` or `@field` of a function, class or stub. The type is
+//! annotation of the local, the `@return` or `@field` of a function, class or stub, or the value
+//! type of a map or indexed table, though `t[i]` in `for i = 1, #t do` is an item `t` holds. A
+//! function without `@return` declares the `nil` or `false` that a `return` of it writes out or
+//! leaves out, as lua-language-server infers it, but not that of running past its end. The type is
 //! that of the values that may reach the read, as the guards and casts around it leave them, also
 //! for a local that is assigned again. Where guards leave no value of it, the read has the type the
 //! code they guard takes it to be, as lua-language-server reads it: `nil` inside `if not count then`
@@ -47,7 +50,8 @@ pub struct UncheckedNils {
 
 /// The reads and arguments of locals that may hold a missing value there.
 pub fn unchecked_nils(infer: &Infer, chunk: &Chunk) -> UncheckedNils {
-    let mut finder = Finder { infer, declared: Declared::new(infer), out: Vec::new(), passed: Vec::new() };
+    let declared = Declared::with_returned_nils(infer);
+    let mut finder = Finder { infer, declared, out: Vec::new(), passed: Vec::new() };
     finder.visit_block(&chunk.block);
     UncheckedNils { reads: finder.out, arguments: finder.passed }
 }

@@ -13,10 +13,10 @@
 use std::cell::{OnceCell, RefCell};
 
 use qbx_fivem_data::native;
-use qbx_lua_analysis::scope::{Local, LocalId, Resolved};
+use qbx_lua_analysis::scope::{Local, LocalId, Resolution, Resolved};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
-use qbx_lua_syntax::Span;
+use qbx_lua_syntax::{NumberValue, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::class_tables::{Classes, Key};
@@ -46,8 +46,12 @@ pub struct Declared<'a, 'b> {
     classes: Classes<'a, 'b>,
     /// Whether a local that is assigned again keeps the type its annotation gives it.
     keeps_annotations: bool,
+    /// Whether the `nil` or `false` that a function without `@return` returns on some path counts.
+    returned_nils: bool,
     /// Where the expression that each `--[[@as T]]` casts starts, by where it ends.
     cast_starts: OnceCell<FxHashMap<u32, u32>>,
+    /// The table whose sequence each numeric `for` variable walks, by the variable.
+    sequences: OnceCell<FxHashMap<LocalId, LocalId>>,
     /// The types the locals read so far are declared with.
     declarations: RefCell<FxHashMap<LocalId, Type>>,
     /// The declared types of the values that the declarations and assignments of locals that are
@@ -65,7 +69,9 @@ impl<'a, 'b> Declared<'a, 'b> {
             infer,
             classes: Classes::new(infer),
             keeps_annotations: false,
+            returned_nils: false,
             cast_starts: OnceCell::new(),
+            sequences: OnceCell::new(),
             declarations: RefCell::default(),
             origins: RefCell::default(),
             in_progress: RefCell::default(),
@@ -78,6 +84,13 @@ impl<'a, 'b> Declared<'a, 'b> {
     /// rely on.
     pub fn keeping_annotations(infer: &'a Infer<'b>) -> Self {
         Self { keeps_annotations: true, ..Self::new(infer) }
+    }
+
+    /// Also takes a function without `@return` at its word where a `return` of it gives `nil` or
+    /// `false`, as `return` and `return nil` do, as lua-language-server infers it. Running past the
+    /// end of its body is no such `return`.
+    pub fn with_returned_nils(infer: &'a Infer<'b>) -> Self {
+        Self { returned_nils: true, ..Self::new(infer) }
     }
 
     /// The type of `expr` as far as it is declared, and `unknown` beyond that.
@@ -99,10 +112,18 @@ impl<'a, 'b> Declared<'a, 'b> {
                 Some(Resolved::Local(id)) => self.local(id, name.span.start, depth),
                 _ => self.global(&name.text),
             },
-            ExprKind::Field { base, name, .. } => self.narrowed_field(expr, self.field(base, &name.text, depth)),
+            ExprKind::Field { base, name, .. } => {
+                self.narrowed_field(expr, self.field(base, &Key::Name(&name.text), true, depth))
+            }
             ExprKind::Index { base, index, .. } => match index.as_string() {
-                Some(name) => self.narrowed_field(expr, self.field(base, name, depth)),
-                None => Type::Unknown,
+                Some(name) => self.narrowed_field(expr, self.field(base, &Key::Name(name), true, depth)),
+                None => {
+                    let ty = self.field(base, &Key::Typed(self.key(index, depth)), true, depth);
+                    match self.in_sequence(base, index) {
+                        true => ty.without_nil(),
+                        false => ty,
+                    }
+                }
             },
             ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
                 self.returned(expr).and_then(|values| values.into_iter().next()).unwrap_or_default()
@@ -380,9 +401,9 @@ impl<'a, 'b> Declared<'a, 'b> {
                 Some(Resolved::Local(id)) => self.declaration(id),
                 _ => self.of(target),
             },
-            ExprKind::Field { base, name, .. } => self.field(base, &name.text, 0),
+            ExprKind::Field { base, name, .. } => self.field(base, &Key::Name(&name.text), false, 0),
             ExprKind::Index { base, index, .. } => match index.as_string() {
-                Some(name) => self.field(base, name, 0),
+                Some(name) => self.field(base, &Key::Name(name), false, 0),
                 None => Type::Unknown,
             },
             _ => self.of(target),
@@ -398,19 +419,64 @@ impl<'a, 'b> Declared<'a, 'b> {
         }
     }
 
-    /// The type that the `@field`s of a class give `name` of `base`. Fields of other tables are
-    /// inferred from what is assigned to them.
-    fn field(&self, base: &Expr, name: &str, depth: u32) -> Type {
+    /// The type that the `@field`s and indices of a class give `key` of `base`, or with `tables` also
+    /// a table type it is declared as, like `{ name: string? }` or `table<string, T?>`. Fields of
+    /// other tables are inferred from what is assigned to them.
+    fn field(&self, base: &Expr, key: &Key, tables: bool, depth: u32) -> Type {
         let base = self.declared(base, depth + 1);
         let from = self.classes.file();
-        let Some((class, args, from)) = self.classes.class_of(&base, from) else { return Type::Unknown };
-        self.classes.field_type(&class, &args, from, &Key::Name(name)).map(|(ty, _)| ty).unwrap_or_default()
+        let found = match self.classes.class_of(&base, from) {
+            Some((class, args, from)) => self.classes.field_type(&class, &args, from, key),
+            None if tables => {
+                let table = self.classes.table_type_of(&base, from);
+                table.and_then(|table| self.classes.table_field_type(&table, from, key))
+            }
+            None => None,
+        };
+        found.map(|(ty, _)| ty).unwrap_or_default()
+    }
+
+    /// The type of a key that is no string: an integer or boolean written out stays a literal, to
+    /// find its `---@field [1] number`, and a key of no declared type may be any, which every index
+    /// takes.
+    fn key(&self, index: &Expr, depth: u32) -> Type {
+        match &index.unparen().kind {
+            ExprKind::Number(NumberValue::Int(i)) => Type::IntLit(*i),
+            ExprKind::True => Type::BooleanLit(true),
+            ExprKind::False => Type::BooleanLit(false),
+            _ => self.declared(index, depth + 1).widen(),
+        }
+    }
+
+    /// Whether `base[index]` reads an item of the sequence a numeric `for` walks, as `rows[i]` in
+    /// `for i = 1, #rows do` or `for i = #rows, 1, -1 do`: the `#` of a sequence is a border of it,
+    /// so the loop only reads values it holds, unless it assigns the table or the loop variable.
+    fn in_sequence(&self, base: &Expr, index: &Expr) -> bool {
+        let resolution = self.infer.ctx.resolution;
+        let local = |expr: &Expr| match &expr.unparen().kind {
+            ExprKind::Name(name) => match resolution.resolve_at(name.span.start) {
+                Some(Resolved::Local(id)) => Some(id),
+                _ => None,
+            },
+            _ => None,
+        };
+        let (Some(table), Some(var)) = (local(base), local(index)) else { return false };
+        let sequences = self.sequences.get_or_init(|| {
+            let mut finder = Sequences { resolution, out: FxHashMap::default() };
+            finder.visit_block(&self.infer.ctx.chunk.block);
+            finder.out
+        });
+        sequences.get(&var) == Some(&table)
     }
 
     /// What `call` returns when its function declares it. A native documented as `boolean` can
     /// give scripts `1` instead of `true`, so code compares its result with either.
     fn returned(&self, call: &Expr) -> Option<Vec<Type>> {
-        let values = self.infer.declared_returns(call).or_else(|| self.callback_returns(call))?;
+        let values = self
+            .infer
+            .declared_returns(call)
+            .or_else(|| self.callback_returns(call))
+            .or_else(|| self.returned_nils(call))?;
         if !self.is_native_call(call) {
             return Some(values);
         }
@@ -434,6 +500,21 @@ impl<'a, 'b> Declared<'a, 'b> {
         let fun = self.infer.fun_of(&self.declaration(id))?;
         let fun = self.infer.call_signature(&fun, args, false, call.span.start);
         fun.generics.is_empty().then(|| fun.returns.clone())
+    }
+
+    /// With `returned_nils`, what `call` returns where its function, without `@return`, returns
+    /// `nil` or `false` on some path and something else on another: the values its `return`s pass
+    /// there. Where it never returns either, the value it returns is not declared.
+    fn returned_nils(&self, call: &Expr) -> Option<Vec<Type>> {
+        if !self.returned_nils {
+            return None;
+        }
+        let missing = |part: &Type| matches!(part, Type::Nil | Type::BooleanLit(false));
+        let values = self.infer.inferred_returns_of(call)?.into_iter().map(|ty| match &ty {
+            Type::Union(parts) if parts.iter().any(missing) && !parts.iter().all(missing) => ty,
+            _ => Type::Unknown,
+        });
+        Some(values.collect())
     }
 
     fn is_native_call(&self, call: &Expr) -> bool {
@@ -473,6 +554,61 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
 struct CastTargets<'a, 'b> {
     infer: &'a Infer<'b>,
     starts: FxHashMap<u32, u32>,
+}
+
+/// Finds the numeric `for` loops that walk the sequence of a local table from its start to its `#`,
+/// or back, and assign neither the table nor their variable.
+struct Sequences<'r> {
+    resolution: &'r Resolution,
+    out: FxHashMap<LocalId, LocalId>,
+}
+
+impl<'c> Visitor<'c> for Sequences<'_> {
+    fn visit_stmt(&mut self, stmt: &'c Stmt) {
+        if let StmtKind::NumericFor { var, start, limit, step, body } = &stmt.kind {
+            // A step written out, as `-1` is.
+            let step = match step {
+                Some(step) => int_literal(step),
+                None => Some(1),
+            };
+            let length = match (int_literal(start), int_literal(limit), step) {
+                (Some(first), None, Some(step)) if first >= 1 && step > 0 => Some(limit),
+                (None, Some(last), Some(step)) if last >= 1 && step < 0 => Some(start),
+                _ => None,
+            };
+            let table = length.and_then(|length| match &length.unparen().kind {
+                ExprKind::Unary { op: UnOp::Len, expr } => match &expr.unparen().kind {
+                    ExprKind::Name(name) => self.resolution.resolve_at(name.span.start),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let assigned = |id: LocalId| {
+                let local = self.resolution.local(id);
+                local.refs.iter().any(|r| r.write && body.span.contains(r.span.start))
+            };
+            if let (Some(Resolved::Local(table)), Some(Resolved::Local(var))) =
+                (table, self.resolution.resolve_at(var.span.start))
+            {
+                if !assigned(table) && !assigned(var) {
+                    self.out.insert(var, table);
+                }
+            }
+        }
+        visit::walk_stmt(self, stmt);
+    }
+}
+
+/// The integer `expr` writes out, as `1` or `-1`.
+fn int_literal(expr: &Expr) -> Option<i64> {
+    match &expr.unparen().kind {
+        ExprKind::Number(NumberValue::Int(i)) => Some(*i),
+        ExprKind::Unary { op: UnOp::Neg, expr } => match expr.unparen().kind {
+            ExprKind::Number(NumberValue::Int(i)) => Some(-i),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 impl<'c> Visitor<'c> for CastTargets<'_, '_> {

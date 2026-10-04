@@ -1014,9 +1014,15 @@ As TypeScript does for a value that may be `undefined`, every such read is repor
 that would raise the error first, until a guard or cast rules the missing value out.
 
 A local may hold `nil` when its declared type allows it: its `---@type` or `@param`, the
-`@return` or `@field` of the function or class its value comes from, or for a parameter of a
-function passed to a call, what the callee declares for it, whoever declares them, stubs and other
-resources included. `false`, as in `false|string`, counts as well. The
+`@return` or `@field` of the function or class its value comes from, the value type of a map or an
+indexed table it is read from, as `table<string, Row?>` or `{ [number]: Row? }`, or for a parameter
+of a function passed to a call, what the callee declares for it, whoever declares them, stubs and
+other resources included. `false`, as in `false|string`, counts as well. A function without
+`@return` declares the `nil` or `false` that one of its `return`s writes out or leaves out, as
+`return`, `return nil` or `return print(...)` do, as lua-language-server infers it; running past
+the end of its body does not count, nor does the `nil` that the type of another value it returns
+may hold. In a loop from 1 to the `#` of a table, or back, as `for i = 1, #rows do`, `rows[i]` is
+an item the table holds, which is not `nil`. The
 [type guards](../crates/qbx_lua_ls/README.md#type-guards) and casts around the read narrow the
 type first, so `if not name then return end`, `if name then`, `name and name:upper()`,
 `assert(name)` and `---@cast name -?` all check it, as does a condition that reads from it, such as

@@ -99,6 +99,9 @@ struct Returned {
     declared: bool,
     /// The function returns nothing, so the call gives `nil` whatever its values say.
     nothing: bool,
+    /// For values inferred from the `return`s of a body, what those `return`s alone pass, without
+    /// the `nil` of a body that runs past its end.
+    inferred: Option<Vec<Type>>,
 }
 
 pub enum Decl<'a> {
@@ -2602,9 +2605,29 @@ impl<'a> Infer<'a> {
         })
     }
 
+    /// What `call` returns when its function infers it from the `return`s of its body, without the
+    /// `nil` of a body that runs past its end, and `None` when the values are declared or `call` is
+    /// no call.
+    pub fn inferred_returns_of(&self, call: &Expr) -> Option<Vec<Type>> {
+        self.guarded(|| {
+            let returned = match &call.kind {
+                ExprKind::Call { callee, args, .. } => self.call_values(callee, None, args),
+                ExprKind::MethodCall { base, method, args, .. } => self.call_values(base, Some(method), args),
+                _ => return None,
+            };
+            returned.inferred
+        })
+    }
+
     /// What calling `base`, or its `method`, with `args` returns.
     fn call_values(&self, base: &Expr, method: Option<&Name>, args: &[Expr]) -> Returned {
-        let only = |ty: Type, declared: bool| Returned { values: vec![ty], sets: Vec::new(), declared, nothing: false };
+        let only = |ty: Type, declared: bool| Returned {
+            values: vec![ty],
+            sets: Vec::new(),
+            declared,
+            nothing: false,
+            inferred: None,
+        };
         if method.is_none() {
             match (base.dotted_path().as_deref(), args.first()) {
                 (Some("require" | "lib.require" | "lib.load"), Some(arg)) => {
@@ -2649,11 +2672,13 @@ impl<'a> Infer<'a> {
         if let Some(wrapper) = Wrapper::of(&fun, method.is_some()).filter(|w| w.tag.role == CallbackRole::Await) {
             if let Some(handler) = self.wrapper_handler(&wrapper, args.exprs, base.span.start) {
                 if !handler.returns.is_empty() {
+                    let inferred = handler.explicit_returns.as_ref().unwrap_or(&handler.returns);
                     return Returned {
                         values: handler.returns.clone(),
                         sets: handler.return_sets.clone(),
                         declared: !handler.returns_inferred,
                         nothing: false,
+                        inferred: handler.returns_inferred.then(|| inferred.clone()),
                     };
                 }
             }
@@ -2669,6 +2694,7 @@ impl<'a> Infer<'a> {
             sets: fun.return_sets.iter().map(bound).collect(),
             declared: !fun.returns_inferred && fun.generics.is_empty(),
             nothing: false,
+            inferred: fun.returns_inferred.then(|| bound(fun.explicit_returns.as_ref().unwrap_or(&fun.returns))),
         }
     }
 
@@ -3209,11 +3235,12 @@ impl<'a> Infer<'a> {
             fun = fun.with_self(&self.doc_self_at(anchor, func));
         }
         if fun.returns.is_empty() {
-            let (returns, sets) = self.inferred_returns(&func.body);
+            let (returns, sets, explicit) = self.inferred_returns(&func.body);
             if returns.iter().any(|t| !t.is_unknown()) {
                 fun.returns = returns;
                 fun.return_sets = sets;
                 fun.returns_inferred = true;
+                fun.explicit_returns = explicit;
             }
             // `function Framework.GetJob() return end`, or a stub with no `@return`, returns nothing.
             fun.returns_nothing =
@@ -3225,45 +3252,84 @@ impl<'a> Infer<'a> {
     /// What an undocumented function returns: at each position, the union of what every `return`
     /// passes there. A `return` with fewer values, and running past the end of the body, give `nil`.
     /// With them come the sets of values its `return`s pass, when they differ and hold several
-    /// values, as `(false)` and `(string, string)` do.
-    fn inferred_returns(&self, body: &Block) -> (Vec<Type>, Vec<Vec<Type>>) {
-        let mut exits: Vec<&[Expr]> = return_stmts(body).into_iter().map(|(_, exprs)| exprs).collect();
+    /// values, as `(false)` and `(string, string)` do, and what they pass as they are written, as
+    /// `FunType::explicit_returns` reads them.
+    fn inferred_returns(&self, body: &Block) -> (Vec<Type>, Vec<Vec<Type>>, Option<Vec<Type>>) {
+        let exits: Vec<&[Expr]> = return_stmts(body).into_iter().map(|(_, exprs)| exprs).collect();
         if exits.is_empty() {
             return Default::default();
         }
+        let merged = |lists: &[Vec<Type>]| {
+            let width = lists.iter().map(Vec::len).max().unwrap_or(0);
+            let at = |i: usize| lists.iter().map(|values| values.get(i).cloned().unwrap_or(Type::Nil)).collect();
+            (0..width).map(|i| merge_values(at(i)).widen_returned()).collect::<Vec<Type>>()
+        };
+        let (mut lists, written): (Vec<Vec<Type>>, Vec<Vec<Type>>) =
+            exits.iter().map(|exprs| self.return_values(exprs)).unzip();
         if !always_exits(body) {
-            exits.push(&[]);
+            lists.push(Vec::new());
         }
-        let lists: Vec<Vec<Type>> = exits.iter().map(|exprs| self.return_values(exprs)).collect();
-        let width = lists.iter().map(Vec::len).max().unwrap_or(0);
-        let at = |i: usize| lists.iter().map(|values| values.get(i).cloned().unwrap_or(Type::Nil)).collect();
-        let returns = (0..width).map(|i| merge_values(at(i)).widen_returned()).collect();
+        let returns = merged(&lists);
         let mut sets: Vec<Vec<Type>> = Vec::new();
         for list in &lists {
             if !sets.contains(list) {
                 sets.push(list.clone());
             }
         }
-        let linked = width > 1 && (2..=MAX_RETURN_SETS).contains(&sets.len());
-        (returns, if linked { sets } else { Vec::new() })
+        let linked = returns.len() > 1 && (2..=MAX_RETURN_SETS).contains(&sets.len());
+        (returns, if linked { sets } else { Vec::new() }, Some(merged(&written)))
     }
 
-    /// The values one `return` passes, the last of them spread when it is a call or `...`. A plain
-    /// `true` or `false` stays, so that the sets of values tell `return false` from `return name`.
-    fn return_values(&self, exprs: &[Expr]) -> Vec<Type> {
+    /// The values one `return` passes, the last of them spread when it is a call or `...`, and the
+    /// same values as it writes them: the `nil` and `false` it writes out, and what a call at its end
+    /// declares or returns as written, while the `nil` or `false` that other values may hold, as
+    /// `t[k]` or a local may, is left out. A plain `true` or `false` stays, so that the sets of values
+    /// tell `return false` from `return name`.
+    fn return_values(&self, exprs: &[Expr]) -> (Vec<Type>, Vec<Type>) {
         let returned = |ty: Type| match ty {
             Type::BooleanLit(_) => ty,
             other => other.widen_returned(),
         };
-        let mut values = Vec::new();
+        let (mut values, mut written) = (Vec::new(), Vec::new());
         for (i, expr) in exprs.iter().enumerate() {
-            if i + 1 == exprs.len() {
-                values.extend(self.expr_multi(expr).into_iter().map(returned));
-            } else {
-                values.push(returned(self.expr(expr)));
+            let (given, as_written) = match &expr.unparen().kind {
+                ExprKind::Nil => (vec![Type::Nil], vec![Type::Nil]),
+                ExprKind::False => (vec![Type::BooleanLit(false)], vec![Type::BooleanLit(false)]),
+                _ if i + 1 == exprs.len() => self.spread_values(expr),
+                _ => {
+                    let ty = self.expr(expr);
+                    (vec![ty.clone()], vec![without_missing(ty)])
+                }
+            };
+            values.extend(given.into_iter().map(returned));
+            written.extend(as_written.into_iter().map(returned));
+        }
+        (values, written)
+    }
+
+    /// What `expr`, the last value of a `return`, gives, and the same values as `return_values`
+    /// reads them as written: those that a call declares, or that its function returns as written.
+    fn spread_values(&self, expr: &Expr) -> (Vec<Type>, Vec<Type>) {
+        let called = self.guarded(|| match &expr.kind {
+            ExprKind::Call { callee, args, .. } => Some(self.call_values(callee, None, args)),
+            ExprKind::MethodCall { base, method, args, .. } => Some(self.call_values(base, Some(method), args)),
+            _ => None,
+        });
+        match called.filter(|_| self.cast_after(expr.span.end).is_none()) {
+            // `return print('none')` passes the `nil` of a function that returns nothing, as written.
+            Some(Returned { nothing: true, .. }) => (vec![Type::Nil], vec![Type::Nil]),
+            Some(Returned { values, declared: true, .. }) => (values.clone(), values),
+            Some(Returned { values, inferred: Some(inferred), .. }) => (values, inferred),
+            Some(Returned { values, .. }) => {
+                let written = values.iter().cloned().map(without_missing).collect();
+                (values, written)
+            }
+            None => {
+                let values = self.expr_multi(expr);
+                let written = values.iter().cloned().map(without_missing).collect();
+                (values, written)
             }
         }
-        values
     }
 
     /// The type declared for the exports of `resource`, as `---@type PhoneExports` above
@@ -3871,6 +3937,7 @@ fn substitute_fun(fun: &FunType, generics: &[(SmolStr, Type)]) -> FunType {
         return_values: fun.return_values.clone(),
         return_sets,
         returns_inferred: fun.returns_inferred || bound,
+        explicit_returns: fun.explicit_returns.as_ref().map(|returns| types(returns)),
         is_method: fun.is_method,
         lists_receiver: fun.lists_receiver,
         generics: fun.generics.iter().filter(unbound).cloned().collect(),
@@ -3989,6 +4056,17 @@ fn covers(removed: &Type, part: &Type) -> bool {
 }
 
 /// What one position holds across several lists of returned values.
+/// `ty` without the `nil` or `false` it may hold, as a value that a `return` passes without writing
+/// either: `unknown` when it holds nothing else.
+fn without_missing(ty: Type) -> Type {
+    let missing = |part: &Type| matches!(part, Type::Nil | Type::BooleanLit(false));
+    match &ty {
+        Type::Union(parts) => ty.rebuilt(parts.iter().filter(|part| !missing(part)).cloned()),
+        one if missing(one) => Type::Unknown,
+        _ => ty,
+    }
+}
+
 fn merge_values(parts: Vec<Type>) -> Type {
     // Merged with `nil`, a value that cannot be inferred would read as `nil`.
     if parts.iter().any(Type::is_unknown) {
