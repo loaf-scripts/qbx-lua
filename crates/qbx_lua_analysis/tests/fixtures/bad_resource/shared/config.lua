@@ -29,3 +29,6 @@ local item = Config.Item
 local fallback = print
 (item):Use()
 print(fallback)
+
+local spaced = 1   
+print(spaced)

@@ -10664,6 +10664,29 @@ fn count_down_loops_get_a_negative_step_as_a_quick_fix() {
 }
 
 #[test]
+fn trailing_whitespace_is_removed_by_a_quick_fix() {
+    let mut client = Client::start(fixture_root());
+    let text = "local total = 0  \nprint(total)\n";
+    client.open_with(CLIENT, text);
+    let found = client.diagnostics_for(CLIENT);
+    assert_eq!(found, [("trailing-space".to_string(), 0)], "{found:?}");
+    let uri = client.uri(CLIENT).to_string();
+    let diagnostics = client.diagnostics[&uri].clone();
+    let actions = client.request(
+        "textDocument/codeAction",
+        json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } }, "context": { "diagnostics": diagnostics } }),
+    );
+    let fix =
+        actions.as_array().unwrap().iter().find(|a| a["title"] == "Remove trailing whitespace").expect("quick fix");
+    let edit = &fix["edit"]["changes"][&uri][0];
+    assert_eq!(
+        edit["range"],
+        json!({ "start": { "line": 0, "character": 15 }, "end": { "line": 0, "character": 17 } })
+    );
+    assert_eq!(edit["newText"], "");
+}
+
+#[test]
 fn survives_garbage_input_while_typing() {
     let mut client = Client::start(fixture_root());
     let text = client.open(CLIENT);

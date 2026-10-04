@@ -66,6 +66,7 @@ pub const REDEFINED_LOCAL: &str = "redefined-local";
 pub const SHADOWED_LOCAL: &str = "shadowed-local";
 pub const UNREACHABLE_CODE: &str = "unreachable-code";
 pub const EMPTY_BLOCK: &str = "empty-block";
+pub const TRAILING_SPACE: &str = "trailing-space";
 pub const UNBALANCED_ASSIGNMENTS: &str = "unbalanced-assignments";
 pub const NEWLINE_CALL: &str = "newline-call";
 pub const DUPLICATE_INDEX: &str = "duplicate-index";
@@ -161,6 +162,7 @@ pub static RULES: &[Rule] = &[
     rule(SHADOWED_LOCAL, Style, OFF, false, "A local hides a local from an enclosing scope."),
     rule(UNREACHABLE_CODE, Suspicious, WARN, false, "Code follows a return, break or goto and can never run."),
     rule(EMPTY_BLOCK, Style, INFO, false, "A block has no statements."),
+    rule(TRAILING_SPACE, Style, HINT, true, "A line ends in spaces or tabs outside a comment or string."),
     rule(UNBALANCED_ASSIGNMENTS, Suspicious, WARN, false, "An assignment or `local` statement has more values than targets, or leaves targets without a value."),
     rule(NEWLINE_CALL, Suspicious, WARN, false, "A parenthesized expression that starts a line, and is indexed or called, is read as the argument of a call to the expression that ends the line above."),
     rule(DUPLICATE_INDEX, Suspicious, WARN, false, "A table constructor sets the same key twice."),

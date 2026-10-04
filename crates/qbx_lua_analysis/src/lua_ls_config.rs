@@ -54,6 +54,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "inject-field",
     "undefined-field",
     "newline-call",
+    "trailing-space",
 ];
 
 #[derive(Debug, Default)]

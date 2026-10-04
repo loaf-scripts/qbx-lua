@@ -1,18 +1,27 @@
-//! Checks of how code is laid out over lines: a call whose arguments start a line of their own.
+//! Checks of how code is laid out over lines: a call whose arguments start a line of their own, and
+//! whitespace at the end of a line.
 
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
-use qbx_lua_syntax::{LineIndex, Span};
+use qbx_lua_syntax::{LineIndex, Span, TokenKind};
 
 use super::{FileInput, Sink};
+use crate::diagnostic::{Fix, TextEdit};
 use crate::rules;
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
-    if sink.enabled(rules::NEWLINE_CALL).is_none() {
+    let calls = sink.enabled(rules::NEWLINE_CALL).is_some();
+    let spaces = sink.enabled(rules::TRAILING_SPACE).is_some();
+    if !(calls || spaces) {
         return;
     }
     let lines = LineIndex::new(input.source);
-    NewlineCalls { source: input.source, lines: &lines, sink }.visit_block(&input.chunk.block);
+    if calls {
+        NewlineCalls { source: input.source, lines: &lines, sink: &mut *sink }.visit_block(&input.chunk.block);
+    }
+    if spaces {
+        trailing_spaces(input, &lines, sink);
+    }
 }
 
 /// `newline-call`: Lua reads a line that starts with `(` as the arguments of a call to whatever
@@ -54,5 +63,39 @@ impl<'ast> Visitor<'ast> for NewlineCalls<'_, '_> {
             _ => {}
         }
         visit::walk_expr(self, expr);
+    }
+}
+
+/// `trailing-space`: spaces or tabs at the end of a line, as lua-language-server reports them. Those
+/// inside a comment or a string, such as a long string that spans lines, belong to it and are left
+/// alone, as the formatter leaves them.
+fn trailing_spaces(input: &FileInput, lines: &LineIndex, sink: &mut Sink) {
+    let source = input.source;
+    // The comments and the strings of the file, in the order they are written.
+    let comments = input.chunk.comments.iter().map(|comment| comment.span);
+    let strings =
+        input.chunk.tokens.iter().filter(|token| matches!(token.kind, TokenKind::String | TokenKind::LongString));
+    let mut kept: Vec<Span> = comments.chain(strings.map(|token| token.span)).collect();
+    kept.sort_by_key(|span| span.start);
+    let is_kept = |offset: u32| {
+        let next = kept.partition_point(|span| span.start <= offset);
+        next > 0 && kept[next - 1].contains(offset)
+    };
+    for line in 0..lines.line_count() {
+        let start = lines.line_start(line) as usize;
+        let text = source[start..].split('\n').next().unwrap_or_default();
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let code = text.trim_end_matches([' ', '\t']);
+        if code.len() == text.len() {
+            continue;
+        }
+        let span = Span::new((start + code.len()) as u32, (start + text.len()) as u32);
+        if is_kept(span.end - 1) {
+            continue;
+        }
+        let message = if code.is_empty() { "line contains only whitespace" } else { "trailing whitespace" };
+        let fix =
+            Fix { title: "Remove trailing whitespace".into(), edits: vec![TextEdit { span, new_text: String::new() }] };
+        sink.report_with(rules::TRAILING_SPACE, span, message, None, Some(fix));
     }
 }

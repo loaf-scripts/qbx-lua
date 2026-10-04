@@ -25,6 +25,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `shadowed-local` | off | A local hides one in an enclosing scope. |
 | `unreachable-code` | warning | Code follows a control-flow statement that exits the path. |
 | `empty-block` | info | A block has no statements. |
+| `trailing-space` | hint | A line ends in spaces or tabs, or holds nothing else. Whitespace inside a comment or a string, such as a long string that spans lines, is left alone, as the formatter leaves it. Fix available. |
 | `unbalanced-assignments` | warning | An assignment or `local` statement has mismatched target and value counts, as in `local a, b = 1`. A last value that is a call or `...` gives any number of values. |
 | `newline-call` | warning | A line starts with an expression in parentheses that is then indexed or called, such as `(value):method()` or `(function() end)()`, so Lua reads it as the argument of a call to the expression that ends the line above. A `;` before the `(` starts a new statement. |
 | `duplicate-index` | warning | A table constructor assigns the same key twice. |

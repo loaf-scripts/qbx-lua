@@ -102,7 +102,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-global-doc`, `missing-local-export-doc`, `incomplete-signature-doc`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `cast-local-type`, `no-unknown`, `need-check-nil`, `inject-field`, `undefined-field` and `newline-call`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-global-doc`, `missing-local-export-doc`, `incomplete-signature-doc`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `cast-local-type`, `no-unknown`, `need-check-nil`, `inject-field`, `undefined-field`, `newline-call` and `trailing-space`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `diagnostics.neededFileStatus` | For the same codes, `Any` or `Opened` turns a rule that is off by default, such as `no-unknown` or `missing-global-doc`, on as a warning, unless `diagnostics.severity` gives its level. `None` turns a rule off, whatever its severity. With or without a trailing `!` |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
@@ -1191,10 +1191,11 @@ Before writing, the formatter compares the input and output tokens and comments.
 are compared after decoding escapes. A verification failure leaves that file unchanged. Statements
 with comments the printer cannot place are retained verbatim. Syntax errors also prevent formatting.
 
-`--fix` applies available, non-overlapping fixes and then lints again. The candidate output must
-parse before it is written. A source file that changed after analysis is not overwritten. Hash
-literal replacements are offered in value positions; a standalone `GetHashKey('adder')` call
-cannot become a bare hash statement.
+`--fix` applies available, non-overlapping fixes and then lints again, including those of rules
+whose findings `--min-severity` leaves out, such as the removal of the whitespace `trailing-space`
+reports at the end of lines. The candidate output must parse before it is written. A source file
+that changed after analysis is not overwritten. Hash literal replacements are offered in value
+positions; a standalone `GetHashKey('adder')` call cannot become a bare hash statement.
 
 Editing commands can process several files before encountering an error; they are not a
 transaction over the entire input. Review the resulting diff.

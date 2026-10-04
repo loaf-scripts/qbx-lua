@@ -1359,6 +1359,27 @@ fn fields_declared_twice_for_one_class() {
     }
 }
 
+/// `source` with every fix that the default rules offer applied.
+fn all_fixes(source: &str) -> String {
+    let chunk = parse(source);
+    let resolution = resolve(&chunk);
+    let summary = summarize(source, &chunk, &resolution);
+    let config = FileConfig::default();
+    let input = FileInput {
+        source,
+        chunk: &chunk,
+        resolution: &resolution,
+        summary: &summary,
+        config: &config,
+        side: None,
+        resource: None,
+        crossrefs: None,
+        locale: None,
+        relative_path: "",
+    };
+    qbx_lua_analysis::apply_fixes(source, &check_file(&input)).0
+}
+
 #[test]
 fn parentheses_that_continue_the_line_above() {
     let source = "local a = print
@@ -1386,4 +1407,17 @@ print(b, c, d, e, f, g, h, i)";
         "'print' on the line above is called with the parentheses on this line; put a ';' before the '(' if this line starts a new statement"
     );
     assert!(messages[3].starts_with("the expression on the line above is called"), "{}", messages[3]);
+}
+
+#[test]
+fn whitespace_at_the_end_of_lines() {
+    let source = "local a = 1  \nlocal b = 2\t\n   \n-- comment  \nlocal s = [[x  \ny]]  \nprint(a, b, s) --[[ c ]]  \r\nprint(1)  ";
+    assert_eq!(reported_lines(source, "trailing-space"), [1, 2, 3, 6, 7, 8]);
+    let messages: Vec<String> = findings(source, "trailing-space").into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages[0], "trailing whitespace");
+    assert_eq!(messages[2], "line contains only whitespace");
+    assert_eq!(
+        all_fixes(source),
+        "local a = 1\nlocal b = 2\n\n-- comment  \nlocal s = [[x  \ny]]\nprint(a, b, s) --[[ c ]]\r\nprint(1)"
+    );
 }
