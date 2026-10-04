@@ -677,8 +677,10 @@ function written in a table, whose doc comment goes above its field. qbx-lua-ls 
 
 - `return-type-mismatch` for a returned value that clearly is not of its `@return` type: a
   different kind of value, such as `return 5` for `---@return string`, or a literal the type does
-  not list. A trailing `---@return ...string`, or `---@return string ...`, covers every further
-  value.
+  not list. Each type a union lists has to fit, `nil` included, so `return maybe()` is no `number`
+  for a `maybe` that returns a `number?`; the `nil` that the type of a field read allows does not
+  count, as lua-language-server reads fields. A trailing `---@return ...string`, or
+  `---@return string ...`, covers every further value.
 - `missing-return` for a `return` with fewer values than the function requires, and at the `end`
   of a function whose body can run past it without returning. A value is required unless its type
   allows `nil`, as `string?`, `string|nil` or `any` do.

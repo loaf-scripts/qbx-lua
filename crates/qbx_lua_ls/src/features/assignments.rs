@@ -1,15 +1,16 @@
 //! `assign-type-mismatch` for variables: a `local` or an assignment with a `---@type` above it has
 //! to store values of that type, and so does a later assignment to a local declared with
 //! `---@type` or to a parameter documented with `@param`. As for `@return`, a value of a different
-//! kind, or a literal the type does not list, is a mismatch. `class_tables` checks the fields of
-//! class tables.
+//! kind, or a literal the type does not list, is a mismatch, for each type a union lists, `nil`
+//! included, though not the `nil` of a field read. `class_tables` checks the fields of class
+//! tables.
 
 use qbx_lua_analysis::scope::{LocalId, Resolved};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
 
-use super::class_tables::{mismatched_fields, unknown_fields, Classes};
+use super::class_tables::{checked_value, mismatched_fields, unknown_fields, Classes};
 use super::unknown_types::{given_values, has_param_line, is_typed, value_at};
 use crate::infer::{Decl, Infer};
 use crate::types::Type;
@@ -91,8 +92,9 @@ impl Finder<'_, '_> {
                 }
                 continue;
             }
-            if self.classes.rejects(expected, from, &given) {
-                let shown = if self.classes.literal_mismatch(expected, from, &given) { given } else { given.widen() };
+            let given = checked_value(value_at(exprs, index), given);
+            if let Some(part) = self.classes.rejected_part(expected, from, &given) {
+                let shown = self.classes.shown(expected, from, &given, &part);
                 let name = target.name.text(self.infer.ctx.source);
                 self.out.push((span, format!("Cannot assign `{shown}` to `{name}` of type `{expected}`")));
             }

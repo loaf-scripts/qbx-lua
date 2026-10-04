@@ -7372,6 +7372,90 @@ print(either, rest, head, position)
 }
 
 #[test]
+fn values_of_a_union_have_to_fit_each_of_its_types() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return string|number
+local function either() return 1 end
+---@return number?
+local function maybe() end
+---@param s string
+local function needsString(s) end
+---@class Probe.Box
+---@field label string
+---@field size number
+---@field extra? number
+---@alias Probe.Mode 'a'|'b'
+---@return 'a'|'c'
+local function mode() return 'a' end
+---@param m Probe.Mode
+local function useMode(m) end
+
+---@param size number
+---@param other Probe.Box
+---@return string
+local function describe(size, other)
+    size = maybe()
+    needsString(either())
+    ---@type number
+    local count = maybe()
+    ---@type Probe.Box
+    local box = { label = either(), size = count }
+    box.size = maybe()
+    box.size = other.extra
+    useMode(mode())
+    return either()
+end
+---@return number
+local function amount() return maybe() end
+print(describe, amount)
+";
+    client.open_with(CLIENT, text);
+    let finding = |code: &str, needle: &str, message: &str| {
+        (code.to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["assign-type-mismatch", "param-type-mismatch", "return-type-mismatch"]),
+        [
+            finding("assign-type-mismatch", "size = maybe()", "Cannot assign `number?` to `size` of type `number`"),
+            finding(
+                "param-type-mismatch",
+                "needsString(either())",
+                "Cannot assign `string|number` to parameter `s` of type `string`"
+            ),
+            finding("assign-type-mismatch", "count = maybe()", "Cannot assign `number?` to `count` of type `number`"),
+            finding(
+                "assign-type-mismatch",
+                "label = either()",
+                "Cannot assign `string|number` to field `label` of type `string`"
+            ),
+            finding(
+                "assign-type-mismatch",
+                "box.size = maybe()",
+                "Cannot assign `number?` to field `size` of type `number`"
+            ),
+            finding(
+                "param-type-mismatch",
+                "useMode(mode())",
+                "Cannot assign `\"a\"|\"c\"` to parameter `m` of type `Probe.Mode`"
+            ),
+            finding(
+                "return-type-mismatch",
+                "return either()",
+                "Cannot return `string|number` as return value #1 of type `string`"
+            ),
+            finding(
+                "return-type-mismatch",
+                "return maybe() end",
+                "Cannot return `number?` as return value #1 of type `number`"
+            ),
+        ],
+        "each type a union lists has to fit, `nil` too, except the `nil` of a field read, as \
+         lua-language-server reads fields"
+    );
+}
+
+#[test]
 fn natives_take_their_arguments_as_the_runtime_converts_them() {
     let mut client = Client::start(fixture_root());
     let text = "\

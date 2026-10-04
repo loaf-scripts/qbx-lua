@@ -1,11 +1,12 @@
 //! `return-type-mismatch`, `missing-return` and `redundant-return-value`: a function documented with
 //! `@return` has to return values of those types. A value of a different kind, or a literal the type
-//! does not list, is a mismatch; a `return` with fewer values than the required ones, or a body that
-//! can run past its end, is missing one; a `return` with more values than declared returns values
-//! nobody expects. A value is required unless its type allows `nil`. An empty body is missing its
-//! values too, except in a `---@meta` file, whose functions only declare their signatures.
-//! Returned tables typed as a class are checked like other class tables, by `missing-fields`,
-//! `assign-type-mismatch` and `undeclared-field`.
+//! does not list, is a mismatch, for each type a union lists, `nil` included, though not the `nil`
+//! that the type of a field read allows, as lua-language-server reads fields; a `return` with fewer
+//! values than the required ones, or a body that can run past its end, is missing one; a `return`
+//! with more values than declared returns values nobody expects. A value is required unless its
+//! type allows `nil`. An empty body is missing its values too, except in a `---@meta` file, whose
+//! functions only declare their signatures. Returned tables typed as a class are checked like other
+//! class tables, by `missing-fields`, `assign-type-mismatch` and `undeclared-field`.
 //!
 //! A function that lists sets of values, as `@return false | (string, string)` does, has to return
 //! one of them: each `return` is compared with the set it comes closest to.
@@ -22,7 +23,7 @@ use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
 use rustc_hash::FxHashSet;
 
-use super::class_tables::Classes;
+use super::class_tables::{checked_value, Classes};
 use super::unknown_types::{given_values, is_typed, value_at};
 use crate::infer::{always_exits, return_stmts, Infer};
 use crate::types::Type;
@@ -34,7 +35,9 @@ pub fn mismatched_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     let mut out = Vec::new();
     for function in documented(infer, chunk) {
         for (_, exprs) in return_stmts(&function.func.body) {
-            let values = classes.values(exprs);
+            let values = classes.values(exprs).into_iter().enumerate();
+            let values: Vec<(Type, Span)> =
+                values.map(|(index, (given, span))| (checked_value(value_at(exprs, index), given), span)).collect();
             out.extend(mismatches(&classes, function.closest(&classes, exprs, &values), &values));
         }
     }
@@ -67,9 +70,8 @@ fn mismatches(classes: &Classes, returns: &[Type], values: &[(Type, Span)]) -> V
     let mut out = Vec::new();
     for (i, (given, span)) in values.iter().enumerate() {
         let Some(expected) = expected_at(returns, i) else { break };
-        if classes.rejects(expected, classes.file(), given) {
-            let shown =
-                if classes.literal_mismatch(expected, classes.file(), given) { given.clone() } else { given.widen() };
+        if let Some(part) = classes.rejected_part(expected, classes.file(), given) {
+            let shown = classes.shown(expected, classes.file(), given, &part);
             out.push((*span, format!("Cannot return `{shown}` as return value #{} of type `{expected}`", i + 1)));
         }
     }

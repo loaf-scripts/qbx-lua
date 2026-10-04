@@ -842,6 +842,16 @@ impl<'a, 'b> Classes<'a, 'b> {
     }
 }
 
+/// `given`, the type of the `value` that an assignment stores or a `return` returns, as
+/// `assign-type-mismatch` and `return-type-mismatch` check it: the `nil` that the type of a field it
+/// reads allows does not count, as lua-language-server reads fields.
+pub fn checked_value(value: Option<&Expr>, given: Type) -> Type {
+    match value.map(|value| &value.unparen().kind) {
+        Some(ExprKind::Field { .. } | ExprKind::Index { .. }) => given.without_nil(),
+        _ => given,
+    }
+}
+
 /// Every class-typed table constructor of `chunk`, outer tables before the ones they hold.
 pub fn class_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> Vec<ClassTable<'c>> {
     let mut finder = Finder::new(infer);
@@ -1078,8 +1088,9 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
             }
             return;
         }
-        if classes.rejects(&ty, file, &given) {
-            let shown = if classes.literal_mismatch(&ty, file, &given) { given } else { given.widen() };
+        let given = checked_value(Some(value), given);
+        if let Some(part) = classes.rejected_part(&ty, file, &given) {
+            let shown = classes.shown(&ty, file, &given, &part);
             out.push((value.span, format!("Cannot assign `{shown}` to {target} of type `{ty}`")));
         }
     };
