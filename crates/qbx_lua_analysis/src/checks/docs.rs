@@ -1,9 +1,11 @@
 //! Doc comment checks that need no other file: `@param` names that no parameter of the documented
-//! function has, aliases, enums and class fields that one file declares twice for one side, and
-//! functions whose parameters and returned values the doc comments leave out.
+//! function has, or that one doc comment repeats, aliases, enums and class fields that one file
+//! declares twice for one side, and functions whose parameters and returned values the doc
+//! comments leave out.
 
 use std::cell::OnceCell;
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 
 use qbx_fivem_data::Side;
@@ -30,7 +32,8 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let globals = sink.enabled(rules::MISSING_GLOBAL_DOC).is_some();
     let exported = sink.enabled(rules::MISSING_LOCAL_EXPORT_DOC).is_some();
     let incomplete = wanted(rules::INCOMPLETE_SIGNATURE_DOC, &["@param", "@return"]);
-    if !(params || aliases || fields || globals || exported || incomplete) {
+    let repeated_params = wanted(rules::DUPLICATE_DOC_PARAM, &["@param"]);
+    if !(params || aliases || fields || globals || exported || incomplete || repeated_params) {
         return;
     }
     let blocks: Vec<DocBlock> = doc_blocks(source, &input.chunk.comments)
@@ -52,6 +55,11 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     }
     if fields {
         duplicate_fields(&blocks, &lines, sink);
+    }
+    if repeated_params {
+        for block in &blocks {
+            duplicate_params(block, &block.bind_groups(source, &lines), &lines, sink);
+        }
     }
 }
 
@@ -79,6 +87,111 @@ impl<'a> DocBlock<'a> {
         let start = self.comments[index].span.start + 3 + offset as u32;
         Some((Span::new(start, start + name.len() as u32), name))
     }
+
+    /// What line `index` is to lua-language-server.
+    fn kind(&self, index: usize) -> LineKind<'a> {
+        if self.lines[index].trim_start().starts_with('|') {
+            return LineKind::Value;
+        }
+        match self.tag(index) {
+            Some(tag) if LUA_LS_TAGS.contains(&tag) => LineKind::Tag(tag),
+            _ => LineKind::Comment,
+        }
+    }
+
+    /// The lines of the comment in the groups lua-language-server binds together, which decide what
+    /// a `@field` or `@param` belongs to. A line joins the group of the line above when the two tags
+    /// allow it: after a `@class`, only fields, operators, overloads and descriptions go on. A
+    /// comment after code on its line is a group of its own, unless it is a field.
+    fn bind_groups(&self, source: &str, lines: &LineIndex) -> Vec<Range<usize>> {
+        let mut groups = Vec::new();
+        let mut start = 0;
+        let mut last: Option<(LineKind, u32)> = None;
+        for index in 0..self.lines.len() {
+            let kind = self.kind(index);
+            let line = lines.line_of(self.comments[index].span.start);
+            // A `---|` line lists another value of the line above, as part of it.
+            if kind == LineKind::Value {
+                if let Some((_, last_line)) = last.as_mut() {
+                    *last_line = line;
+                }
+                continue;
+            }
+            if let Some((last_kind, last_line)) = last {
+                // LuaLS reads the other comments in between, which a doc comment passes over, as
+                // descriptions, which anything may follow.
+                let last_kind = if line == last_line + 1 { last_kind } else { LineKind::Comment };
+                if !continues(last_kind, kind) {
+                    groups.push(start..index);
+                    start = index;
+                }
+            }
+            last = Some((kind, line));
+            if index == 0 && !starts_line(source, self.comments[0].span.start) && kind != LineKind::Tag("field") {
+                groups.push(0..1);
+                (start, last) = (1, None);
+            }
+        }
+        if start < self.lines.len() {
+            groups.push(start..self.lines.len());
+        }
+        groups
+    }
+}
+
+/// The tags lua-language-server reads; a line with any other is a description to it.
+const LUA_LS_TAGS: &[&str] = &[
+    "class",
+    "type",
+    "alias",
+    "param",
+    "return",
+    "field",
+    "generic",
+    "vararg",
+    "overload",
+    "deprecated",
+    "meta",
+    "version",
+    "see",
+    "diagnostic",
+    "module",
+    "async",
+    "nodiscard",
+    "as",
+    "cast",
+    "operator",
+    "source",
+    "enum",
+    "private",
+    "protected",
+    "public",
+    "package",
+];
+
+/// What a doc line is to lua-language-server when it groups the lines of a comment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineKind<'a> {
+    /// A line without a tag, or with one lua-language-server does not read, such as `@author`.
+    Comment,
+    /// A `---|` line, which lists another value of the line above.
+    Value,
+    Tag(&'a str),
+}
+
+/// Whether lua-language-server binds the line `next` to the group of the line `last` above it.
+fn continues(last: LineKind, next: LineKind) -> bool {
+    if next == LineKind::Tag("diagnostic") {
+        return true;
+    }
+    let allowed = match last {
+        LineKind::Tag("type" | "module" | "enum") => next == LineKind::Comment,
+        LineKind::Tag("class" | "field" | "operator") => {
+            matches!(next, LineKind::Comment | LineKind::Tag("field" | "operator" | "overload" | "source"))
+        }
+        _ => true,
+    };
+    allowed && next != LineKind::Tag("cast")
 }
 
 fn line_number(lines: &LineIndex, span: Span) -> u32 {
@@ -840,6 +953,22 @@ fn duplicate_fields(blocks: &[DocBlock], lines: &LineIndex, sink: &mut Sink) {
                 }
                 declared.push((side, span));
             }
+        }
+    }
+}
+
+/// `duplicate-doc-param`: two `@param` lines for one name in a group of doc lines, as
+/// lua-language-server binds them. Each is reported, with the line of another.
+fn duplicate_params(block: &DocBlock, groups: &[Range<usize>], lines: &LineIndex, sink: &mut Sink) {
+    for group in groups {
+        let params: Vec<(Span, &str)> =
+            group.clone().filter(|&i| block.tag(i) == Some("param")).filter_map(|i| block.declared(i)).collect();
+        for (span, name) in &params {
+            let Some((other, _)) = params.iter().find(|(other, other_name)| other != span && other_name == name) else {
+                continue;
+            };
+            let message = format!("duplicate @param '{name}', also on line {}", line_number(lines, *other));
+            sink.report(rules::DUPLICATE_DOC_PARAM, *span, message);
         }
     }
 }

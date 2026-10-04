@@ -80,6 +80,7 @@ pub const UNDEFINED_DOC_NAME: &str = "undefined-doc-name";
 pub const UNDEFINED_DOC_PARAM: &str = "undefined-doc-param";
 pub const DUPLICATE_DOC_ALIAS: &str = "duplicate-doc-alias";
 pub const DUPLICATE_DOC_FIELD: &str = "duplicate-doc-field";
+pub const DUPLICATE_DOC_PARAM: &str = "duplicate-doc-param";
 pub const MISSING_GLOBAL_DOC: &str = "missing-global-doc";
 pub const MISSING_LOCAL_EXPORT_DOC: &str = "missing-local-export-doc";
 pub const INCOMPLETE_SIGNATURE_DOC: &str = "incomplete-signature-doc";
@@ -176,6 +177,7 @@ pub static RULES: &[Rule] = &[
     rule(UNDEFINED_DOC_PARAM, Correctness, WARN, false, "A LuaCATS @param names no parameter of the function its doc comment documents, or no function follows the comment."),
     rule(DUPLICATE_DOC_ALIAS, Suspicious, WARN, false, "An @alias or @enum reuses the name of an alias, enum or class that the same file declares for the same side."),
     rule(DUPLICATE_DOC_FIELD, Suspicious, WARN, false, "A class declares the same field twice in one file for the same side; repeated function fields are overloads."),
+    rule(DUPLICATE_DOC_PARAM, Suspicious, WARN, false, "A doc comment has two @param annotations for the same parameter."),
     rule(MISSING_GLOBAL_DOC, Style, OFF, false, "A global function has a parameter without @param or returns a value without @return; one that has neither needs a comment."),
     rule(MISSING_LOCAL_EXPORT_DOC, Style, OFF, false, "A local function that a module's returned table or exports() exports, or a function passed to exports(), has a parameter without @param or returns a value without @return; one that has neither needs a comment."),
     rule(INCOMPLETE_SIGNATURE_DOC, Style, OFF, false, "A function whose doc comment has @param or @return annotations leaves out a parameter or a returned value."),

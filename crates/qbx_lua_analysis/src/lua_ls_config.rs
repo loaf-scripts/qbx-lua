@@ -56,6 +56,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "newline-call",
     "trailing-space",
     "redundant-return",
+    "duplicate-doc-param",
 ];
 
 #[derive(Debug, Default)]

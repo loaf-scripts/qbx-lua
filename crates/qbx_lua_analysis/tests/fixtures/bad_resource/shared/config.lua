@@ -35,3 +35,9 @@ print(spaced)
 
 local function done() return end
 done()
+
+---@param amount number
+---@param amount integer
+function Config.Pay(amount)
+    print(amount)
+end

@@ -1410,6 +1410,26 @@ print(b, c, d, e, f, g, h, i)";
 }
 
 #[test]
+fn params_documented_twice() {
+    let source = "---@param x number
+---@param x string
+---@param y number
+local function f(x, y) return x, y end
+---@param ... any
+---@param ... any
+local function g(...) return ... end
+---@param z number
+
+---@param z number
+local function h(z) return z end
+print(f, g, h)";
+    assert_eq!(reported_lines(source, "duplicate-doc-param"), [1, 2, 5, 6]);
+    let messages: Vec<String> = findings(source, "duplicate-doc-param").into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages[0], "duplicate @param 'x', also on line 2");
+    assert_eq!(messages[1], "duplicate @param 'x', also on line 1");
+}
+
+#[test]
 fn returns_without_values_that_end_a_function() {
     let source = "local function a() return end
 local function b() if a then return end end
