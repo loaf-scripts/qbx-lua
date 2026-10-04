@@ -337,8 +337,12 @@ A method defined with `:` and called with `.` needs `self` as its first argument
 several definitions, for example a client and a server `Notify`, a call is compared with those its
 side can reach, and is not checked when any of them is not a function. A `:` call passes its
 receiver as the first argument whatever that parameter is named, so `function Locale.new(_, opts)`
-called as `Locale:new(opts)` receives both. Calls whose last argument is another call or `...`
-pass an unknown number of arguments, so `missing-parameter` skips them. Neither rule checks
+called as `Locale:new(opts)` receives both. Calls whose last argument is `...` pass an unknown
+number of arguments, so `missing-parameter` skips them, and qbx-lint skips those that end with
+another call too. qbx-lua-ls counts the values such a call returns when each signature its function
+may use returns the same number of them and none ends with `...T`, so `setVolume(tonumber(x))`
+passes one argument, while a call of a function that returns a different number of values in an
+`@overload` may pass any number. Neither rule checks
 natives, runtime functions, exports, or methods of objects returned by calls, such as
 `GetPlayer(source):setJob(job)`.
 

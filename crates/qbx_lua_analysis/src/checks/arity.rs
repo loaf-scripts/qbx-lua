@@ -280,9 +280,15 @@ impl Calls<'_, '_, '_, '_> {
         self.redundant(&signatures, args, via_colon, display);
     }
 
-    /// `missing-parameter`, for the signature that needs the fewest arguments.
+    /// `missing-parameter`, for the signature that needs the fewest arguments. A call at the end
+    /// passes as many values as it gives, which only the language server tells.
     fn missing(&mut self, signatures: &[&FunType], args: &[Expr], via_colon: bool, span: Span, display: &str) {
-        let Some(passed) = passed_count(args, 0) else { return };
+        let given = |last: &Expr| match last.is_call() {
+            true => self.callees.input.value_count.and_then(|count| count(last)),
+            false => None,
+        };
+        let passed = passed_count(args, 0).or_else(|| Some(args.len() - 1 + given(args.last()?)?));
+        let Some(passed) = passed else { return };
         let env = self.callees.env();
         let alias = |name: &str| env.alias(name);
         let least = signatures

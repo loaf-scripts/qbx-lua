@@ -38,6 +38,7 @@ fn codes_in_project(
         crossrefs: Some(&crossrefs),
         locale: locale.as_ref(),
         relative_path: "",
+        value_count: None,
     };
     check_file(&input).into_iter().map(|d| d.code).collect()
 }
@@ -78,6 +79,7 @@ fn resource_project(source: &str, side: Side, own: &str, others: &[(&str, Option
         crossrefs: Some(&crossrefs),
         locale: None,
         relative_path: "",
+        value_count: None,
     };
     check_file(&input).into_iter().map(|d| d.code).collect()
 }
@@ -229,6 +231,7 @@ fn modules_loaded_at_runtime_provide_their_globals() {
             crossrefs: None,
             locale: None,
             relative_path: "client.lua",
+            value_count: None,
         };
         check_file(&input).into_iter().map(|d| d.code).collect()
     }
@@ -678,6 +681,7 @@ fn hash_fixes(source: &str) -> (String, usize) {
         crossrefs: None,
         locale: None,
         relative_path: "",
+        value_count: None,
     });
     let hashes: Vec<_> = diagnostics.into_iter().filter(|d| d.code == "fivem/hash-literal").collect();
     qbx_lua_analysis::apply_fixes(source, &hashes)
@@ -789,6 +793,7 @@ fn call_messages(code: &str, source: &str, side: Option<Side>, others: &[(Option
         crossrefs: None,
         locale: None,
         relative_path: "",
+        value_count: None,
     };
     check_file(&input).into_iter().filter(|d| d.code == code).map(|d| d.message).collect()
 }
@@ -1055,6 +1060,7 @@ fn findings_with(source: &str, code: &str, config: &FileConfig) -> Vec<(u32, Str
         crossrefs: None,
         locale: None,
         relative_path: "",
+        value_count: None,
     };
     let lines = qbx_lua_syntax::LineIndex::new(source);
     check_file(&input)
@@ -1112,6 +1118,7 @@ for i = 10, n do print(i) end";
             crossrefs: None,
             locale: None,
             relative_path: "",
+            value_count: None,
         };
         qbx_lua_analysis::apply_fixes(source, &check_file(&input)).0
     };
@@ -1533,6 +1540,7 @@ fn all_fixes(source: &str) -> String {
         crossrefs: None,
         locale: None,
         relative_path: "",
+        value_count: None,
     };
     qbx_lua_analysis::apply_fixes(source, &check_file(&input)).0
 }

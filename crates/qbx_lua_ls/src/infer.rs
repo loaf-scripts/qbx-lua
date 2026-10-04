@@ -2619,6 +2619,38 @@ impl<'a> Infer<'a> {
         })
     }
 
+    /// How many values `call` gives, when each signature its function may use, and each set of
+    /// values it lists, gives the same number of them and none ends with `...T`: the `1` of
+    /// `tonumber(x)`. `None` when that is not known, or is none.
+    pub fn value_count(&self, call: &Expr) -> Option<usize> {
+        let (base, method, args) = match &call.kind {
+            ExprKind::Call { callee, args, .. } => (&**callee, None, args),
+            ExprKind::MethodCall { base, method, args, .. } => (&**base, Some(method), args),
+            _ => return None,
+        };
+        if method.is_none() && matches!(base.dotted_path().as_deref(), Some("tonumber" | "tostring")) {
+            return Some(1);
+        }
+        let fun = match self.sided_definition(base, method, &CallArgs::new(args)) {
+            Some(fun) => fun?,
+            None => self.callee_fun(base, method)?.0,
+        };
+        // An `await` wrapper returns what the handler it reaches returns.
+        if Wrapper::of(&fun, method.is_some()).is_some_and(|wrapper| wrapper.tag.role == CallbackRole::Await) {
+            return None;
+        }
+        let signatures = self.signatures_at(&fun, base.span.start);
+        let mut counts = signatures
+            .iter()
+            .flat_map(|signature| std::iter::once(&signature.returns).chain(&signature.return_sets))
+            .map(|values| match values.last() {
+                Some(Type::Variadic(_)) => None,
+                _ => Some(values.len()),
+            });
+        let first = counts.next()??;
+        (first > 0 && counts.all(|count| count == Some(first))).then_some(first)
+    }
+
     /// What calling `base`, or its `method`, with `args` returns.
     fn call_values(&self, base: &Expr, method: Option<&Name>, args: &[Expr]) -> Returned {
         let only = |ty: Type, declared: bool| Returned {

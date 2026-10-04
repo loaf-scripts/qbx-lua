@@ -12,7 +12,7 @@ pub mod manifest;
 mod security;
 
 use qbx_fivem_data::Side;
-use qbx_lua_syntax::ast::Chunk;
+use qbx_lua_syntax::ast::{Chunk, Expr};
 use qbx_lua_syntax::{LineIndex, Span};
 
 use crate::config::FileConfig;
@@ -38,7 +38,13 @@ pub struct FileInput<'a> {
     pub locale: Option<&'a crate::locale::LocaleFile>,
     /// Slash-separated path inside the resource, empty when unknown.
     pub relative_path: &'a str,
+    /// How many values a call gives, when the types of the language server tell; without it a call
+    /// at the end of the arguments passes any number of them.
+    pub value_count: Option<ValueCount<'a>>,
 }
+
+/// Tells how many values a call gives, when that is known.
+pub type ValueCount<'a> = &'a dyn Fn(&Expr) -> Option<usize>;
 
 #[derive(Clone, Copy)]
 pub struct ResourceInput<'a> {

@@ -118,6 +118,7 @@ fn lint_loose_file(path: &Path, config: &Config, crossrefs: &CrossRefs) -> Optio
         crossrefs: Some(crossrefs),
         locale: None,
         relative_path: "",
+        value_count: None,
     });
     Some(FileReport { path: file.path, source: file.source, diagnostics })
 }
@@ -202,6 +203,7 @@ fn lint_resource(
                 crossrefs: Some(crossrefs),
                 locale: locale.as_ref(),
                 relative_path: &file.relative,
+                value_count: None,
             });
             FileReport { path: file.path.clone(), source: file.source.clone(), diagnostics }
         })

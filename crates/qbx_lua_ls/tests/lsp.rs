@@ -7547,6 +7547,43 @@ DropPlayer(src, 'kicked')
 }
 
 #[test]
+fn missing_parameter_counts_the_values_a_call_at_the_end_gives() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param volume number
+---@param kind string
+local function setVolume(volume, kind) end
+---@return number, string
+local function both() return 1, '' end
+---@return number
+---@overload fun(): number, string
+local function either() return 1 end
+---@return number, string?
+local function maybe() end
+local function inferred() return 1 end
+
+setVolume(tonumber('5'))
+setVolume(both())
+setVolume(either())
+setVolume(maybe())
+setVolume(inferred())
+setVolume(GetGameTimer())
+setVolume(table.unpack({}))
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str| {
+        let message = "'setVolume' is called with 1 argument, but needs 2; 'kind' (string) will be nil";
+        ("missing-parameter".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["missing-parameter"]),
+        [finding("setVolume(tonumber"), finding("setVolume(inferred"), finding("setVolume(GetGameTimer")],
+        "a call that gives one value passes one, while one whose signatures give different numbers of \
+         values, or any number, may pass more"
+    );
+}
+
+#[test]
 fn arguments_are_compared_with_the_definitions_the_side_of_the_call_reaches() {
     let mut client = Client::start(fixture_root());
     client.open_with("myresource/shared/config.lua", "Lib = {}\n");

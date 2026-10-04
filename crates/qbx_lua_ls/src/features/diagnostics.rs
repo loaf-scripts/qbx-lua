@@ -91,9 +91,10 @@ impl<'a> CheckInput<'a> {
 /// reaches or on the `---@deprecated` annotations of other files. Inline
 /// suppression comments apply to them as they do to the linter's own. Removes the linter's findings
 /// of parameters without `@param` that those types document.
-fn type_diagnostics(
-    ws: &Workspace,
-    doc: &Document,
+fn type_diagnostics<'a>(
+    ws: &'a Workspace,
+    doc: &'a Document,
+    infer: &'a Infer<'a>,
     config: &FileConfig,
     found: &mut Vec<qbx_lua_analysis::Diagnostic>,
 ) {
@@ -146,16 +147,14 @@ fn type_diagnostics(
             reads.into_iter().chain(arguments.into_iter().filter(|finding| !suppressed(finding))).collect()
         }),
     ];
-    let ctx = FileContext::new(doc.file, &doc.text, &doc.chunk, &doc.resolution);
-    let infer = Infer::new(&ctx, &ws.index);
     let suppressions = Suppressions::parse(&doc.text, &doc.chunk.comments, &doc.lines);
-    let input = CheckInput { ws, doc, infer: &infer, payloads: OnceCell::new(), suppressions };
+    let input = CheckInput { ws, doc, infer, payloads: OnceCell::new(), suppressions };
     // A parameter typed by what its function is written as, such as the `fun(source: number, ...)`
     // of a callback wrapper, needs no `@param` of its own. The linter only knows the function types
     // that the functions of its resource document.
     let missing_docs = [MISSING_GLOBAL_DOC, MISSING_LOCAL_EXPORT_DOC, INCOMPLETE_SIGNATURE_DOC];
     if missing_docs.iter().any(|code| config.severity(code).is_some()) {
-        found.retain(|d| !missing_docs.contains(&d.code) || !typed_by_declaration(&infer, d.span));
+        found.retain(|d| !missing_docs.contains(&d.code) || !typed_by_declaration(infer, d.span));
     }
     for (code, check) in checks {
         let Some(severity) = config.severity(code) else { continue };
@@ -260,6 +259,8 @@ pub(crate) fn diagnostics_with_support(
         } else {
             None
         };
+        let ctx = FileContext::new(doc.file, &doc.text, &doc.chunk, &doc.resolution);
+        let infer = Infer::new(&ctx, &ws.index);
         let mut found = check_file(&FileInput {
             relative_path: &relative_path,
             source: &doc.text,
@@ -271,8 +272,9 @@ pub(crate) fn diagnostics_with_support(
             resource: resource_input,
             crossrefs: Some(crossrefs),
             locale: support.and_then(|support| support.locale).or(owned_locale.as_ref()),
+            value_count: Some(&|call| infer.value_count(call)),
         });
-        type_diagnostics(ws, doc, &config, &mut found);
+        type_diagnostics(ws, doc, &infer, &config, &mut found);
         found
     };
 
