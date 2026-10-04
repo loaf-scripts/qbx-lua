@@ -574,7 +574,10 @@ server knows, with the fields that `inject-field` lets code set: those a class o
 declares, including the `{ label: string }` a table constructor gives, and those set through the
 names that own a table. Reads with `.`, `['name']` and `:` count, also in conditions such as
 `if point.z then`. A union lacks a field when none of its parts has it, and a local that is
-assigned again has the types of all the values that may reach the read.
+assigned again has the types of all the values that may reach the read. A value that is surely
+`nil` has no fields at all: what a call of a function that returns nothing gives, as a function
+whose body has no `return` with a value does, and a local declared with such a call, `nil` or no
+value that is never assigned again.
 
 ```lua
 ---@class Point

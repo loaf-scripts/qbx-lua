@@ -207,6 +207,9 @@ pub struct FunType {
     pub return_sets: Vec<Vec<Type>>,
     /// `returns` were inferred from the `return`s of the function's body, not declared with `@return`.
     pub returns_inferred: bool,
+    /// Nothing declares what the function returns and no `return` of its body passes a value, so a
+    /// call of it gives `nil`, as lua-language-server reads it. `returns` is then empty.
+    pub returns_nothing: bool,
     pub is_method: bool,
     /// The parameters are those of a function defined with `.`, or of a plain function value, so
     /// they list every value a call passes: a `:` call gives the first one the value before the colon.

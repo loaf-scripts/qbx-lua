@@ -7,7 +7,8 @@
 //! `self` in a method or a local declared with a table at the top of a file. Reads such as
 //! `value.name`, `value['name']` and `value:name()` are checked, also in conditions like
 //! `if value.name then`, and a union lacks a field when none of its parts has it. A local that is
-//! assigned again has the types of all the values that may reach the read.
+//! assigned again has the types of all the values that may reach the read. A value that is surely
+//! `nil`, as what a call of a function that returns nothing gives, has no fields at all, as in LuaLS.
 //!
 //! Some values may have any field, so reads from them are left alone:
 //!
@@ -31,7 +32,8 @@ use super::class_tables::{accesses, Classes, Key};
 use super::comparisons::Declared;
 use super::injected_fields::{message, through_self};
 use crate::index::{instance_class, is_local_table, FileId};
-use crate::infer::Infer;
+use crate::infer::{Decl, Infer};
+use crate::narrow::Origin;
 use crate::types::Type;
 
 /// Each field that code reads from a value whose type does not have it, with the message naming
@@ -46,9 +48,15 @@ pub fn undefined_fields(infer: &Infer, chunk: &Chunk, by_default: impl Fn(FileId
             ExprKind::Name(_) => classes.value_type(base),
             _ => access.owner,
         };
+        // `nil` has no fields, as what a function that returns nothing gives.
+        if owner == Type::Nil {
+            if surely_nil(infer, base) {
+                out.push((access.span, message(infer, name, &owner, access.holder)));
+            }
+            continue;
+        }
         let parts: Vec<&Type> = match &owner {
             Type::Union(types) => types.iter().filter(|ty| !matches!(ty, Type::Nil)).collect(),
-            Type::Nil => Vec::new(),
             ty => vec![ty],
         };
         let is_class = |ty: &&Type| classes.class_of(ty, classes.file()).is_some();
@@ -133,6 +141,53 @@ fn lacks(
         }
         _ => false,
     }
+}
+
+/// Whether `base` surely holds `nil`: it calls a function that returns nothing, or names a local
+/// that is never assigned again after a declaration that gives it such a call, `nil` or no value,
+/// or one that each value reaching it there gives such a call. Other values that read as `nil` may
+/// hold what code of unknown type stores in them, and a local declared without a value may be
+/// assigned before a function that reads it runs.
+fn surely_nil(infer: &Infer, base: &Expr) -> bool {
+    let base = base.unparen();
+    if base.is_call() {
+        return infer.returns_nothing(base);
+    }
+    let ExprKind::Name(name) = &base.kind else { return false };
+    let Some(Resolved::Local(id)) = infer.ctx.resolution.resolve_at(name.span.start) else { return false };
+    let local = infer.ctx.resolution.local(id);
+    let Some(Decl::Local { stmt, index }) = infer.ctx.decl(local.decl.start) else { return false };
+    let StmtKind::Local { exprs, in_unpack: false, .. } = &stmt.kind else { return false };
+    if local.refs.iter().any(|r| r.write) {
+        let versions = infer.ctx.flow().at(id, name.span.start);
+        return !versions.is_empty()
+            && versions.iter().all(|version| gives_nothing(infer, exprs, *index, version.origin));
+    }
+    match (exprs.get(*index).map(Expr::unparen), exprs.last()) {
+        (Some(value), _) if value.is_call() => infer.returns_nothing(value),
+        (Some(value), _) => matches!(value.kind, ExprKind::Nil),
+        (None, Some(last)) if last.is_call() => infer.returns_nothing(last),
+        (None, last) => last.is_none_or(|last| !last.is_multi_value()),
+    }
+}
+
+/// Whether the value that `origin` gives a local declared with value `index` of `declared` is what a
+/// call of a function that returns nothing gives.
+fn gives_nothing(infer: &Infer, declared: &[Expr], index: usize, origin: u32) -> bool {
+    let flow = infer.ctx.flow();
+    let (exprs, index) = match flow.origin(origin) {
+        Origin::Declaration => (declared, index),
+        Origin::Assignment { stmt: Stmt { kind: StmtKind::Assign { exprs, .. }, .. }, index } => (&exprs[..], index),
+        Origin::Others(set) => {
+            return flow.others(set).iter().all(|other| gives_nothing(infer, declared, index, *other))
+        }
+        _ => return false,
+    };
+    let call = match exprs.get(index) {
+        Some(value) => Some(value.unparen()),
+        None => exprs.last(),
+    };
+    call.is_some_and(|call| call.is_call() && infer.returns_nothing(call))
 }
 
 /// Whether a value of type `ty` is a number, a boolean or a function, which has no fields.

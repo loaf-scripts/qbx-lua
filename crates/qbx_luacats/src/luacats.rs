@@ -229,6 +229,7 @@ impl DocGroup {
             callback: self.callback.clone(),
             nodiscard: self.nodiscard,
             is_async: self.is_async,
+            returns_nothing: false,
             fields: None,
         }
     }

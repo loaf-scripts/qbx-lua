@@ -97,6 +97,8 @@ struct Returned {
     /// from the `return`s of a body, or bound from the arguments of a generic, tell what the code
     /// passes today, not what it may.
     declared: bool,
+    /// The function returns nothing, so the call gives `nil` whatever its values say.
+    nothing: bool,
 }
 
 pub enum Decl<'a> {
@@ -2591,9 +2593,18 @@ impl<'a> Infer<'a> {
         })
     }
 
+    /// Whether `call` runs a function that returns nothing, so what it gives is surely `nil`.
+    pub fn returns_nothing(&self, call: &Expr) -> bool {
+        self.guarded(|| match &call.unparen().kind {
+            ExprKind::Call { callee, args, .. } => self.call_values(callee, None, args).nothing,
+            ExprKind::MethodCall { base, method, args, .. } => self.call_values(base, Some(method), args).nothing,
+            _ => false,
+        })
+    }
+
     /// What calling `base`, or its `method`, with `args` returns.
     fn call_values(&self, base: &Expr, method: Option<&Name>, args: &[Expr]) -> Returned {
-        let only = |ty: Type, declared: bool| Returned { values: vec![ty], sets: Vec::new(), declared };
+        let only = |ty: Type, declared: bool| Returned { values: vec![ty], sets: Vec::new(), declared, nothing: false };
         if method.is_none() {
             match (base.dotted_path().as_deref(), args.first()) {
                 (Some("require" | "lib.require" | "lib.load"), Some(arg)) => {
@@ -2642,9 +2653,14 @@ impl<'a> Infer<'a> {
                         values: handler.returns.clone(),
                         sets: handler.return_sets.clone(),
                         declared: !handler.returns_inferred,
+                        nothing: false,
                     };
                 }
             }
+        }
+        // A function that returns nothing gives `nil`, which no `@return` declares.
+        if fun.returns_nothing {
+            return Returned { nothing: true, ..only(Type::Nil, false) };
         }
         let generics = self.bind_generics(&fun, &args, method.is_some(), true);
         let bound = |types: &Vec<Type>| types.iter().map(|ret| substitute(ret, &generics)).collect();
@@ -2652,6 +2668,7 @@ impl<'a> Infer<'a> {
             values: bound(&fun.returns),
             sets: fun.return_sets.iter().map(bound).collect(),
             declared: !fun.returns_inferred && fun.generics.is_empty(),
+            nothing: false,
         }
     }
 
@@ -3198,6 +3215,9 @@ impl<'a> Infer<'a> {
                 fun.return_sets = sets;
                 fun.returns_inferred = true;
             }
+            // `function Framework.GetJob() return end`, or a stub with no `@return`, returns nothing.
+            fun.returns_nothing =
+                fun.returns.is_empty() && return_stmts(&func.body).iter().all(|(_, exprs)| exprs.is_empty());
         }
         fun
     }
@@ -3859,6 +3879,7 @@ fn substitute_fun(fun: &FunType, generics: &[(SmolStr, Type)]) -> FunType {
         callback: fun.callback.clone(),
         nodiscard: fun.nodiscard,
         is_async: fun.is_async,
+        returns_nothing: fun.returns_nothing,
         fields: fun.fields.clone(),
     }
 }

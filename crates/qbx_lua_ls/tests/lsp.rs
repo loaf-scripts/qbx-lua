@@ -5099,6 +5099,100 @@ print(read, build, show)
 }
 
 #[test]
+fn functions_that_return_nothing_give_nil() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+Framework = {}
+function Framework.GetJob()
+    return
+end
+
+local function log(message)
+    print(message)
+end
+
+---@param name string
+local function notify(name) end
+
+---@type fun()
+local callback
+
+local function wrap(fn)
+    return fn()
+end
+
+local function guarded(flag)
+    if flag then
+        error('no')
+    end
+end
+
+local job = Framework.GetJob()
+print(job.grade)
+local logged = log('a')
+local notified = notify('b')
+print(notify('c').field, callback().field, wrap(callback).field, guarded(false).field)
+local empty = nil
+print(empty.value)
+local later = nil
+RegisterNetEvent('test:later', function(value)
+    later = value
+end)
+local function readLater()
+    return later.value
+end
+local current
+RegisterNetEvent('test:current', function(value)
+    current = value
+end)
+CreateThread(function()
+    local copy = current
+    print(copy.value)
+end)
+local either = Framework.GetJob()
+if math.random(1, 2) == 1 then
+    either = log('c')
+end
+print(either.level)
+local bind
+bind = lib.addKeybind({
+    onPressed = function()
+        print(bind.disable)
+    end,
+})
+Holder = { current = nil }
+print(Holder.current.value, readLater, logged, notified)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("job = Framework", "local job: nil"),
+        ("logged = log", "local logged: nil"),
+        ("notified = notify", "local notified: nil"),
+        ("GetJob()\n    return", "function Framework.GetJob()\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let found = |needle: &str, message: &str| ("undefined-field".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["undefined-field"]),
+        [
+            found("job.grade", "Field `grade` is not declared in `nil`"),
+            found("notify('c')", "Field `field` is not declared in `nil`"),
+            found("notify('c')", "Field `field` is not declared in `nil`"),
+            found("empty.value", "Field `value` is not declared in `nil`"),
+            found("either.level", "Field `level` is not declared in `nil`"),
+        ],
+        "a function whose body returns no value gives nil, as one that only raises an error does, \
+         while a `fun()` type and a function that returns what another returns give unknown; a local \
+         that values of unknown type may reach, a copy of one, one declared without a value that a \
+         function reads and a global path may hold anything"
+    );
+}
+
+#[test]
 fn private_protected_and_package_members_stay_in_their_class_or_file() {
     let mut client = Client::start(fixture_root());
     const SHARED: &str = "myresource/shared/config.lua";
