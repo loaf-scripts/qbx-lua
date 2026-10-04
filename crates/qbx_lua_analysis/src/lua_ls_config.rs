@@ -48,6 +48,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "redundant-return-value",
     "discard-returns",
     "cast-type-mismatch",
+    "cast-local-type",
     "no-unknown",
     "need-check-nil",
     "inject-field",

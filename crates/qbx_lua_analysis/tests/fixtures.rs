@@ -92,6 +92,7 @@ fn bad_resource_reports_every_rule() {
                 | "redundant-return-value"
                 | "discard-returns"
                 | "cast-type-mismatch"
+                | "cast-local-type"
                 | "no-unknown"
                 | "impossible-comparison"
                 | "need-check-nil"

@@ -6550,6 +6550,165 @@ use(back, returned, built)
 }
 
 #[test]
+fn locals_take_values_of_the_type_they_are_declared_with() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return string?
+local function maybe() end
+
+local speed = 5
+speed = '5'
+local count = 5
+count = count .. 'x'
+local done = false
+done = {}
+local enabled = true
+enabled = 'yes'
+local list = {}
+list = 5
+local name = maybe()
+name = 5
+local label = 'a'
+label = nil
+local total = 0
+total = nil
+local ratio = 1
+ratio = 1.5
+local state = 'on'
+state = 'off'
+local data = {}
+data = { a = 1 }
+local cleared = nil
+cleared = 5
+local unset
+unset = 'x'
+local fallback = 'a'
+fallback = maybe()
+print(speed, count, done, enabled, list, name, label, total, ratio, state, data, cleared, unset, fallback)
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("cast-local-type".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["cast-local-type"]),
+        [
+            finding("speed = '5'", "Cannot assign `string` to `speed`, defined as `integer`"),
+            finding("count = count", "Cannot assign `string` to `count`, defined as `integer`"),
+            finding("done = {}", "Cannot assign `table` to `done`, defined as `boolean`"),
+            finding("enabled = 'yes'", "Cannot assign `string` to `enabled`, defined as `boolean`"),
+            finding("list = 5", "Cannot assign `integer` to `list`, defined as `table`"),
+            finding("name = 5", "Cannot assign `integer` to `name`, defined as `string?`"),
+            finding("label = nil", "Cannot assign `nil` to `label`, defined as `string`"),
+            finding("total = nil", "Cannot assign `nil` to `total`, defined as `integer`"),
+            finding("fallback = maybe()", "Cannot assign `string?` to `fallback`, defined as `string`"),
+        ],
+        "as in lua-language-server and TypeScript, a local has the type of its first value: `integer` widens to \
+         `number`, a literal written out to its kind, a table takes any table, `nil` needs a type that allows it, and \
+         a local declared without a value or as `nil` takes anything"
+    );
+}
+
+#[test]
+fn locals_typed_by_annotations_loops_and_callees_take_values_of_their_type() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Mode 'a'|'b'
+---@return Test.Mode
+local function getMode() return 'a' end
+---@return 'x'|'y'
+local function getAxis() return 'x' end
+---@param handler fun(id: integer, name: string)
+local function each(handler) end
+---@class Test.Point
+---@field x number
+local Point = {}
+Point.__index = Point
+
+---@type integer
+local typed = 1
+typed = 'x'
+---@param documented string
+local function document(documented, plain)
+    documented = 1
+    plain = 1
+    plain = 'x'
+end
+local cast = 5
+---@cast cast string
+cast = 'x'
+local captured = 5
+local function capture() captured = 'x' end
+local first, second = 1, 's'
+first, second = 'x', 2
+for i = 1, 3 do i = 'x' end
+for index, value in ipairs({ 1, 2 }) do index = 'x'; value = 2.5 end
+each(function(id, name) id = 'x'; name = 'y' end)
+local loose = undefinedGlobal
+loose = 5
+local fn = function() end
+fn = 5
+local point = setmetatable({}, Point)
+point = 5
+point = {}
+local mode = getMode()
+mode = 'c'
+mode = 'a'
+local axis = getAxis()
+axis = 'z'
+local choice = math.random() > 0.5 and 'a' or 'b'
+choice = 'c'
+local fixed <const> = 5
+fixed = 'x'
+local _ = 5
+_ = 'x'
+local annotated = 5
+---@type string
+annotated = 'x'
+local text = 0
+text ..= 'x'
+local hit = 0
+_, hit = GetShapeTestResult(1)
+local _, struck = GetShapeTestResult(1)
+struck = 0
+local part = string.strsplit(',', 'a,b')
+part = 1
+print(typed, document, cast, capture, first, second, loose, fn, point, mode, axis, choice, fixed, annotated, text)
+print(hit, struck, part)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |code: &str, needle: &str, message: &str| (code.to_string(), line(needle), message.to_string());
+    let (local, mismatch) = ("cast-local-type", "assign-type-mismatch");
+    assert_eq!(
+        findings(&mut client, CLIENT, &[local, mismatch]),
+        [
+            finding(mismatch, "typed = 'x'", "Cannot assign `string` to `typed` of type `integer`"),
+            finding(mismatch, "documented = 1", "Cannot assign `integer` to `documented` of type `string`"),
+            finding(local, "cast = 'x'", "Cannot assign `string` to `cast`, defined as `integer`"),
+            finding(local, "captured = 'x'", "Cannot assign `string` to `captured`, defined as `integer`"),
+            finding(local, "first, second = 'x'", "Cannot assign `string` to `first`, defined as `integer`"),
+            finding(local, "first, second = 'x'", "Cannot assign `integer` to `second`, defined as `string`"),
+            finding(local, "i = 'x'", "Cannot assign `string` to `i`, defined as `number`"),
+            finding(local, "index = 'x'", "Cannot assign `string` to `index`, defined as `integer`"),
+            finding(local, "id = 'x'", "Cannot assign `string` to `id`, defined as `integer`"),
+            finding(local, "fn = 5", "Cannot assign `integer` to `fn`, defined as `fun()`"),
+            finding(local, "point = 5", "Cannot assign `integer` to `point`, defined as `Test.Point`"),
+            finding(local, "mode = 'c'", "Cannot assign `\"c\"` to `mode`, defined as `Test.Mode`"),
+            finding(local, "axis = 'z'", "Cannot assign `\"z\"` to `axis`, defined as `\"x\"|\"y\"`"),
+            finding(local, "annotated = 'x'", "Cannot assign `string` to `annotated`, defined as `integer`"),
+            finding(local, "text ..= 'x'", "Cannot assign `string` to `text`, defined as `integer`"),
+            finding(local, "part = 1", "Cannot assign `integer` to `part`, defined as `string`"),
+        ],
+        "a `---@type` or `@param` local is left to `assign-type-mismatch`, a cast or a `---@type` above an \
+         assignment does not change the type a local is declared with, loop variables and the parameters of a \
+         function passed for a function type have the type they are given, and the literals a function declares \
+         it returns are the only ones its local takes; parameters without a type, `<const>` locals and `_` take \
+         anything, and a `BOOL` a native returns may be an integer"
+    );
+}
+
+#[test]
 fn casts_of_locals_assigned_again_compare_the_values_that_reach_them() {
     let mut client = Client::start(fixture_root());
     let text = "\

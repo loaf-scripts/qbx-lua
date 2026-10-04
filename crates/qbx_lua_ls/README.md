@@ -77,7 +77,10 @@ Available features depend on the editor's LSP client.
   completion leaves them out there.
   `impossible-comparison` reports an `==` or `~=` between values whose declared types share no
   value, such as `GetState() == "invalid"` for a function that returns `"active"|"busy"`, and
-  `cast-type-mismatch` a `---@cast` to a type the local is not declared to take. `inject-field`
+  `cast-type-mismatch` a `---@cast` to a type the local is not declared to take.
+  `cast-local-type` reports an assignment that gives a local without an annotation a value of
+  another type than the one it is declared with, such as `speed = "5"` after `local speed = 5`, as
+  lua-language-server and TypeScript do. `inject-field`
   reports fields set through a value whose class or table type does not have them,
   `undefined-field` fields read from one, and
   `need-check-nil` a value that may be `nil` used where a missing value raises an error. The opt-in

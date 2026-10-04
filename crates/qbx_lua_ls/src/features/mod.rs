@@ -27,6 +27,7 @@ pub mod references;
 pub mod resource_assets;
 pub mod resource_details;
 pub mod returns;
+pub mod retyped_locals;
 pub mod semantic_tokens;
 pub mod signature;
 pub mod strict_classes;

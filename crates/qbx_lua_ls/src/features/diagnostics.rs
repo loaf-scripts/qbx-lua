@@ -5,10 +5,10 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
-    ASSIGN_TYPE_MISMATCH, CAST_TYPE_MISMATCH, DISCARD_RETURNS, IMPOSSIBLE_COMPARISON, INCOMPLETE_SIGNATURE_DOC,
-    INJECT_FIELD, INVISIBLE, MISSING_FIELDS, MISSING_GLOBAL_DOC, MISSING_LOCAL_EXPORT_DOC, MISSING_PARAMETER,
-    MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN, PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER, REDUNDANT_RETURN_VALUE,
-    RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME, UNDEFINED_FIELD,
+    ASSIGN_TYPE_MISMATCH, CAST_LOCAL_TYPE, CAST_TYPE_MISMATCH, DISCARD_RETURNS, IMPOSSIBLE_COMPARISON,
+    INCOMPLETE_SIGNATURE_DOC, INJECT_FIELD, INVISIBLE, MISSING_FIELDS, MISSING_GLOBAL_DOC, MISSING_LOCAL_EXPORT_DOC,
+    MISSING_PARAMETER, MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN, PARAM_TYPE_MISMATCH, REDUNDANT_PARAMETER,
+    REDUNDANT_RETURN_VALUE, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME, UNDEFINED_FIELD,
 };
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_analysis::{
@@ -28,6 +28,7 @@ use super::doc_names::undefined_doc_names;
 use super::injected_fields::injected_fields;
 use super::nil_checks::{unchecked_nils, UncheckedNils};
 use super::returns::{mismatched_returns, missing_returns, redundant_returns};
+use super::retyped_locals::retyped_locals;
 use super::strict_classes::undeclared_fields;
 use super::undefined_fields::undefined_fields;
 use super::unknown_types::{typed_by_declaration, unknown_types, unknown_values};
@@ -92,7 +93,7 @@ fn type_diagnostics(
     found: &mut Vec<qbx_lua_analysis::Diagnostic>,
 ) {
     type Check = fn(&CheckInput) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 18] = [
+    let checks: [(&'static str, Check); 19] = [
         (UNDEFINED_DOC_NAME, |input| {
             let side = input.ws.index.file(input.doc.file).and_then(|f| f.side);
             undefined_doc_names(&input.ws.index, &input.doc.text, &input.doc.chunk, side)
@@ -119,6 +120,7 @@ fn type_diagnostics(
         (REDUNDANT_RETURN_VALUE, |input| redundant_returns(input.infer, &input.doc.chunk)),
         (DISCARD_RETURNS, |input| discarded_returns(input.infer, &input.doc.chunk)),
         (CAST_TYPE_MISMATCH, |input| mismatched_casts(input.infer)),
+        (CAST_LOCAL_TYPE, |input| retyped_locals(input.infer, &input.doc.chunk)),
         (MISSING_PARAMETER, |input| missing_payloads(input.infer, input.payloads())),
         (REDUNDANT_PARAMETER, |input| redundant_payloads(input.payloads())),
         (NO_UNKNOWN, |input| {

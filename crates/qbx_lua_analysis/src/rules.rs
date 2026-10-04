@@ -103,6 +103,8 @@ pub const DISCARD_RETURNS: &str = "discard-returns";
 /// Reported by qbx-lua-ls, which reads the LuaCATS types; the linter itself has no type information.
 pub const CAST_TYPE_MISMATCH: &str = "cast-type-mismatch";
 /// Reported by qbx-lua-ls, which infers the types; the linter itself has no type information.
+pub const CAST_LOCAL_TYPE: &str = "cast-local-type";
+/// Reported by qbx-lua-ls, which infers the types; the linter itself has no type information.
 pub const NO_UNKNOWN: &str = "no-unknown";
 pub const CONST_REASSIGN: &str = "const-reassign";
 pub const SELF_ASSIGNMENT: &str = "self-assignment";
@@ -182,6 +184,7 @@ pub static RULES: &[Rule] = &[
     rule(REDUNDANT_RETURN_VALUE, Correctness, WARN, false, "A function returns more values than its @return annotations declare (language server only)."),
     rule(DISCARD_RETURNS, Correctness, WARN, false, "A call drops the values of a function whose @nodiscard annotation requires using them (language server only)."),
     rule(CAST_TYPE_MISMATCH, Correctness, WARN, false, "A ---@cast gives a variable a type that its declared type does not take (language server only)."),
+    rule(CAST_LOCAL_TYPE, Correctness, WARN, false, "A local without @type or @param is given a value that the type of the value it is declared with does not take, such as a string after `local speed = 5` (language server only)."),
     rule(NO_UNKNOWN, Style, OFF, false, "A parameter, local or loop variable has no type, or a value of unknown type goes where a type is declared (language server only)."),
     rule(CONST_REASSIGN, Correctness, ERROR, false, "A <const> or <close> local is assigned to."),
     rule(SELF_ASSIGNMENT, Suspicious, WARN, false, "A variable is assigned to itself."),

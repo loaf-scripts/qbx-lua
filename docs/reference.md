@@ -102,7 +102,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-global-doc`, `missing-local-export-doc`, `incomplete-signature-doc`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `no-unknown`, `need-check-nil`, `inject-field` and `undefined-field`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `unused-local`, `unused-function`, `unused-label`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-global-doc`, `missing-local-export-doc`, `incomplete-signature-doc`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `cast-local-type`, `no-unknown`, `need-check-nil`, `inject-field` and `undefined-field`; EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `diagnostics.neededFileStatus` | For the same codes, `Any` or `Opened` turns a rule that is off by default, such as `no-unknown` or `missing-global-doc`, on as a warning, unless `diagnostics.severity` gives its level. `None` turns a rule off, whatever its severity. With or without a trailing `!` |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
@@ -739,8 +739,9 @@ A `---@type` line that lists several types gives each name of the statement its 
 `---@type boolean, string?` does above `local ok, err = pcall(...)`. A single type is the first
 name's alone, as lua-language-server binds it, so `---@type boolean` above
 `local onScreen, x, y = GetScreenCoordFromWorldCoord(...)` types only `onScreen`. Names without a
-type of their own, and other locals whose type is inferred from what they hold, take any value,
-and so do globals in assignments that have no `---@type` above them.
+type of their own, and other locals whose type is inferred from what they hold, have the type of
+the value they are declared with, which [`cast-local-type`](#local-types) checks. Globals in
+assignments that have no `---@type` above them take any value.
 
 The value stored is what the code is known to give. A global's `nil` tells nothing: one declared as
 `CurrentZone = nil` and set to a name by an event handler holds whatever the handler gives it, so
@@ -774,6 +775,48 @@ is not reported. A table that a table typed as a union holds, like the `{}` of `
 needs the fields of one of the types that its members declare for its key, as `Dog|Cat` for an
 entry of `Dog[]|Cat[]`. As in TypeScript and unlike in lua-language-server, the tables held by one
 that may be a `table` or `any`, as for `Dog[]|table`, are not checked.
+
+## Local types
+
+`cast-local-type` reports an assignment that gives a local without a `---@type` or `@param` a value
+its type does not take. As in lua-language-server and TypeScript, such a local has the type of the
+value it is declared with:
+
+```lua
+---@return string?
+local function find() end
+
+local speed = 5
+speed = "5"   -- Cannot assign `string` to `speed`, defined as `integer`
+speed = 7.5   -- passes: an `integer` local takes any number
+speed = nil   -- Cannot assign `nil` to `speed`, defined as `integer`
+
+local mode = "dev"
+mode = "live" -- passes: a literal written out stands for its kind
+
+local name = find()
+name = 5      -- Cannot assign `integer` to `name`, defined as `string?`
+```
+
+The check is that of `assign-type-mismatch`, for each type the value may be: a different kind of
+value, or a literal the type does not list. So a `string?` needs a local that may be `nil`, and
+clearing a local with `nil` needs a type that allows it, also for a table, as in TypeScript and
+unlike in lua-language-server. A local that starts as `false` or `true` is a `boolean`, and one
+declared with a table constructor takes any table. A literal that a function declares it returns,
+as the `"a"|"b"` of `---@return "a"|"b"`, is one of the only values its local takes, while a literal
+written out, also through `and` and `or`, widens to its kind. Each name of an assignment is checked
+against its own local, also inside the functions that a local is assigned in.
+
+A local declared without a value, as `nil`, or with a value of unknown type or `any`, takes any
+value, and so do `_`, `self` and parameters without `@param`. A loop variable has the type its loop
+gives it, such as the `integer` of `for i, v in ipairs(list)`, and a parameter of a function passed
+for a function type, such as the handler of `fun(id: integer)`, has the type the function type
+declares, as in TypeScript. Locals with a `---@type` or `@param` are left to
+[`assign-type-mismatch`](#typed-variables), and `<const>` and `<close>` locals to `const-reassign`.
+A `---@cast` changes what a local holds from its line on, but not the type it is declared with, as
+in lua-language-server, so assigning a value of the cast type is still reported; a `---@type` above
+an assignment is the type of the value it stores. A `BOOL` that a native returns may be a boolean
+or an integer, so either passes for the other where a native gives it.
 
 ## Casts
 
