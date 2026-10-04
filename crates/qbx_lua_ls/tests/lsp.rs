@@ -6564,6 +6564,44 @@ local suppressed <close> = 2
 }
 
 #[test]
+fn classes_that_inherit_from_themselves_are_reported_in_each_file() {
+    const SHARED: &str = "myresource/shared/config.lua";
+    let mut client = Client::start(fixture_root());
+    let shared = "---@class Test.Loop.B : Test.Loop.C\n---@class Test.Loop.C : Test.Loop.A\nreturn {}\n";
+    client.open_with(SHARED, shared);
+    let text = "\
+---@class Test.Loop.A : Test.Loop.B
+---@class Test.Self : Test.Self
+---@class Test.Pair.A : Test.Pair.B
+---@class Test.Pair.B : Test.Pair.A
+---@class Test.Base
+---@class Test.Fine : Test.Base
+---@class Test.Generic<T> : Test.Base
+---@class Test.Child : Test.Generic<string>
+---@class Test.Above : Test.Pair.A
+";
+    client.open_with(CLIENT, text);
+    let finding = |line: u64, message: &str| ("circle-doc-class".to_string(), line, message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["circle-doc-class"]),
+        [
+            finding(0, "Class `Test.Loop.A` inherits from itself through `Test.Loop.B` and `Test.Loop.C`"),
+            finding(1, "Class `Test.Self` inherits from itself"),
+            finding(2, "Class `Test.Pair.A` inherits from itself through `Test.Pair.B`"),
+            finding(3, "Class `Test.Pair.B` inherits from itself through `Test.Pair.A`"),
+        ],
+        "a class that only extends a cycle is not on it"
+    );
+    assert_eq!(
+        findings(&mut client, SHARED, &["circle-doc-class"]),
+        [
+            finding(0, "Class `Test.Loop.B` inherits from itself through `Test.Loop.C` and `Test.Loop.A`"),
+            finding(1, "Class `Test.Loop.C` inherits from itself through `Test.Loop.A` and `Test.Loop.B`"),
+        ]
+    );
+}
+
+#[test]
 fn casts_to_classes_the_declared_type_does_not_extend_are_reported() {
     let mut client = Client::start(fixture_root());
     let text = "\

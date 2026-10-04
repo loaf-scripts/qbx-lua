@@ -3,6 +3,7 @@ pub mod assignments;
 pub mod assistant;
 pub mod callback_payloads;
 pub mod casts;
+pub mod class_cycles;
 pub mod class_tables;
 pub mod closes;
 pub mod code_action;

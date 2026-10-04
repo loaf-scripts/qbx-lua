@@ -5,7 +5,7 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use qbx_lua_analysis::directives::Suppressions;
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::rules::{
-    ASSIGN_TYPE_MISMATCH, CAST_LOCAL_TYPE, CAST_TYPE_MISMATCH, CLOSE_NON_OBJECT, DISCARD_RETURNS,
+    ASSIGN_TYPE_MISMATCH, CAST_LOCAL_TYPE, CAST_TYPE_MISMATCH, CIRCLE_DOC_CLASS, CLOSE_NON_OBJECT, DISCARD_RETURNS,
     IMPOSSIBLE_COMPARISON, INCOMPLETE_SIGNATURE_DOC, INJECT_FIELD, INVISIBLE, MISSING_FIELDS, MISSING_GLOBAL_DOC,
     MISSING_LOCAL_EXPORT_DOC, MISSING_PARAMETER, MISSING_RETURN, NEED_CHECK_NIL, NO_UNKNOWN, PARAM_TYPE_MISMATCH,
     REDUNDANT_PARAMETER, REDUNDANT_RETURN_VALUE, RETURN_TYPE_MISMATCH, UNDECLARED_FIELD, UNDEFINED_DOC_NAME,
@@ -22,6 +22,7 @@ use super::arguments::mismatched_arguments;
 use super::assignments::mismatched_assignments;
 use super::callback_payloads::{missing_payloads, payloads, redundant_payloads, Payload};
 use super::casts::mismatched_casts;
+use super::class_cycles::circular_classes;
 use super::class_tables::missing_fields;
 use super::closes::unclosable_values;
 use super::comparisons::impossible_comparisons;
@@ -95,11 +96,12 @@ fn type_diagnostics(
     found: &mut Vec<qbx_lua_analysis::Diagnostic>,
 ) {
     type Check = fn(&CheckInput) -> Vec<(Span, String)>;
-    let checks: [(&'static str, Check); 20] = [
+    let checks: [(&'static str, Check); 21] = [
         (UNDEFINED_DOC_NAME, |input| {
             let side = input.ws.index.file(input.doc.file).and_then(|f| f.side);
             undefined_doc_names(&input.ws.index, &input.doc.text, &input.doc.chunk, side)
         }),
+        (CIRCLE_DOC_CLASS, |input| circular_classes(input.infer, &input.doc.chunk)),
         (MISSING_FIELDS, |input| missing_fields(input.infer, &input.doc.chunk)),
         (ASSIGN_TYPE_MISMATCH, |input| mismatched_assignments(input.infer, &input.doc.chunk)),
         (PARAM_TYPE_MISMATCH, |input| mismatched_arguments(input.infer, &input.doc.chunk, input.payloads())),

@@ -62,6 +62,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "unknown-cast-variable",
     "unknown-diag-code",
     "close-non-object",
+    "circle-doc-class",
 ];
 
 /// The diagnostic codes of lua-language-server 3.19.1, including those that have no rule here.

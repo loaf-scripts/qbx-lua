@@ -82,6 +82,8 @@ pub const DUPLICATE_DOC_ALIAS: &str = "duplicate-doc-alias";
 pub const DUPLICATE_DOC_FIELD: &str = "duplicate-doc-field";
 pub const DUPLICATE_DOC_PARAM: &str = "duplicate-doc-param";
 pub const DOC_FIELD_NO_CLASS: &str = "doc-field-no-class";
+/// Reported by qbx-lua-ls, which indexes the classes of every file; the linter itself sees one file.
+pub const CIRCLE_DOC_CLASS: &str = "circle-doc-class";
 pub const UNKNOWN_OPERATOR: &str = "unknown-operator";
 pub const UNKNOWN_CAST_VARIABLE: &str = "unknown-cast-variable";
 pub const UNKNOWN_DIAG_CODE: &str = "unknown-diag-code";
@@ -185,6 +187,7 @@ pub static RULES: &[Rule] = &[
     rule(DUPLICATE_DOC_FIELD, Suspicious, WARN, false, "A class declares the same field twice in one file for the same side; repeated function fields are overloads."),
     rule(DUPLICATE_DOC_PARAM, Suspicious, WARN, false, "A doc comment has two @param annotations for the same parameter."),
     rule(DOC_FIELD_NO_CLASS, Correctness, WARN, false, "A @field does not directly follow the @class it belongs to, so lua-language-server attaches it to no class."),
+    rule(CIRCLE_DOC_CLASS, Correctness, WARN, false, "A @class inherits from itself, directly or through its parents (language server only)."),
     rule(UNKNOWN_OPERATOR, Correctness, WARN, false, "An @operator names an operator that LuaCATS annotations cannot declare, such as `eq`."),
     rule(UNKNOWN_CAST_VARIABLE, Correctness, WARN, false, "A ---@cast names no local that is in scope where it is written."),
     rule(UNKNOWN_DIAG_CODE, Suspicious, WARN, false, "A ---@diagnostic or qbx-lint comment names a code that is neither a rule here nor a lua-language-server diagnostic."),
