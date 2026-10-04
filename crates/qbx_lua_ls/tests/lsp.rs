@@ -2969,6 +2969,46 @@ print(firstname, lastname) -- after
 }
 
 #[test]
+fn runtime_functions_return_the_values_that_go_together() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local fn, err = load('return 1')
+if not fn then
+    print('failed: ' .. err) -- failed
+    return
+end
+local text = 'key=value'
+local from, to, capture = string.find(text, '(=)')
+if from then
+    print(text:sub(1, from - 1), to + 1) -- found
+end
+local stamp = ''
+stamp = os.date('%Y-%m-%d %H:%M:%S')
+local now = os.date('*t')
+local utc = os.date('!*t', 0)
+local format = '%H'
+local formatted = os.date(format)
+print(capture, now, utc, formatted, stamp)
+print(60 - now.sec, os.time(now), os.time({ year = 2024, month = 1, day = '2' }))
+";
+    client.open_with(SERVER, text);
+    for (needle, expected) in [
+        ("err) -- failed", "err: string\n"),
+        ("to + 1) -- found", "to: integer\n"),
+        ("capture = string", "capture: any"),
+        ("now = os", "now: osdate"),
+        ("utc = os", "utc: osdate"),
+        ("formatted = os", "formatted: string\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(SERVER, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let codes = ["need-check-nil", "cast-local-type", "param-type-mismatch", "missing-fields"];
+    assert_eq!(findings(&mut client, SERVER, &codes), []);
+}
+
+#[test]
 fn values_that_a_spread_return_gives_have_its_type() {
     let mut client = Client::start(fixture_root());
     let text = "\

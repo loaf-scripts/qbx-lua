@@ -1049,6 +1049,11 @@ mod tests {
         assert_eq!(sets(&doc), [vec!["Player", "integer"], vec!["nil", "string"], vec!["nil"]]);
         assert_eq!(merged(&doc), ["Player?", "integer|string|nil"]);
 
+        // A set that ends in `...T` gives a `T` from there on, and leaves the last position open.
+        let doc = parse("---@return (integer, integer, ...string) | nil");
+        assert_eq!(sets(&doc), [vec!["integer", "integer", "...string"], vec!["nil"]]);
+        assert_eq!(merged(&doc), ["integer?", "integer?", "...string?"]);
+
         // Parentheses without a comma group a type, and further `@return` lines add values, so
         // neither lists sets.
         for text in [

@@ -68,8 +68,7 @@ function ipairs(t) end
 ---@param chunkname? string
 ---@param mode? load_mode
 ---@param env? table
----@return function? fn
----@return string? err
+---@return function | (nil, string)
 ---@nodiscard
 function load(chunk, chunkname, mode, env) end
 
@@ -77,8 +76,7 @@ function load(chunk, chunkname, mode, env) end
 ---@param filename? string
 ---@param mode? load_mode
 ---@param env? table
----@return function? fn
----@return string? err
+---@return function | (nil, string)
 ---@nodiscard
 function loadfile(filename, mode, env) end
 
@@ -630,16 +628,30 @@ function math.type(x) end
 ---@nodiscard
 function math.ult(m, n) end
 
----@class osdate
+---The date that `os.time` reads: the fields it leaves out default to noon of that day.
+---@class osdateparam
+---@field year integer|string
+---@field month integer|string
+---@field day integer|string
+---@field hour? integer|string
+---@field min? integer|string
+---@field sec? integer|string
+---@field wday? integer|string
+---@field yday? integer|string
+---@field isdst? boolean
+local osdateparam = {}
+
+---The date that `os.date('*t')` gives, with every field set.
+---@class osdate : osdateparam
 ---@field year integer
 ---@field month integer
 ---@field day integer
----@field hour? integer
----@field min? integer
----@field sec? integer
----@field wday? integer
----@field yday? integer
----@field isdst? boolean
+---@field hour integer
+---@field min integer
+---@field sec integer
+---@field wday integer
+---@field yday integer
+---@field isdst boolean
 local osdate = {}
 
 ---@class packagelib
@@ -716,9 +728,7 @@ function string.dump(f, strip) end
 ---@param pattern string
 ---@param init? integer
 ---@param plain? boolean
----@return integer? start
----@return integer? finish
----@return any ...
+---@return (integer, integer, ...any) | nil
 ---@nodiscard
 function string.find(s, pattern, init, plain) end
 

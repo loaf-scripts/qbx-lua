@@ -657,10 +657,19 @@ impl Type {
 }
 
 /// What each position holds across the sets of values a function returns. A set that ends before
-/// a position gives `nil` there.
+/// a position gives `nil` there, and one that ends in `...T` a `T`, as `(integer, integer, ...any)
+/// | nil` gives its captures; the last position then stays open.
 pub fn merged_returns(sets: &[Vec<Type>]) -> Vec<Type> {
     let width = sets.iter().map(Vec::len).max().unwrap_or(0);
-    (0..width).map(|i| Type::union(sets.iter().map(|set| set.get(i).cloned().unwrap_or(Type::Nil)))).collect()
+    let is_open = |set: &&Vec<Type>| matches!(set.last(), Some(Type::Variadic(_)));
+    let open = sets.iter().any(|set| is_open(&set));
+    let at = |set: &Vec<Type>, i: usize| match set.get(i).or_else(|| Some(set).filter(is_open).and_then(|s| s.last())) {
+        Some(Type::Variadic(inner)) => (**inner).clone(),
+        Some(ty) => ty.clone(),
+        None => Type::Nil,
+    };
+    let merged = |i: usize| Type::union(sets.iter().map(|set| at(set, i)));
+    (0..width).map(|i| if open && i + 1 == width { Type::Variadic(Box::new(merged(i))) } else { merged(i) }).collect()
 }
 
 fn push_unique(list: &mut Vec<Type>, ty: Type) {

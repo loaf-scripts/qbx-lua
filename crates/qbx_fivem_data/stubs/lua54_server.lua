@@ -73,7 +73,8 @@ function os.clock() end
 ---Formats a time (default: now) using strftime-style `format`. A leading "!" selects UTC and the format "*t" returns a table of date fields.
 ---@param format? string
 ---@param time? integer
----@return string|osdate result
+---@return string result
+---@overload fun(format: "*t"|"!*t", time?: integer): osdate
 ---@nodiscard
 function os.date(format, time) end
 
@@ -119,7 +120,7 @@ function os.rename(oldname, newname) end
 function os.setlocale(locale, category) end
 
 ---Returns the current time as a timestamp, or the timestamp described by the given date table.
----@param date? osdate
+---@param date? osdateparam
 ---@return integer timestamp
 ---@nodiscard
 function os.time(date) end
