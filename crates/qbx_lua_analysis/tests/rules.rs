@@ -518,6 +518,38 @@ return returned";
 }
 
 #[test]
+fn functions_only_used_by_unused_functions_are_unused() {
+    let source = "local function helper() end
+local function wrapper() helper() end
+local function recursive() recursive() end
+local held = function() end
+local function holder() held() end
+local function first() end
+local function second() first() end
+local function third() second() end
+local function a() end
+local function b() a() end
+local function c() b() end
+c()
+local function fromCallback() end
+local function spawner() CreateThread(function() fromCallback() end) end
+local function exported() end
+local M = {}
+function M.run() exported() end
+local function viaKept() end
+local function _kept() viaKept() end
+return M";
+    assert_eq!(reported_lines(source, "unused-function"), [1, 2, 3, 5, 6, 7, 8, 14]);
+    assert_eq!(reported_lines(source, "unused-local"), [4]);
+    assert_eq!(
+        findings(source, "unused-function")[0].1,
+        "function 'helper' is only used by functions that are never used"
+    );
+    assert_eq!(findings(source, "unused-function")[1].1, "unused function 'wrapper'");
+    assert_eq!(reported_lines("---@meta\nlocal function a() end\nlocal function b() a() end", "unused-function"), [3]);
+}
+
+#[test]
 fn ignore_prefix_silences_unused() {
     assert_eq!(codes("local _ignored = 1\nlocal function cb(_a, _b) end\ncb()"), Vec::<&str>::new());
 }

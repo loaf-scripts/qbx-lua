@@ -16,7 +16,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `undefined-global` | warning | A read of a global absent from the known environment. |
 | `undefined-field` | warning | An unknown field on a standard library table. qbx-lua-ls also reports a field read from a value whose `---@class` or table type does not have it, such as `point.z` for a class with `x` and `y`, as TypeScript reports a property its type does not declare. A type has the fields that `inject-field` lets code set; global tables, the exports of a resource without a declared type, empty tables and values of unknown type have any. See [Undefined fields](reference.md#undefined-fields). |
 | `unused-local` | warning | A local variable is never read. A local declared with a table constructor that code only sets fields of, as `t.a = 1`, `t[k] = v` or `function t.f()` do, is not read either, as in lua-language-server; the table a `---@class` annotation declares is left alone. |
-| `unused-function` | warning | A local function is never used. |
+| `unused-function` | warning | A local function is never used. One that only itself, or local functions that are never used, call is not used either, as in lua-language-server; a local declared with a function is reported under `unused-local` then. A call from a callback inside such a function, or from a function that starts with `ignore_unused_prefix`, counts as a use. `---@meta` files are not checked for these. |
 | `unused-argument` | hint | A function parameter is never read. |
 | `unused-loop-variable` | hint | A loop variable is never read. |
 | `unused-label` | warning | A label is never targeted by a `goto`. |
