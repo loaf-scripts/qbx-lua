@@ -837,6 +837,8 @@ local outfit = {}
 local slots = {}
 ---@type Test.Left
 local left = {}
+---@type { [number]?: { label: string }, [string]?: integer }
+local rows = {}
 
 local named = mixed.name
 local other = mixed.other
@@ -851,6 +853,8 @@ local hands = outfit.hands
 local feet = slots.feet
 local gloves = slots.gloves
 local shared = left.wins
+local row = rows[1]
+local count = rows.count
 ";
     client.open_with(CLIENT, text);
     for (needle, expected) in [
@@ -869,6 +873,14 @@ local shared = left.wins
         ("gloves", "gloves: unknown"),
         // Parents that reach the same class, or each other, read it once.
         ("shared", "shared: number"),
+        // An index written `[K]?: V` may find nothing.
+        (
+            "row =",
+            "row: {
+    label: string,
+}?",
+        ),
+        ("count =", "count: integer?"),
     ] {
         let (l, c) = pos(text, &format!("local {needle}"), 6);
         let hover = client.hover_text(CLIENT, l, c);

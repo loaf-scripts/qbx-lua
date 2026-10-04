@@ -1180,9 +1180,11 @@ impl<'a> TypeParser<'a> {
             if self.eat(b'[') {
                 let key = self.parse();
                 self.eat(b']');
+                // `[number]?: Row` is an index whose reads may find nothing, as LuaLS reads it.
+                let optional = self.eat(b'?');
                 self.eat(b':');
                 let value = self.parse();
-                shape.indices.push((key, value));
+                shape.indices.push((key, if optional { value.optional() } else { value }));
             } else if let Some(name) = self.ident() {
                 let optional = self.eat(b'?');
                 let ty = if self.eat(b':') { self.parse() } else { Type::Unknown };
@@ -1229,6 +1231,8 @@ mod tests {
         assert_eq!(roundtrip("async"), "async");
         assert_eq!(roundtrip("{ name: string, age?: number }"), "{ name: string, age?: number }");
         assert_eq!(roundtrip("{ [string]: boolean }"), "{ [string]: boolean }");
+        assert_eq!(roundtrip("{ [number]?: { [string]: unknown } }"), "{ [number]: { [string]: unknown }? }");
+        assert_eq!(roundtrip("{ [string]?: integer, name: string }"), "{ name: string, [string]: integer? }");
         assert_eq!(
             roundtrip("{ [string]: integer, [integer]: boolean, name: string }"),
             "{ name: string, [string]: integer, [integer]: boolean }"
