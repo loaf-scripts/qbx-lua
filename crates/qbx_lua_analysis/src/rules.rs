@@ -60,6 +60,7 @@ pub const UNUSED_LOCAL: &str = "unused-local";
 pub const UNUSED_FUNCTION: &str = "unused-function";
 pub const UNUSED_ARGUMENT: &str = "unused-argument";
 pub const UNUSED_LOOP_VARIABLE: &str = "unused-loop-variable";
+pub const UNUSED_VARARG: &str = "unused-vararg";
 pub const UNUSED_LABEL: &str = "unused-label";
 pub const UNDEFINED_LABEL: &str = "undefined-label";
 pub const REDEFINED_LOCAL: &str = "redefined-local";
@@ -166,6 +167,7 @@ pub static RULES: &[Rule] = &[
     rule(UNUSED_FUNCTION, Suspicious, WARN, false, "A local function is never used, or only by itself and local functions that are never used."),
     rule(UNUSED_ARGUMENT, Style, HINT, false, "A function parameter is never read."),
     rule(UNUSED_LOOP_VARIABLE, Style, HINT, false, "A loop variable is never read."),
+    rule(UNUSED_VARARG, Style, HINT, false, "A function takes `...` and never uses it."),
     rule(UNUSED_LABEL, Suspicious, WARN, false, "A label is never the target of a goto."),
     rule(UNDEFINED_LABEL, Correctness, ERROR, false, "A goto targets a label that is not visible."),
     rule(REDEFINED_LOCAL, Suspicious, WARN, false, "A local is declared twice in the same scope."),

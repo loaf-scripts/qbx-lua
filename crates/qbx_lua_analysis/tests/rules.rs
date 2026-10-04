@@ -550,6 +550,28 @@ return M";
 }
 
 #[test]
+fn varargs_that_the_body_never_uses() {
+    let source = "local function a(...) print(1) end
+local function b(x, ...) return x end
+local function c(...) local function inner(...) print(...) end inner() end
+local function d(...) end
+local function e(...) print(...) end
+local function f(...) return select('#', ...) end
+local g = function(...) local t = { ... } return t end
+print(a, b, c, d, e, f, g)";
+    assert_eq!(reported_lines(source, "unused-vararg"), [1, 2, 3]);
+    assert_eq!(findings(source, "unused-vararg")[0].1, "'...' is never used");
+    assert_eq!(
+        reported_lines(
+            "---@meta
+function Stub(...) print(1) end",
+            "unused-vararg"
+        ),
+        Vec::<u32>::new()
+    );
+}
+
+#[test]
 fn ignore_prefix_silences_unused() {
     assert_eq!(codes("local _ignored = 1\nlocal function cb(_a, _b) end\ncb()"), Vec::<&str>::new());
 }

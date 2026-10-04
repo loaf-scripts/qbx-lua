@@ -55,3 +55,8 @@ print(vector)
 
 ---@diagnostic disable-next-line: no-such-rule
 print(Config.Debug)
+
+local function log(...)
+    print(Config.Debug)
+end
+log()

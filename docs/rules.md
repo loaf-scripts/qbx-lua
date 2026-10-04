@@ -19,6 +19,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `unused-function` | warning | A local function is never used. One that only itself, or local functions that are never used, call is not used either, as in lua-language-server; a local declared with a function is reported under `unused-local` then. A call from a callback inside such a function, or from a function that starts with `ignore_unused_prefix`, counts as a use. `---@meta` files are not checked for these. |
 | `unused-argument` | hint | A function parameter is never read. |
 | `unused-loop-variable` | hint | A loop variable is never read. |
+| `unused-vararg` | hint | A function takes `...` and its body never uses it; a `...` of a function inside it is that function's own. Empty bodies and `---@meta` files are not checked, as in lua-language-server. |
 | `unused-label` | warning | A label is never targeted by a `goto`. |
 | `undefined-label` | error | A `goto` targets a label outside its visible scope. |
 | `redefined-local` | warning | A local is declared twice in one scope. |

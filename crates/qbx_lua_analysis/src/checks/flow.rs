@@ -23,8 +23,9 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     for name in &input.resolution.undefined_gotos {
         sink.report(rules::UNDEFINED_LABEL, name.span, format!("no visible label '{}' for goto", name.text));
     }
-    // Definition files only declare signatures, which may repeat a field.
-    let set_fields = sink.enabled(rules::DUPLICATE_SET_FIELD).is_some() && !is_meta_file(input.source, input.chunk);
+    // Definition files only declare signatures, which may repeat a field and leave `...` unused.
+    let meta = is_meta_file(input.source, input.chunk);
+    let set_fields = sink.enabled(rules::DUPLICATE_SET_FIELD).is_some() && !meta;
     let mut flow = Flow {
         input,
         sink,
@@ -34,6 +35,7 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
         set_fields: set_fields.then(FxHashMap::default),
         lines: None,
         suppressions: None,
+        meta,
     };
     flow.visit_block(&input.chunk.block);
 }
@@ -53,6 +55,7 @@ struct Flow<'a, 'b> {
     set_fields: Option<FxHashMap<Root, FxHashMap<String, Vec<SetField>>>>,
     lines: Option<LineIndex>,
     suppressions: Option<Suppressions>,
+    meta: bool,
 }
 
 /// The variable a table field is set through.
@@ -378,6 +381,22 @@ fn leaves_loop(body: &Block) -> bool {
     escapes(body, &inside, true)
 }
 
+/// Whether a function body uses its `...`, rather than one of a function inside it.
+fn uses_vararg(body: &Block) -> bool {
+    struct Finder(bool);
+    impl<'ast> Visitor<'ast> for Finder {
+        fn visit_func_body(&mut self, _: &'ast FuncBody) {}
+
+        fn visit_expr(&mut self, expr: &'ast Expr) {
+            self.0 |= matches!(expr.kind, ExprKind::Vararg);
+            visit::walk_expr(self, expr);
+        }
+    }
+    let mut finder = Finder(false);
+    finder.visit_block(body);
+    finder.0
+}
+
 /// An `if` with a branch that ends in `return`.
 fn can_return(stmt: &Stmt) -> bool {
     let StmtKind::If { branches, else_block } = &stmt.kind else { return false };
@@ -413,6 +432,19 @@ impl<'ast> Visitor<'ast> for Flow<'_, '_> {
                     rules::REDUNDANT_RETURN,
                     Span::new(span.start, span.start + "return".len() as u32),
                     "redundant return at the end of the function",
+                    Some(Tag::Unnecessary),
+                    None,
+                );
+            }
+        }
+        // `unused-vararg`: like lua-language-server, an empty body, which declares a signature, is
+        // left alone.
+        if let Some(vararg) = func.vararg {
+            if !self.meta && !func.body.stmts.is_empty() && !uses_vararg(&func.body) {
+                self.sink.report_with(
+                    rules::UNUSED_VARARG,
+                    vararg,
+                    "'...' is never used",
                     Some(Tag::Unnecessary),
                     None,
                 );

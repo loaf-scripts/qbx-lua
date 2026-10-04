@@ -13,7 +13,7 @@ pub const FILE_NAMES: &[&str] = &[".luarc.json", ".luarc.jsonc", ".emmyrc.json"]
 
 /// EmmyLua codes that cover several qbx-lint rules.
 const ALIASES: &[(&str, &[&str])] =
-    &[("unused", &["unused-local", "unused-function", "unused-argument", "unused-loop-variable"])];
+    &[("unused", &["unused-local", "unused-function", "unused-argument", "unused-loop-variable", "unused-vararg"])];
 
 /// Codes that check the same thing in both tools. `deprecated` is left out: projects often turn off
 /// the LuaLS check, which must not turn off the deprecated runtime functions reported here.
@@ -23,6 +23,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "unused-local",
     "unused-function",
     "unused-label",
+    "unused-vararg",
     "redefined-local",
     "unreachable-code",
     "empty-block",
@@ -487,7 +488,7 @@ mod tests {
         assert!(settings.rules.contains(&("undefined-global".to_string(), Level::Error)));
 
         let settings = parse_luals(r#"{ "diagnostics": { "disable": ["unused"] } }"#);
-        assert_eq!(settings.rules.len(), 4);
+        assert_eq!(settings.rules.len(), 5);
         assert!(settings.rules.iter().all(|(code, level)| code.starts_with("unused-") && *level == Level::Off));
     }
 
