@@ -60,3 +60,9 @@ local function log(...)
     print(Config.Debug)
 end
 log()
+
+local entries = {
+    tostring
+    ('x'),
+}
+print(entries)

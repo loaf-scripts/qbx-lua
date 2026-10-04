@@ -1,5 +1,5 @@
-//! Checks of how code is laid out over lines: a call whose arguments start a line of their own, and
-//! whitespace at the end of a line.
+//! Checks of how code is laid out over lines: a call whose arguments start a line of their own, in a
+//! statement or a table constructor, and whitespace at the end of a line.
 
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
@@ -11,13 +11,17 @@ use crate::rules;
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let calls = sink.enabled(rules::NEWLINE_CALL).is_some();
+    let fields = sink.enabled(rules::NEWFIELD_CALL).is_some();
     let spaces = sink.enabled(rules::TRAILING_SPACE).is_some();
-    if !(calls || spaces) {
+    if !(calls || fields || spaces) {
         return;
     }
     let lines = LineIndex::new(input.source);
     if calls {
         NewlineCalls { source: input.source, lines: &lines, sink: &mut *sink }.visit_block(&input.chunk.block);
+    }
+    if fields {
+        NewfieldCalls { source: input.source, lines: &lines, sink: &mut *sink }.visit_block(&input.chunk.block);
     }
     if spaces {
         trailing_spaces(input, &lines, sink);
@@ -61,6 +65,44 @@ impl<'ast> Visitor<'ast> for NewlineCalls<'_, '_> {
             }
             ExprKind::Call { callee, .. } => self.continued(callee),
             _ => {}
+        }
+        visit::walk_expr(self, expr);
+    }
+}
+
+/// `newfield-call`: an entry of a table constructor that ends a line, followed by one that starts
+/// the next with `(`, a string or a table, is one call, so `{ print` followed by `("x") }` holds what
+/// `print("x")` returns rather than `print` and `"x"`. Like lua-language-server, only entries without
+/// a key are checked.
+struct NewfieldCalls<'a, 's> {
+    source: &'a str,
+    lines: &'a LineIndex,
+    sink: &'a mut Sink<'s>,
+}
+
+impl<'ast> Visitor<'ast> for NewfieldCalls<'_, '_> {
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        if let ExprKind::Table(fields) = &expr.kind {
+            for field in fields {
+                let TableField::Positional(value) = field else { continue };
+                let (called, args_span) = match &value.kind {
+                    ExprKind::Call { callee, args_span, .. } => (callee.span, *args_span),
+                    ExprKind::MethodCall { base, method, args_span, .. } => (base.span.to(method.span), *args_span),
+                    _ => continue,
+                };
+                if self.lines.line_of(called.end) == self.lines.line_of(args_span.start) {
+                    continue;
+                }
+                let text = called.text(self.source);
+                let called = match text.contains('\n') || text.chars().count() > 40 {
+                    true => "the expression".to_string(),
+                    false => format!("'{text}'"),
+                };
+                let message = format!(
+                    "{called} is called with the arguments on the next line, which make one entry of the table; put a ',' between them if they are two"
+                );
+                self.sink.report(rules::NEWFIELD_CALL, value.span, message);
+            }
         }
         visit::walk_expr(self, expr);
     }

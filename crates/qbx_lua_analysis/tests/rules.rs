@@ -1681,6 +1681,34 @@ print(1)";
 }
 
 #[test]
+fn table_entries_called_with_arguments_on_the_next_line() {
+    let source = "local list = {
+    print
+    ('x'),
+    tostring
+    'y',
+    setmetatable
+    { 1 },
+    list:method
+    (1),
+}
+local fine = {
+    print, ('x'),
+    print('x'),
+    named = print
+    ('x'),
+    print
+    ;('x'),
+}
+print(fine)";
+    assert_eq!(reported_lines(source, "newfield-call"), [2, 4, 6, 8]);
+    assert_eq!(
+        findings(source, "newfield-call")[0].1,
+        "'print' is called with the arguments on the next line, which make one entry of the table; put a ',' between them if they are two"
+    );
+}
+
+#[test]
 fn returns_without_values_that_end_a_function() {
     let source = "local function a() return end
 local function b() if a then return end end

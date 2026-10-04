@@ -71,6 +71,7 @@ pub const EMPTY_BLOCK: &str = "empty-block";
 pub const TRAILING_SPACE: &str = "trailing-space";
 pub const UNBALANCED_ASSIGNMENTS: &str = "unbalanced-assignments";
 pub const NEWLINE_CALL: &str = "newline-call";
+pub const NEWFIELD_CALL: &str = "newfield-call";
 pub const DUPLICATE_INDEX: &str = "duplicate-index";
 pub const DUPLICATE_SET_FIELD: &str = "duplicate-set-field";
 pub const DUPLICATE_ARGUMENT: &str = "duplicate-argument";
@@ -178,6 +179,7 @@ pub static RULES: &[Rule] = &[
     rule(TRAILING_SPACE, Style, HINT, true, "A line ends in spaces or tabs outside a comment or string."),
     rule(UNBALANCED_ASSIGNMENTS, Suspicious, WARN, false, "An assignment or `local` statement has more values than targets, or leaves targets without a value."),
     rule(NEWLINE_CALL, Suspicious, WARN, false, "A parenthesized expression that starts a line, and is indexed or called, is read as the argument of a call to the expression that ends the line above."),
+    rule(NEWFIELD_CALL, Suspicious, WARN, false, "An entry of a table constructor is called with arguments that start on the next line, which were likely meant as an entry of their own."),
     rule(DUPLICATE_INDEX, Suspicious, WARN, false, "A table constructor sets the same key twice."),
     rule(DUPLICATE_SET_FIELD, Suspicious, WARN, false, "A function is assigned to the same table field twice in one block of a file, so the second replaces the first."),
     rule(DUPLICATE_ARGUMENT, Correctness, ERROR, false, "Two parameters of one function share a name."),

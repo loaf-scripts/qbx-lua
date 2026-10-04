@@ -54,3 +54,4 @@ shared/config.lua:50:14 warning unknown-operator
 shared/config.lua:54:10 warning unknown-cast-variable
 shared/config.lua:56:35 warning unknown-diag-code
 shared/config.lua:59:20 hint unused-vararg
+shared/config.lua:65:5 warning newfield-call
