@@ -2969,6 +2969,44 @@ print(firstname, lastname) -- after
 }
 
 #[test]
+fn values_that_a_spread_return_gives_have_its_type() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return string ...
+local function names() return 'a', 'b' end
+
+local function build(list)
+    local job, grade = table.unpack(list)
+    local first, second = names()
+    local data = { job = job, label = names() }
+    data.extra = 1
+    return data, first, second, grade
+end
+print(build({}))
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("job, grade", "local job: unknown\n"),
+        ("grade = table", "local grade: unknown\n"),
+        ("first, second", "local first: string\n"),
+        ("second = names", "local second: string\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (line, _) = pos(text, "data.extra", 0);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["inject-field"]),
+        [(
+            "inject-field".to_string(),
+            line as u64,
+            "Field `extra` is not declared in `{ job: unknown, label: string }`".to_string()
+        )]
+    );
+}
+
+#[test]
 fn type_checks_and_literal_comparisons_narrow_the_locals_they_test() {
     let mut client = Client::start(fixture_root());
     let text = "\

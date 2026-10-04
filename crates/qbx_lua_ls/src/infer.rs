@@ -676,6 +676,12 @@ impl<'a> Infer<'a> {
         self.expr_multi(expr).into_iter().next().unwrap_or_default()
     }
 
+    /// The one value that `expr` gives a name or a field, as `expr` gives it, but a `...T` that a
+    /// call returns gives a `T`.
+    fn first_value(&self, expr: &Expr) -> Type {
+        value_at(self.expr_multi(expr), 0).unwrap_or_default()
+    }
+
     pub fn expr_multi(&self, expr: &Expr) -> Vec<Type> {
         let mut values = self.guarded(|| match &expr.kind {
             ExprKind::Call { callee, args, .. } => self.call(callee, None, args),
@@ -1398,7 +1404,6 @@ impl<'a> Infer<'a> {
             return self.member(&base, &names[index].name.text).map(|m| m.ty).unwrap_or_default();
         }
         if let Some(expr) = exprs.get(index) {
-            let is_last = index + 1 == exprs.len();
             if let Some(fields) = table_fields(expr).filter(|_| top_level) {
                 let own = Type::GlobalTable(self.ctx.local_owner_key(names[index].name.span.start));
                 // `setmetatable({}, Class)` makes an instance of a `---@class`, which is that class,
@@ -1409,8 +1414,7 @@ impl<'a> Infer<'a> {
                 }
                 return own;
             }
-            let ty =
-                if is_last { self.expr_multi(expr).into_iter().next().unwrap_or_default() } else { self.expr(expr) };
+            let ty = self.first_value(expr);
             let is_literal = matches!(
                 expr.unparen().kind,
                 ExprKind::True | ExprKind::False | ExprKind::Number(_) | ExprKind::String(_)
@@ -1426,7 +1430,7 @@ impl<'a> Infer<'a> {
         }
         match exprs.last() {
             Some(last) if last.is_multi_value() => {
-                let ty = self.expr_multi(last).into_iter().nth(index + 1 - exprs.len()).unwrap_or_default();
+                let ty = value_at(self.expr_multi(last), index + 1 - exprs.len()).unwrap_or_default();
                 if reassigned {
                     ty.widen_returned()
                 } else {
@@ -2184,9 +2188,9 @@ impl<'a> Infer<'a> {
         let mut shape = Shape::default();
         for field in fields {
             let (name, ty) = match field {
-                TableField::Named { name, value } => (name.text.clone(), self.expr(value).widen()),
+                TableField::Named { name, value } => (name.text.clone(), self.first_value(value).widen()),
                 TableField::Keyed { key: Expr { kind: ExprKind::String(name), .. }, value } => {
-                    (name.clone(), self.expr(value).widen())
+                    (name.clone(), self.first_value(value).widen())
                 }
                 TableField::SetMember(name) => (name.text.clone(), Type::Boolean),
                 TableField::Keyed { .. } | TableField::Positional(_) => continue,
@@ -4037,9 +4041,7 @@ pub fn assigned_value(
     multi: impl Fn(&Expr) -> Vec<Type>,
 ) -> Type {
     match exprs.get(index) {
-        Some(expr) if index + 1 == exprs.len() && expr.is_multi_value() => {
-            multi(expr).into_iter().next().unwrap_or_default()
-        }
+        Some(expr) if index + 1 == exprs.len() && expr.is_multi_value() => value_at(multi(expr), 0).unwrap_or_default(),
         Some(expr)
             if matches!(
                 expr.unparen().kind,
@@ -4050,11 +4052,23 @@ pub fn assigned_value(
         }
         Some(expr) => single(expr),
         None => match exprs.last() {
-            Some(last) if last.is_multi_value() => {
-                multi(last).into_iter().nth(index + 1 - exprs.len()).unwrap_or_default()
-            }
+            Some(last) if last.is_multi_value() => value_at(multi(last), index + 1 - exprs.len()).unwrap_or_default(),
             _ => Type::Nil,
         },
+    }
+}
+
+/// The value at `position` of `values`, the values an expression gives. A `...T` that ends them
+/// gives a `T` there and at each position after it, as `local job, grade = table.unpack(t)` does.
+pub fn value_at(mut values: Vec<Type>, position: usize) -> Option<Type> {
+    let open = matches!(values.last(), Some(Type::Variadic(_)));
+    let position = if open { position.min(values.len() - 1) } else { position };
+    if position >= values.len() {
+        return None;
+    }
+    match values.swap_remove(position) {
+        Type::Variadic(inner) => Some(*inner),
+        ty => Some(ty),
     }
 }
 
