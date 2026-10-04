@@ -233,12 +233,17 @@ impl Resolver {
 
     fn block(&mut self, block: &Block, scope_end: u32) {
         self.scopes.push(Scope { names: Vec::new() });
+        self.stmts(block, scope_end);
+        self.scopes.pop();
+    }
+
+    /// The statements of `block`, declaring their locals in the innermost scope.
+    fn stmts(&mut self, block: &Block, scope_end: u32) {
         self.push_labels(block);
         for stmt in &block.stmts {
             self.stmt(stmt, scope_end);
         }
         self.label_scopes.pop();
-        self.scopes.pop();
     }
 
     fn push_labels(&mut self, block: &Block) {
@@ -394,7 +399,9 @@ impl Resolver {
         for param in &func.params {
             self.declare(param, LocalKind::Param, None, body_start, func.span.end, true);
         }
-        self.block(&func.body, func.span.end);
+        // The parameters and the locals of the body share one block, as in Lua, so a `local` of the
+        // body that takes the name of a parameter redefines it.
+        self.stmts(&func.body, func.span.end);
         self.scopes.pop();
         self.func_stack.pop();
     }

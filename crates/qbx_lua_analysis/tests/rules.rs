@@ -485,6 +485,23 @@ fn unused_and_shadowing() {
     let mut config = FileConfig::default();
     config.set("shadowed-local", Level::Warning);
     assert_eq!(codes_with("local a = 1\ndo local a = 2 print(a) end\nprint(a)", &config), ["shadowed-local"]);
+
+    // The parameters and the locals of a function body share one block, as in Lua.
+    let source = "local function f(source, volume)
+    local source = source
+    local volume = volume / 100
+    if source then local volume = 1 print(volume) end
+    for i = 1, 2 do local i = i print(i) end
+    return source, volume
+end
+local M = {}
+function M:method() local self = self return self end
+print(f, M)";
+    assert_eq!(reported_lines(source, "redefined-local"), [2, 3, 9]);
+    assert_eq!(findings(source, "redefined-local")[0].1, "local 'source' is already declared in this scope");
+    let shadows: Vec<u32> =
+        findings_with(source, "shadowed-local", &config).into_iter().map(|(line, _)| line).collect();
+    assert_eq!(shadows, [4, 5], "a nested block, and the body of a loop, are blocks of their own");
 }
 
 #[test]

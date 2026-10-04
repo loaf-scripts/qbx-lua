@@ -22,7 +22,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `unused-vararg` | hint | A function takes `...` and its body never uses it; a `...` of a function inside it is that function's own. Empty bodies and `---@meta` files are not checked, as in lua-language-server. |
 | `unused-label` | warning | A label is never targeted by a `goto`. |
 | `undefined-label` | error | A `goto` targets a label outside its visible scope. |
-| `redefined-local` | warning | A local is declared twice in one scope. |
+| `redefined-local` | warning | A local is declared twice in one scope. The parameters of a function and the locals at the top of its body share one, as in Lua, so `function(source) local source = source end` declares `source` twice; a local in a nested block or a loop body hides the outer one instead, which `shadowed-local` reports. |
 | `shadowed-local` | off | A local hides one in an enclosing scope. |
 | `unreachable-code` | warning | Code follows a statement that never finishes: a `break` or `goto`, an `if` with an `else` none of whose branches runs past its end, by `return`, `break`, `goto` or a call of `error` or `os.exit`, or a `while true` loop that only a `return` leaves. Code from a label on can still be reached by a `goto`. A loop with a `return` in it, a `do return end` and an `error()` call of its own are not exits, as in lua-language-server. |
 | `redundant-return` | hint | A `return` without values ends a function body, where the function returns anyway. One inside an `if` or `do` block, which skips the code after it, and one that ends the file are not reported. |

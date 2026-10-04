@@ -170,7 +170,7 @@ pub static RULES: &[Rule] = &[
     rule(UNUSED_VARARG, Style, HINT, false, "A function takes `...` and never uses it."),
     rule(UNUSED_LABEL, Suspicious, WARN, false, "A label is never the target of a goto."),
     rule(UNDEFINED_LABEL, Correctness, ERROR, false, "A goto targets a label that is not visible."),
-    rule(REDEFINED_LOCAL, Suspicious, WARN, false, "A local is declared twice in the same scope."),
+    rule(REDEFINED_LOCAL, Suspicious, WARN, false, "A local is declared twice in the same scope, such as a parameter again at the top of its function's body."),
     rule(SHADOWED_LOCAL, Style, OFF, false, "A local hides a local from an enclosing scope."),
     rule(UNREACHABLE_CODE, Suspicious, WARN, false, "Code follows a break or goto, an `if` with an `else` none of whose branches runs past its end, or a `while true` loop that only a return leaves, and can never run."),
     rule(REDUNDANT_RETURN, Style, HINT, false, "A function ends with a `return` that gives no values, which changes nothing."),
