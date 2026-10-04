@@ -58,6 +58,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "redundant-return",
     "duplicate-doc-param",
     "doc-field-no-class",
+    "unknown-operator",
 ];
 
 #[derive(Debug, Default)]

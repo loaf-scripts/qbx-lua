@@ -45,3 +45,8 @@ end
 ---@field orphan number
 local orphaned = {}
 print(orphaned)
+
+---@class Config.Vector
+---@operator eq: boolean
+local vector = {}
+print(vector)

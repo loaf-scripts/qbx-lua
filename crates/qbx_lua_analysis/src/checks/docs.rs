@@ -1,7 +1,7 @@
 //! Doc comment checks that need no other file: `@param` names that no parameter of the documented
 //! function has, or that one doc comment repeats, aliases, enums and class fields that one file
-//! declares twice for one side, fields that follow no class, and functions whose parameters and
-//! returned values the doc comments leave out.
+//! declares twice for one side, fields that follow no class, operators that do not exist, and
+//! functions whose parameters and returned values the doc comments leave out.
 
 use std::cell::OnceCell;
 use std::fmt;
@@ -34,7 +34,9 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let incomplete = wanted(rules::INCOMPLETE_SIGNATURE_DOC, &["@param", "@return"]);
     let repeated_params = wanted(rules::DUPLICATE_DOC_PARAM, &["@param"]);
     let classless_fields = wanted(rules::DOC_FIELD_NO_CLASS, &["@field"]);
-    if !(params || aliases || fields || globals || exported || incomplete || repeated_params || classless_fields) {
+    let operators = wanted(rules::UNKNOWN_OPERATOR, &["@operator"]);
+    let tags = repeated_params || classless_fields || operators;
+    if !(params || aliases || fields || globals || exported || incomplete || tags) {
         return;
     }
     let blocks: Vec<DocBlock> = doc_blocks(source, &input.chunk.comments)
@@ -68,6 +70,9 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
             }
         }
     }
+    if operators {
+        unknown_operators(&blocks, sink);
+    }
 }
 
 /// One doc comment: its `---` lines without the prefix, and what they declare.
@@ -91,8 +96,13 @@ impl<'a> DocBlock<'a> {
     /// The name line `index` declares, and where it is.
     fn declared(&self, index: usize) -> Option<(Span, &'a str)> {
         let (offset, name) = declared_name(self.lines.get(index)?)?;
+        Some((self.span(index, offset, name), name))
+    }
+
+    /// Where `text`, which starts at byte `offset` of line `index`, is written.
+    fn span(&self, index: usize, offset: usize, text: &str) -> Span {
         let start = self.comments[index].span.start + 3 + offset as u32;
-        Some((Span::new(start, start + name.len() as u32), name))
+        Span::new(start, start + text.len() as u32)
     }
 
     /// What line `index` is to lua-language-server.
@@ -1014,4 +1024,30 @@ fn separator(block: &DocBlock, start: usize) -> Option<String> {
     }
     let above = start.checked_sub(1)?;
     block.tag(above).filter(|tag| *tag != "class").map(|tag| format!("the @{tag} line"))
+}
+
+/// The operators an `@operator` line can declare: the metamethods of Lua 5.4, without their `__`,
+/// that lua-language-server reads. It also knows LuaJIT's `sar`, which is accepted unlisted.
+const OPERATORS: &[&str] = &[
+    "add", "sub", "mul", "div", "mod", "pow", "idiv", "band", "bor", "bxor", "shl", "shr", "concat", "unm", "bnot",
+    "len", "call",
+];
+
+/// `unknown-operator`: an `@operator` whose name is no operator lua-language-server knows, such as
+/// `eq` or `index`, which it cannot apply.
+fn unknown_operators(blocks: &[DocBlock], sink: &mut Sink) {
+    for block in blocks {
+        for index in (0..block.lines.len()).filter(|&i| block.tag(i) == Some("operator")) {
+            let line = block.lines[index];
+            let Some(rest) = line.trim_start().strip_prefix("@operator") else { continue };
+            let rest = rest.trim_start();
+            let name = &rest[..rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len())];
+            if name.is_empty() || name == "sar" || OPERATORS.contains(&name) {
+                continue;
+            }
+            let (listed, last) = OPERATORS.split_at(OPERATORS.len() - 1);
+            let message = format!("unknown operator '{name}'; @operator takes {} or {}", listed.join(", "), last[0]);
+            sink.report(rules::UNKNOWN_OPERATOR, block.span(index, line.len() - rest.len(), name), message);
+        }
+    }
 }

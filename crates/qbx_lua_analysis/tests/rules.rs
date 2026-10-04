@@ -1480,6 +1480,25 @@ print(t, A, tA, fB, C, D, tail, E)";
 }
 
 #[test]
+fn operators_luacats_cannot_declare() {
+    let source = "---@class Vec
+---@operator add(Vec): Vec
+---@operator unm: Vec
+---@operator call: Vec
+---@operator sar: Vec
+---@operator eq: boolean
+---@operator index(string): Vec
+---@operator ad(Vec): Vec
+local Vec = {}
+return Vec";
+    assert_eq!(reported_lines(source, "unknown-operator"), [6, 7, 8]);
+    assert_eq!(
+        findings(source, "unknown-operator")[0].1,
+        "unknown operator 'eq'; @operator takes add, sub, mul, div, mod, pow, idiv, band, bor, bxor, shl, shr, concat, unm, bnot, len or call"
+    );
+}
+
+#[test]
 fn returns_without_values_that_end_a_function() {
     let source = "local function a() return end
 local function b() if a then return end end
