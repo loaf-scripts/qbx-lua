@@ -686,28 +686,6 @@ function table.wipe(t) end
 ---@return string
 function table.type(t) end
 
----Returns a timestamp in microseconds. CfxLua extension.
----@return integer
-function os.microtime() end
-
----Returns a timestamp in nanoseconds. CfxLua extension.
----@return integer
-function os.nanotime() end
-
----Returns the difference between two timestamps. CfxLua extension.
----@param a integer
----@param b integer
----@return integer
-function os.deltatime(a, b) end
-
----Returns the processor time stamp counter. CfxLua extension.
----@return integer
-function os.rdtsc() end
-
----Returns the processor time stamp counter, serialized. CfxLua extension.
----@return integer
-function os.rdtscp() end
-
 ---Returns a shallow copy of the table. CfxLua extension.
 ---@generic T: table
 ---@param t T
@@ -950,11 +928,6 @@ function math.tanh(x) end
 ---@return number result
 ---@nodiscard
 function math.trunc(x) end
-
----Lists the entries of a directory. CfxLua extension, server only in practice.
----@param path string
----@return string[]
-function io.readdir(path) end
 
 ---Builds a vector from its arguments; the result type depends on how many numbers are passed.
 ---@param ... number

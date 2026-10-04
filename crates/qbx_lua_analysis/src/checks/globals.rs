@@ -7,7 +7,7 @@ use crate::diagnostic::Tag;
 use crate::env::builtins;
 use crate::rules;
 use crate::scope::{GlobalRef, GlobalRefKind, Resolved, MAIN_CHUNK};
-use crate::side_guard::SideRegions;
+use crate::side_guard::{other, SideRegions};
 
 /// Fields ox_lib adds to standard library tables when it is imported.
 const OX_LIB_STD_EXTENSIONS: &[(&str, &str)] = &[
@@ -56,6 +56,10 @@ fn check_read(input: &FileInput, global: &GlobalRef, regions: &SideRegions, sink
     let place = if guarded.is_some() { "code that only runs on the" } else { "a" };
     let unit = if guarded.is_some() { "" } else { " script" };
     if let Some(builtin) = builtins().get(name) {
+        // A shared script also runs where a standard library is missing, unless a guard keeps the
+        // code off that side. Natives and CfxLua globals are left to the side calling the code.
+        let missing_from_shared =
+            builtin.library && builtin.side != Side::Shared && guarded.is_none() && input.side == Some(Side::Shared);
         if !builtin.side.is_available_on(side) {
             sink.report(
                 rules::NATIVE_WRONG_SIDE,
@@ -64,6 +68,16 @@ fn check_read(input: &FileInput, global: &GlobalRef, regions: &SideRegions, sink
                     "'{name}' only exists on the {}, but this is {place} {}{unit}",
                     builtin.side.label(),
                     side.label()
+                ),
+            );
+        } else if missing_from_shared {
+            sink.report(
+                rules::NATIVE_WRONG_SIDE,
+                global.span,
+                format!(
+                    "'{name}' only exists on the {}, but this shared script also runs on the {}",
+                    builtin.side.label(),
+                    other(builtin.side).label()
                 ),
             );
         } else if builtin.deprecated {

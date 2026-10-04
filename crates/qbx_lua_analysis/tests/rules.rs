@@ -264,6 +264,8 @@ fn side_checks_follow_is_duplicity_version() {
     assert_eq!(client("if IsDuplicityVersion() then\n    print(PlayerPedId())\nend"), wrong, "server-only branch");
     assert_eq!(client("if not IsDuplicityVersion() then return end\nTriggerClientEvent('a', -1)"), none);
     assert_eq!(client("local isServer = IsDuplicityVersion()\nif isServer then TriggerClientEvent('a', -1) end"), none);
+    assert_eq!(client("print(IsDuplicityVersion() and GetPlayers() or {})"), none);
+    assert_eq!(client("print(IsDuplicityVersion() or GetPlayers())"), wrong);
     assert_eq!(
         client("local isServer = IsDuplicityVersion()\nif not isServer then TriggerClientEvent('a', -1) end"),
         wrong
@@ -280,6 +282,69 @@ fn side_checks_follow_is_duplicity_version() {
 
     let handler = (None, "if IsDuplicityVersion() then\n    RegisterNetEvent('sync:push', function() end)\nend");
     assert_eq!(project("TriggerClientEvent('sync:push', -1)", Side::Server, &[handler]), ["fivem/event-wrong-side"]);
+}
+
+#[test]
+fn server_libraries_are_missing_on_the_client() {
+    let wrong_side = |source: &str, side: Option<Side>| call_messages("fivem/native-wrong-side", source, side, &[]);
+    let (client, server, shared) = (Some(Side::Client), Some(Side::Server), Some(Side::Shared));
+    let none = Vec::<String>::new();
+
+    let os_on_client = "'os' only exists on the server, but this is a client script";
+    assert_eq!(wrong_side("print(os.time())", client), [os_on_client]);
+    assert_eq!(wrong_side("local now = os.microtime", client), [os_on_client], "CfxLua's additions");
+    assert_eq!(
+        wrong_side("local file = io.open('data.json')", client),
+        ["'io' only exists on the server, but this is a client script"]
+    );
+    assert_eq!(wrong_side("print(os.time(), io.open('data.json'), os.createdir('logs'))", server), none);
+    assert_eq!(wrong_side("print(os.time())", None), none, "a file no manifest lists");
+    assert_eq!(wrong_side("if IsDuplicityVersion() then\n    print(os.time())\nend", client), none);
+
+    assert_eq!(
+        wrong_side("print(os.time())", shared),
+        ["'os' only exists on the server, but this shared script also runs on the client"]
+    );
+    assert_eq!(wrong_side("print(string.format('%d', math.floor(1.5)))", shared), none);
+    assert_eq!(wrong_side("TriggerClientEvent('a', -1)", shared), none, "CfxLua globals follow the calling side");
+
+    for source in [
+        "if IsDuplicityVersion() then\n    print(os.time())\nend",
+        "if IsDuplicityVersion() and os.time() > 0 then\n    print(1)\nend",
+        "local isServer = IsDuplicityVersion()\nprint(isServer and os.time() or GetGameTimer())",
+        "if not IsDuplicityVersion() then return end\nprint(os.time())",
+        "local function now()\n    if not IsDuplicityVersion() then return 0 end\n    return os.time()\nend\nprint(now())",
+        "local isServer = IsDuplicityVersion()\nif isServer then print(os.time()) end",
+        "local isServer = IsDuplicityVersion()\nif not isServer then return end\nprint(os.time())",
+        "if not IsDuplicityVersion() then\n    print(1)\nelse\n    print(os.time())\nend",
+        "if lib.context == 'server' then\n    print(os.time())\nend",
+        "if lib.context ~= 'client' then\n    print(os.time())\nend",
+    ] {
+        assert_eq!(wrong_side(source, shared), none, "only the server runs: {source}");
+    }
+
+    let os_in_client_code = "'os' only exists on the server, but this is code that only runs on the client";
+    for source in [
+        "if not IsDuplicityVersion() then\n    print(os.time())\nend",
+        "if IsDuplicityVersion() then return end\nprint(os.time())",
+        "local isServer = IsDuplicityVersion()\nif not isServer then print(os.time()) end",
+        "print(not IsDuplicityVersion() and os.time())",
+        "if IsDuplicityVersion() then\n    print(1)\nelse\n    print(os.time())\nend",
+        "if lib.context == 'client' then\n    print(os.time())\nend",
+    ] {
+        assert_eq!(wrong_side(source, shared), [os_in_client_code], "only the client runs: {source}");
+    }
+}
+
+#[test]
+fn server_libraries_have_the_fields_fivem_gives_them() {
+    let undefined = |source: &str| call_messages("undefined-field", source, Some(Side::Server), &[]);
+    assert_eq!(undefined("os.exit(1)"), ["'os' has no field 'exit'"]);
+    assert_eq!(undefined("print(io.read('l'))"), ["'io' has no field 'read'"]);
+    assert_eq!(
+        undefined("print(os.createdir('logs'), os.nanotime(), io.readdir('logs'), io.write('a'))"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -383,7 +448,7 @@ fn clean_snippets_stay_clean() {
         "print(Citizen.InvokeNative2(0x1), Citizen.ResultAsObject2(msgpack.unpack))",
         "Global = Global or {}\nfunction Global.helper() end",
         "local function mayWait() end\nwhile true do\n    mayWait()\nend",
-        "repeat\n    local line = io.read()\nuntil line == nil",
+        "repeat\n    local line = coroutine.yield()\nuntil line == nil",
     ] {
         assert_eq!(codes(source), Vec::<&str>::new(), "{source}");
     }

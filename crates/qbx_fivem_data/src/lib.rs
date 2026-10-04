@@ -189,15 +189,25 @@ pub fn native_docs(name: &str) -> Option<String> {
 pub struct Stub {
     pub name: &'static str,
     pub side: Side,
+    /// Whether it declares Lua standard libraries rather than CfxLua additions.
+    pub library: bool,
     pub source: &'static str,
 }
 
+const fn stub(name: &'static str, side: Side, library: bool, source: &'static str) -> Stub {
+    Stub { name, side, library, source }
+}
+
+/// The runtime definitions. FiveM only opens the `io` and `os` libraries on the server
+/// (`IS_FXSERVER` in citizen-scripting-lua's `LuaScriptRuntime.cpp`), so `lua54_server.lua` holds
+/// them; stubs extending a table come after the one declaring it.
 pub static STUBS: &[Stub] = &[
-    Stub { name: "lua54.lua", side: Side::Shared, source: include_str!("../stubs/lua54.lua") },
-    Stub { name: "cfx.lua", side: Side::Shared, source: include_str!("../stubs/cfx.lua") },
-    Stub { name: "glm.lua", side: Side::Shared, source: include_str!("../stubs/glm.lua") },
-    Stub { name: "cfx_client.lua", side: Side::Client, source: include_str!("../stubs/cfx_client.lua") },
-    Stub { name: "cfx_server.lua", side: Side::Server, source: include_str!("../stubs/cfx_server.lua") },
+    stub("lua54.lua", Side::Shared, true, include_str!("../stubs/lua54.lua")),
+    stub("lua54_server.lua", Side::Server, true, include_str!("../stubs/lua54_server.lua")),
+    stub("cfx.lua", Side::Shared, false, include_str!("../stubs/cfx.lua")),
+    stub("glm.lua", Side::Shared, false, include_str!("../stubs/glm.lua")),
+    stub("cfx_client.lua", Side::Client, false, include_str!("../stubs/cfx_client.lua")),
+    stub("cfx_server.lua", Side::Server, false, include_str!("../stubs/cfx_server.lua")),
 ];
 
 pub struct KnownImport {

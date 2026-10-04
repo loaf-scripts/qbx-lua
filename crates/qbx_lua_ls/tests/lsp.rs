@@ -9609,21 +9609,22 @@ local entries = io.readdir('.')
 local length = utf8.strlenutf8('a')
 print(nano, delta, clock, trimmed, kind, entries, length)
 ";
-    client.open_with(CLIENT, text);
+    // FiveM only gives the server `os` and `io`.
+    client.open_with(SERVER, text);
     for (needle, expected) in [
         ("nano = os", "nano: integer\n"),
         ("delta = os", "delta: integer\n"),
         ("clock = os", "clock: number\n"),
         ("trimmed = string", "trimmed: string\n"),
         ("kind = table", "kind: string\n"),
-        ("entries = io", "entries: string[]\n"),
+        ("entries = io", "entries: directory? {"),
         ("length = utf8", "length: integer\n"),
         // The functions CfxLua adds belong to the same table as the ones Lua defines.
         ("nanotime()", "function oslib.nanotime(): integer"),
         ("strtrim(", "function stringlib.strtrim(s: string, chars?: string): string"),
     ] {
         let (l, c) = pos(text, needle, 0);
-        let hover = client.hover_text(CLIENT, l, c);
+        let hover = client.hover_text(SERVER, l, c);
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
 }
@@ -10496,6 +10497,38 @@ fn publishes_lint_diagnostics_with_resource_context() {
     assert!(codes.contains(&"fivem/native-wrong-side".to_string()), "{codes:?}");
     assert!(codes.contains(&"undefined-global".to_string()), "{codes:?}");
     assert!(codes.contains(&"unused-local".to_string()), "{codes:?}");
+}
+
+#[test]
+fn server_libraries_only_exist_where_the_server_runs_the_code() {
+    const SHARED: &str = "myresource/shared/config.lua";
+    let mut client = Client::start(fixture_root());
+    let text = "local now = os.time()\nlocal entries = io.readdir('logs')\nprint(now, entries)\n";
+    let mut wrong_side = |file: &str| -> Vec<u64> {
+        client.open_with(file, text);
+        let found = client.diagnostics_for(file).into_iter().filter(|(code, _)| code == "fivem/native-wrong-side");
+        found.map(|(_, line)| line).collect()
+    };
+    assert_eq!(wrong_side(CLIENT), [0, 1]);
+    assert_eq!(wrong_side(SHARED), [0, 1]);
+    assert!(wrong_side(SERVER).is_empty());
+    client.open_with(SHARED, &format!("if not IsDuplicityVersion() then return end\n{text}"));
+    assert!(client.diagnostics_for(SHARED).iter().all(|(code, _)| code != "fivem/native-wrong-side"));
+
+    let (l, c) = pos(text, "os.time", 0);
+    assert!(client.hover_text(SERVER, l, c).contains("oslib"));
+    assert!(!client.hover_text(CLIENT, l, c).contains("oslib"), "the client has no `os`");
+
+    let typed = "print(os.)\n";
+    let (l, c) = pos(typed, "os.", 3);
+    for file in [SERVER, SHARED] {
+        client.open_with(file, typed);
+        let labels = client.completion_labels(file, l, c);
+        assert!(["time", "createdir", "nanotime"].iter().all(|f| labels.iter().any(|l| l == f)), "{file}: {labels:?}");
+        assert!(!labels.iter().any(|l| l == "exit"), "FiveM's `os` has no `exit`: {labels:?}");
+    }
+    client.open_with(CLIENT, typed);
+    assert!(client.completion_labels(CLIENT, l, c).is_empty());
 }
 
 #[test]

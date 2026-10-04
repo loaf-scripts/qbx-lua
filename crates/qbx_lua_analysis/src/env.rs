@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use qbx_fivem_data::{Side, STUBS};
+use qbx_fivem_data::{Side, Stub, STUBS};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::{parse, Comment, CommentKind, SmolStr};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -8,6 +8,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 #[derive(Debug)]
 pub struct BuiltinGlobal {
     pub side: Side,
+    /// Whether it is a Lua standard library, such as `os`, rather than a CfxLua addition.
+    pub library: bool,
     pub fields: FxHashSet<SmolStr>,
     pub deprecated: bool,
     pub deprecated_fields: FxHashSet<SmolStr>,
@@ -40,16 +42,18 @@ impl Builtins {
         self.globals.iter()
     }
 
-    fn entry(&mut self, name: &SmolStr, side: Side) -> &mut BuiltinGlobal {
+    fn entry(&mut self, name: &SmolStr, side: Side, library: bool) -> &mut BuiltinGlobal {
         self.globals.entry(name.clone()).or_insert_with(|| BuiltinGlobal {
             side,
+            library,
             fields: FxHashSet::default(),
             deprecated: false,
             deprecated_fields: FxHashSet::default(),
         })
     }
 
-    fn load_stub(&mut self, source: &str, side: Side) {
+    fn load_stub(&mut self, stub: &Stub) {
+        let source = stub.source;
         let chunk = parse(source);
         for stmt in &chunk.block.stmts {
             let deprecated = leading_doc_lines(source, &chunk.comments, stmt.span.start)
@@ -58,15 +62,15 @@ impl Builtins {
             match &stmt.kind {
                 StmtKind::Function { name, .. } => {
                     let member = name.path.first().or(name.method.as_ref());
-                    self.define(&name.base.text, member.map(|m| &m.text), side, deprecated);
+                    self.define(stub, &name.base.text, member.map(|m| &m.text), deprecated);
                 }
                 StmtKind::Assign { targets, .. } => {
                     for target in targets {
                         match &target.kind {
-                            ExprKind::Name(name) => self.define(&name.text, None, side, deprecated),
+                            ExprKind::Name(name) => self.define(stub, &name.text, None, deprecated),
                             ExprKind::Field { base, name, .. } => {
                                 if let ExprKind::Name(base) = &base.kind {
-                                    self.define(&base.text, Some(&name.text), side, deprecated);
+                                    self.define(stub, &base.text, Some(&name.text), deprecated);
                                 }
                             }
                             _ => {}
@@ -78,8 +82,8 @@ impl Builtins {
         }
     }
 
-    fn define(&mut self, name: &SmolStr, field: Option<&SmolStr>, side: Side, deprecated: bool) {
-        let global = self.entry(name, side);
+    fn define(&mut self, stub: &Stub, name: &SmolStr, field: Option<&SmolStr>, deprecated: bool) {
+        let global = self.entry(name, stub.side, stub.library);
         match field {
             Some(field) => {
                 global.fields.insert(field.clone());
@@ -97,10 +101,10 @@ pub fn builtins() -> &'static Builtins {
     BUILTINS.get_or_init(|| {
         let mut builtins = Builtins::default();
         for stub in STUBS {
-            builtins.load_stub(stub.source, stub.side);
+            builtins.load_stub(stub);
         }
         for name in EXTRA_GLOBALS {
-            builtins.entry(&SmolStr::new_static(name), Side::Shared);
+            builtins.entry(&SmolStr::new_static(name), Side::Shared, false);
         }
         builtins
     })
@@ -196,6 +200,13 @@ mod tests {
         assert!(!builtins.is_defined("TriggerServerEvent", Side::Server));
         assert!(builtins.is_defined("TriggerClientEvent", Side::Server));
         assert!(!builtins.is_defined("TriggerClientEvent", Side::Client));
+        for name in ["os", "io"] {
+            let library = builtins.closed_table(name).unwrap();
+            assert_eq!((library.side, library.library), (Side::Server, true), "{name}");
+        }
+        assert!(builtins.get("string").unwrap().library);
+        assert!(!builtins.get("Citizen").unwrap().library);
+        assert!(builtins.closed_table("os").unwrap().fields.contains("nanotime"));
         assert!(builtins.closed_table("string").unwrap().fields.contains("format"));
         assert!(builtins.closed_table("Citizen").unwrap().fields.contains("Wait"));
         assert!(builtins.closed_table("math").is_none());

@@ -222,7 +222,17 @@ reach scripts of that side. The side is never guessed from folder names.
 Recognized runtime guards narrow side checks within a file. Examples include
 `IsDuplicityVersion()`, a local flag initialized from it, and `lib.context == 'server'`.
 An early return such as `if not IsDuplicityVersion() then return end` narrows the following code
-to the server. Event registrations inside these regions use that effective side.
+to the server, and `isServer and os.time()` narrows the right side of the `and`. Event
+registrations inside these regions use that effective side.
+
+FiveM only loads the `io` and `os` libraries on the server. `fivem/native-wrong-side` reports them
+in client scripts, and in shared scripts too, since those also run on the client, unless one of
+these guards keeps the code on the server. Scripts whose side is unknown are not reported. Natives
+and the other runtime globals of one side, such as `TriggerClientEvent`, are only reported in
+scripts or guarded code of the other side, as shared code usually calls them where they exist. In
+client scripts, `os` and `io` are not completed and have no hover. Their functions are FiveM's:
+there is no `os.exit`, `io.input`, `io.output` or `io.read`, and CfxLua adds `os.createdir`,
+`io.readdir` and timers such as `os.nanotime`.
 
 Where client and server scripts define a global function differently, as two `GetJob`s, a call
 from code that runs on both sides takes neither definition: what it returns is unknown and passes

@@ -66,7 +66,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 
 | Rule | Default | Check |
 | --- | --- | --- |
-| `fivem/native-wrong-side` | error | A native is used on the wrong client/server side. |
+| `fivem/native-wrong-side` | error | A native or runtime global is used on a side that lacks it, such as `TriggerClientEvent` in a client script. The `io` and `os` libraries only exist on the server, so they are reported in shared scripts too, unless an `IsDuplicityVersion()` or `lib.context` guard keeps the code on the server. |
 | `fivem/import-not-declared` | warning | A library global is used without its manifest import on that side. |
 | `fivem/loop-never-yields` | error | An apparently infinite loop has no recognized yield or exit. |
 | `fivem/source-after-yield` | warning | Global `source` is read after a yield or in a deferred callback. |

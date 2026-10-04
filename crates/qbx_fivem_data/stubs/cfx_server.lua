@@ -67,3 +67,52 @@ function RconLog(data) end
 ---@param playerSrc integer|string
 ---@return string endpoint
 function GetPlayerEP(playerSrc) end
+
+---Returns a timestamp in microseconds. CfxLua extension.
+---@return integer
+function os.microtime() end
+
+---Returns a timestamp in nanoseconds. CfxLua extension.
+---@return integer
+function os.nanotime() end
+
+---Returns the difference between two timestamps. CfxLua extension.
+---@param a integer
+---@param b integer
+---@return integer
+function os.deltatime(a, b) end
+
+---Returns the processor time stamp counter. CfxLua extension.
+---@return integer
+function os.rdtsc() end
+
+---Returns the processor time stamp counter, serialized. CfxLua extension.
+---@return integer
+function os.rdtscp() end
+
+---Creates a directory. Returns true, or nil plus an error message and code when it already exists or cannot be created. CfxLua extension.
+---@param path string
+---@return boolean? ok
+---@return string? err
+---@return integer? code
+function os.createdir(path) end
+
+---The entries of a directory, as `io.readdir` lists them. CfxLua extension.
+---@class directory
+local directory = {}
+
+---Returns an iterator over the names of the entries, without "." and "..".
+---@return fun(): string iterator
+function directory:lines() end
+
+---Frees the list of entries; `lines` fails once it is closed.
+---@return boolean ok
+function directory:close() end
+
+---Lists the entries of a directory. Returns them, or nil plus an error message and code when the path is on no known device. CfxLua extension.
+---@param path string
+---@return directory? entries
+---@return string? err
+---@return integer? code
+---@nodiscard
+function io.readdir(path) end

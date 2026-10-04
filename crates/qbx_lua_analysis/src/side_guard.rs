@@ -6,7 +6,8 @@ use rustc_hash::FxHashMap;
 
 /// Parts of a file that only run on one side, whatever the manifest says about the file:
 /// the branches of `if IsDuplicityVersion() then ... else ... end`, of `lib.context == 'server'`,
-/// and the code after `if not IsDuplicityVersion() then return end`.
+/// the code after `if not IsDuplicityVersion() then return end`, and the right side of
+/// `IsDuplicityVersion() and ...`.
 #[derive(Debug, Default)]
 pub struct SideRegions {
     regions: Vec<(Span, Side)>,
@@ -46,7 +47,7 @@ impl SideRegions {
     }
 }
 
-fn other(side: Side) -> Side {
+pub(crate) fn other(side: Side) -> Side {
     match side {
         Side::Client => Side::Server,
         Side::Server => Side::Client,
@@ -181,5 +182,15 @@ impl<'ast> Visitor<'ast> for Finder {
             }
         }
         visit::walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        // The right side of `isServer and os.time()` only runs where the left side is true.
+        if let ExprKind::Binary { op: BinOp::And, lhs, rhs, .. } = &expr.kind {
+            if let Some((side, _)) = side_when_true(lhs, &self.flags) {
+                self.regions.push((rhs.span, side));
+            }
+        }
+        visit::walk_expr(self, expr);
     }
 }
