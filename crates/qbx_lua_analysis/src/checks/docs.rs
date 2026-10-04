@@ -1,7 +1,7 @@
 //! Doc comment checks that need no other file: `@param` names that no parameter of the documented
 //! function has, or that one doc comment repeats, aliases, enums and class fields that one file
-//! declares twice for one side, and functions whose parameters and returned values the doc
-//! comments leave out.
+//! declares twice for one side, fields that follow no class, and functions whose parameters and
+//! returned values the doc comments leave out.
 
 use std::cell::OnceCell;
 use std::fmt;
@@ -33,7 +33,8 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let exported = sink.enabled(rules::MISSING_LOCAL_EXPORT_DOC).is_some();
     let incomplete = wanted(rules::INCOMPLETE_SIGNATURE_DOC, &["@param", "@return"]);
     let repeated_params = wanted(rules::DUPLICATE_DOC_PARAM, &["@param"]);
-    if !(params || aliases || fields || globals || exported || incomplete || repeated_params) {
+    let classless_fields = wanted(rules::DOC_FIELD_NO_CLASS, &["@field"]);
+    if !(params || aliases || fields || globals || exported || incomplete || repeated_params || classless_fields) {
         return;
     }
     let blocks: Vec<DocBlock> = doc_blocks(source, &input.chunk.comments)
@@ -56,9 +57,15 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     if fields {
         duplicate_fields(&blocks, &lines, sink);
     }
-    if repeated_params {
+    if repeated_params || classless_fields {
         for block in &blocks {
-            duplicate_params(block, &block.bind_groups(source, &lines), &lines, sink);
+            let groups = block.bind_groups(source, &lines);
+            if repeated_params {
+                duplicate_params(block, &groups, &lines, sink);
+            }
+            if classless_fields {
+                classless_fields_of(block, &groups, sink);
+            }
         }
     }
 }
@@ -971,4 +978,40 @@ fn duplicate_params(block: &DocBlock, groups: &[Range<usize>], lines: &LineIndex
             sink.report(rules::DUPLICATE_DOC_PARAM, *span, message);
         }
     }
+}
+
+/// `doc-field-no-class`: a `@field` without a `@class` before it in its group of doc lines, which
+/// lua-language-server then gives to no class. qbx-lua-ls still gives it to a `@class` higher up in
+/// the comment, so the message names what separates the two.
+fn classless_fields_of(block: &DocBlock, groups: &[Range<usize>], sink: &mut Sink) {
+    for group in groups {
+        let class = group.clone().position(|i| block.tag(i) == Some("class")).map(|position| group.start + position);
+        for index in group.clone().filter(|&i| block.tag(i) == Some("field")) {
+            if class.is_some_and(|class| class < index) {
+                continue;
+            }
+            let Some((span, name)) = block.declared(index) else { continue };
+            let message = match (0..group.start).any(|i| block.tag(i) == Some("class")) {
+                false => format!("field '{name}' has no @class above it"),
+                true => match separator(block, group.start) {
+                    Some(separator) => format!("{separator} separates field '{name}' from its @class"),
+                    None => format!("field '{name}' does not directly follow its @class"),
+                },
+            };
+            sink.report(rules::DOC_FIELD_NO_CLASS, span, message);
+        }
+    }
+}
+
+/// The line that starts a new group of doc lines at line `start` of `block`, as a message names it:
+/// a tag that may not follow a class or its fields, like `@deprecated`, or one that nothing may
+/// follow, like `@type`.
+fn separator(block: &DocBlock, start: usize) -> Option<String> {
+    if let LineKind::Tag(tag) = block.kind(start) {
+        if tag != "field" {
+            return Some(format!("the @{tag} line"));
+        }
+    }
+    let above = start.checked_sub(1)?;
+    block.tag(above).filter(|tag| *tag != "class").map(|tag| format!("the @{tag} line"))
 }

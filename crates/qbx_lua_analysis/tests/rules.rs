@@ -1430,6 +1430,56 @@ print(f, g, h)";
 }
 
 #[test]
+fn fields_must_directly_follow_their_class() {
+    let source = "---@field orphan number
+local t = {}
+---@class A
+---@field a number
+---Description
+---@field b number
+---@diagnostic disable-next-line: unused-local
+---@field c number
+---@operator add: A
+---@overload fun(): A
+---@field d number
+---@deprecated
+---@field e number
+local A = {}
+---@type A
+---@field f number
+local tA = {}
+---@class B
+---@param p number
+---@field g number
+local function fB(p) return p end
+---@class C
+---@author someone
+---@field h number
+local C = {}
+---@class D
+-- plain comment
+---@field i number
+local D = {}
+local tail = {} ---@field j number
+---@class E
+---@field k number
+---| 'x'
+---@field l number
+local E = {}
+print(t, A, tA, fB, C, D, tail, E)";
+    assert_eq!(
+        findings(source, "doc-field-no-class"),
+        [
+            (1, "field 'orphan' has no @class above it".to_string()),
+            (13, "the @deprecated line separates field 'e' from its @class".to_string()),
+            (16, "field 'f' has no @class above it".to_string()),
+            (20, "the @param line separates field 'g' from its @class".to_string()),
+            (30, "field 'j' has no @class above it".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn returns_without_values_that_end_a_function() {
     let source = "local function a() return end
 local function b() if a then return end end

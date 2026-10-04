@@ -49,3 +49,4 @@ shared/config.lua:33:17 hint trailing-space
 shared/config.lua:36:23 hint redundant-return
 shared/config.lua:39:11 warning duplicate-doc-param
 shared/config.lua:40:11 warning duplicate-doc-param
+shared/config.lua:45:11 warning doc-field-no-class

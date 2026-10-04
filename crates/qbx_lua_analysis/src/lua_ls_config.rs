@@ -57,6 +57,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "trailing-space",
     "redundant-return",
     "duplicate-doc-param",
+    "doc-field-no-class",
 ];
 
 #[derive(Debug, Default)]

@@ -41,3 +41,7 @@ done()
 function Config.Pay(amount)
     print(amount)
 end
+
+---@field orphan number
+local orphaned = {}
+print(orphaned)
