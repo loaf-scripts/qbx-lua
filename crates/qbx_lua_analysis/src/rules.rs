@@ -72,6 +72,7 @@ pub const TRAILING_SPACE: &str = "trailing-space";
 pub const UNBALANCED_ASSIGNMENTS: &str = "unbalanced-assignments";
 pub const NEWLINE_CALL: &str = "newline-call";
 pub const NEWFIELD_CALL: &str = "newfield-call";
+pub const AMBIGUITY_1: &str = "ambiguity-1";
 pub const DUPLICATE_INDEX: &str = "duplicate-index";
 pub const DUPLICATE_SET_FIELD: &str = "duplicate-set-field";
 pub const DUPLICATE_ARGUMENT: &str = "duplicate-argument";
@@ -215,6 +216,7 @@ pub static RULES: &[Rule] = &[
     rule(CLOSE_NON_OBJECT, Correctness, WARN, false, "A <close> local has no value, or one that cannot be closed, such as a number or a string (language server only)."),
     rule(SELF_ASSIGNMENT, Suspicious, WARN, false, "A variable is assigned to itself."),
     rule(SELF_COMPARISON, Suspicious, WARN, false, "Both sides of a comparison are the same expression."),
+    rule(AMBIGUITY_1, Suspicious, WARN, false, "An `or` gives or takes a literal next to arithmetic that binds tighter, as in `x + y or 0` or `x or 1 + y`, where the parentheses were likely meant around the `or`."),
     rule(COUNT_DOWN_LOOP, Suspicious, WARN, true, "A numeric for loop counts up from a start above its end, or from #list to 1, without a negative step."),
     rule(IMPOSSIBLE_COMPARISON, Suspicious, INFO, false, "Both sides of an == or ~= have types that share no value, so the comparison always gives the same answer (language server only)."),
     rule(NEED_CHECK_NIL, Correctness, WARN, false, "A local whose declared type allows nil or false is indexed, called, used in arithmetic, concatenation, # or an ordering comparison, or given as a for bound without a check (language server only)."),

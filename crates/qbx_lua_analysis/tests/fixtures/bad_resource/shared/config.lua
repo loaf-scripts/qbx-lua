@@ -66,3 +66,6 @@ local entries = {
     ('x'),
 }
 print(entries)
+
+local total = Config.Count + Config.Extra or 0
+print(total)

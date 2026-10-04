@@ -1709,6 +1709,22 @@ print(fine)";
 }
 
 #[test]
+fn or_next_to_operators_that_bind_tighter() {
+    let source = "local x, y = 1, 2
+print(x + y or 0)
+print(x or 1 + y)
+print(x .. y or '')
+print(x * y or {})
+print(x or 2 * y)
+print(x + (y or 0), (x + y) or 0, (x or 1) + y)
+print(x + 1 or 0, -x or 0, x == 1 or 0, x or y + 1, x + y or nil)";
+    assert_eq!(reported_lines(source, "ambiguity-1"), [2, 3, 4, 5, 6]);
+    let messages: Vec<String> = findings(source, "ambiguity-1").into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages[0], "'x + y' is computed before the 'or'; write 'x + (y or 0)' if that was meant");
+    assert_eq!(messages[1], "'1 + y' is computed before the 'or'; write '(x or 1) + y' if that was meant");
+}
+
+#[test]
 fn returns_without_values_that_end_a_function() {
     let source = "local function a() return end
 local function b() if a then return end end

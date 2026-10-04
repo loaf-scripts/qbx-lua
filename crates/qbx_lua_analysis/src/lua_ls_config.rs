@@ -56,6 +56,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "undefined-field",
     "newline-call",
     "newfield-call",
+    "ambiguity-1",
     "trailing-space",
     "redundant-return",
     "duplicate-doc-param",

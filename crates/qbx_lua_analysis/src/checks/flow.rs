@@ -280,6 +280,30 @@ impl Flow<'_, '_> {
         suppressions.is_suppressed(rules::DUPLICATE_SET_FIELD, lines.line_of(offset))
     }
 
+    /// `ambiguity-1`: `x + y or 0` adds before the `or`, though `x + (y or 0)` was likely meant, and
+    /// `x or 1 + y` adds after it, though `(x or 1) + y` was likely meant. As in lua-language-server,
+    /// the `or` must give a literal in the first case and take one in the second, where it reads as
+    /// a default; parentheses show which was meant.
+    fn ambiguity(&mut self, expr: &Expr, lhs: &Expr, rhs: &Expr) {
+        let source = self.input.source;
+        let text = |expr: &Expr| expr.span.text(source).split_whitespace().collect::<Vec<_>>().join(" ");
+        let (computed, meant) = match (&lhs.kind, &rhs.kind) {
+            (ExprKind::Binary { op, lhs: a, rhs: b, .. }, _)
+                if is_arithmetic(*op) && is_literal(rhs) && !is_literal(b) =>
+            {
+                (text(lhs), format!("{} {} ({} or {})", text(a), op.symbol(), text(b), text(rhs)))
+            }
+            (_, ExprKind::Binary { op, lhs: a, rhs: b, .. })
+                if is_arithmetic(*op) && is_literal(a) && !is_operation(lhs) =>
+            {
+                (text(rhs), format!("({} or {}) {} {}", text(lhs), text(a), op.symbol(), text(b)))
+            }
+            _ => return,
+        };
+        let message = format!("'{computed}' is computed before the 'or'; write '{meant}' if that was meant");
+        self.sink.report(rules::AMBIGUITY_1, expr.span, message);
+    }
+
     /// `count-down-loop`: `for i = 10, 1` never runs, and `for i = #list, 1` never runs once its start
     /// is above 1. Both were meant to count down.
     fn count_down(&mut self, start: &Expr, limit: &Expr, step: Option<&Expr>) {
@@ -324,6 +348,28 @@ fn number(expr: &Expr) -> Option<f64> {
         ExprKind::Unary { op: UnOp::Neg, expr } => number(expr).map(|value| -value),
         _ => None,
     }
+}
+
+/// An operator that binds tighter than `or` and gives a value that is no boolean.
+fn is_arithmetic(op: BinOp) -> bool {
+    use BinOp::*;
+    matches!(op, Add | Sub | Mul | Div | IDiv | Mod | Pow | Concat | BAnd | BOr | BXor | Shl | Shr)
+}
+
+fn is_literal(expr: &Expr) -> bool {
+    matches!(
+        expr.kind,
+        ExprKind::Number(_)
+            | ExprKind::String(_)
+            | ExprKind::JenkinsHash(_)
+            | ExprKind::True
+            | ExprKind::False
+            | ExprKind::Table(_)
+    )
+}
+
+fn is_operation(expr: &Expr) -> bool {
+    matches!(expr.kind, ExprKind::Binary { .. } | ExprKind::Unary { .. })
 }
 
 /// `#list`, or arithmetic that starts with it, like `#list - 1`.
@@ -535,6 +581,7 @@ impl<'ast> Visitor<'ast> for Flow<'_, '_> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
         match &expr.kind {
             ExprKind::Table(fields) => self.duplicate_keys(fields),
+            ExprKind::Binary { op: BinOp::Or, lhs, rhs, .. } => self.ambiguity(expr, lhs, rhs),
             ExprKind::Binary { op: BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, lhs, rhs, .. }
                 if same_place(lhs, rhs) =>
             {
