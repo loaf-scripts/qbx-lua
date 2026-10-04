@@ -709,6 +709,10 @@ fn owner_label(owner: &Type) -> String {
         Type::GlobalTable(path) if path.starts_with('%') => String::new(),
         // `Promise:New` of any `Promise<T>`, as lua-language-server names it.
         Type::Named(class, _) => class.to_string(),
+        // `MySQL.query.await`, read from the function that `MySQL.query` holds.
+        Type::Fun(fun) if fun.fields.is_some() => {
+            owner_label(&Type::GlobalTable(fun.fields.clone().unwrap_or_default()))
+        }
         other => other.to_string(),
     }
 }

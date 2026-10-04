@@ -892,6 +892,70 @@ local count = rows.count
 }
 
 #[test]
+fn functions_keep_the_members_a_definition_file_sets_on_them() {
+    const SHARED: &str = "myresource/shared/config.lua";
+    let mut client = Client::start(fixture_root());
+    client.open_with(
+        SHARED,
+        "---@meta
+Db = {}
+
+---@alias Test.Row { [string]: unknown }
+
+---@param query string
+---@param cb? fun(rows: Test.Row[])
+function Db.query(query, cb) end
+
+---@param query string
+---@return { [number]?: Test.Row } rows
+function Db.query.await(query) end
+
+---@param name string
+function Notify(name) end
+
+---@param id integer
+---@return boolean
+function Notify.remove(id) end
+",
+    );
+    let text = "local rows = Db.query.await('SELECT 1')
+local row = rows[1]
+local removed = Notify.remove(1)
+local query = Db.query
+local same = query.await('SELECT 2')
+Db.query.await(5)
+Db.query.
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("rows = Db", "local rows: { [number]: Test.Row? }"),
+        ("row = rows", "local row: Test.Row?"),
+        ("removed = Notify", "local removed: boolean"),
+        ("same = query", "local same: { [number]: Test.Row? }"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (l, c) = pos(text, "await('SELECT 1')", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("function Db.query.await(query: string): { [number]: Test.Row? }"), "{hover}");
+    let (l, c) = pos(text, "query = Db.query", 11);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("function Db.query(query: string, cb?: fun(rows: Test.Row[]))"), "{hover}");
+    let (l, c) = pos(
+        text,
+        "Db.query.
+",
+        9,
+    );
+    assert_eq!(client.completion_labels(CLIENT, l, c), ["await"]);
+    let mismatched = findings(&mut client, CLIENT, &["param-type-mismatch"]);
+    assert_eq!(mismatched.len(), 1, "{mismatched:?}");
+    assert_eq!(mismatched[0].1, pos(text, "await(5)", 0).0 as u64);
+}
+
+#[test]
 fn a_class_parent_written_as_a_union_is_its_first_type() {
     let mut client = Client::start(fixture_root());
     let text = "\

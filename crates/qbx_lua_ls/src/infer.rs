@@ -1113,7 +1113,11 @@ impl<'a> Infer<'a> {
             // `local lib = {}` published with `_ENV.lib = lib` and then extended as `function lib.x()`
             // elsewhere keeps its members under two owners.
             let aliased = matches!(ty, Type::GlobalTable(owner) if owner != name) && self.index.has_members(name);
-            return if aliased { Type::union([ty.clone(), Type::GlobalTable(SmolStr::new(name))]) } else { ty.clone() };
+            return match ty {
+                _ if aliased => Type::union([ty.clone(), Type::GlobalTable(SmolStr::new(name))]),
+                Type::Fun(_) => self.with_fields(ty.clone(), name),
+                _ => ty.clone(),
+            };
         }
         if self.index.has_members(name) {
             return Type::GlobalTable(SmolStr::new(name));
@@ -3339,6 +3343,11 @@ impl<'a> Infer<'a> {
             }
             Type::Named(name, args) => self.class_members(name, args, filter, &mut out, &mut FxHashSet::default(), 0),
             Type::GlobalTable(owner) => self.owner_members(owner, filter, &mut out),
+            Type::Fun(fun) => {
+                if let Some(owner) = &fun.fields {
+                    self.owner_members(owner, filter, &mut out);
+                }
+            }
             Type::String | Type::StringLit(_) => {
                 let library = self.global_type("string");
                 if !matches!(library, Type::String | Type::StringLit(_)) {
@@ -3479,6 +3488,17 @@ impl<'a> Infer<'a> {
         ty
     }
 
+    /// `ty`, a function the global path `path` holds, with the members set on that path, as a
+    /// definition file sets `await` on `MySQL.query` with `function MySQL.query.await() end`.
+    fn with_fields(&self, ty: Type, path: &str) -> Type {
+        match ty {
+            Type::Fun(fun) if fun.fields.is_none() && self.index.has_members(path) => {
+                Type::Fun(Arc::new(FunType { fields: Some(SmolStr::new(path)), ..(*fun).clone() }))
+            }
+            other => other,
+        }
+    }
+
     /// The members set on the tables `owner` names themselves.
     fn own_members(&self, owner: &str, filter: Option<&str>, out: &mut Vec<MemberInfo>) {
         for (file, entry) in self.index.member_entries(owner, filter, self.ctx.file) {
@@ -3486,11 +3506,14 @@ impl<'a> Infer<'a> {
             if filter.is_none_or(|f| f == symbol.name) {
                 let mut member = member_from_symbol(file, symbol);
                 member.inferred = !entry.typed && matches!(symbol.kind, SymbolKind::Field | SymbolKind::Variable);
+                let nested = || format!("{owner}.{}", symbol.name);
                 if matches!(member.ty, Type::Table | Type::Unknown) {
-                    let nested = format!("{owner}.{}", symbol.name);
+                    let nested = nested();
                     if self.index.has_members(&nested) {
                         member.ty = Type::GlobalTable(SmolStr::new(nested));
                     }
+                } else if matches!(member.ty, Type::Fun(_)) {
+                    member.ty = self.with_fields(member.ty, &nested());
                 }
                 out.push(member);
             }
@@ -3836,6 +3859,7 @@ fn substitute_fun(fun: &FunType, generics: &[(SmolStr, Type)]) -> FunType {
         callback: fun.callback.clone(),
         nodiscard: fun.nodiscard,
         is_async: fun.is_async,
+        fields: fun.fields.clone(),
     }
 }
 

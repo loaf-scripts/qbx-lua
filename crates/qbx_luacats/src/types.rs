@@ -223,6 +223,9 @@ pub struct FunType {
     pub nodiscard: bool,
     /// `async fun(...)` or `---@async`: the function may yield, so it runs in a coroutine.
     pub is_async: bool,
+    /// The global path whose members the function value has, as `MySQL.query` has the `await` that
+    /// `function MySQL.query.await() end` sets on it: definition files describe callable tables so.
+    pub fields: Option<SmolStr>,
 }
 
 /// The role of a function tagged `---@callback register|await|trigger [family]`, which wraps a
