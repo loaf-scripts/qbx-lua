@@ -200,6 +200,15 @@ In `files` patterns, `[[]` and `[]]` match literal brackets; `[my_lib]` alone wo
 class. Server scripts do not see the globals of `client` imports, and client scripts do not see
 those of `server` imports. Excluded files add nothing.
 
+The files a resource loads this way see its globals in turn. An import, in a manifest or in
+`imports`, runs the Lua files of the other resource that its manifest does not list as scripts and
+that sit in the folder of the imported file or below, since such an import is usually a loader;
+for a glob, the folder is the part before the first `*`. A `phone` resource whose manifest has
+`shared_script '@bridge/phone/load.lua'` thus runs the unlisted files under `bridge/phone/`, and
+they see what the scripts and imports of `phone` declare, besides the globals of `bridge`. When
+every resource that runs such a file is opaque, as an escrowed one is, its globals are not checked;
+see [Escrowed, obfuscated and mixed-language resources](#escrowed-obfuscated-and-mixed-language-resources).
+
 Files not listed as manifest scripts, including modules loaded through `require` or `lib.load`,
 use globals from both sides unless an override gives them a side. Files outside a resource are
 checked without a manifest environment.
@@ -1146,7 +1155,8 @@ encoded strings, do not count. To skip other generated files, use `exclude`.
 
 A `.fxap` marker or a skipped or unreadable script makes the resource opaque to checks that need
 complete knowledge of its globals or locale usage, such as `undefined-global`, `implicit-global` and
-`unused-locale-key`. Readable scripts are still analyzed.
+`unused-locale-key`. Readable scripts are still analyzed. The same goes for the globals of a file
+that only opaque resources load at runtime through their [imports](#runtime-imports).
 
 Unknown-export checks are suppressed for opaque resources and resources with non-Lua scripts.
 An opaque resource may also handle events named with its `resource:` prefix, so a wrong-side

@@ -1,0 +1,2 @@
+AddCheck('bridge')
+print(GetEquippedPhone())

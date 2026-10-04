@@ -12957,6 +12957,60 @@ impl Drop for TempWorkspace {
 }
 
 #[test]
+fn files_that_other_resources_load_see_their_globals() {
+    let loader = |folder: &str| {
+        format!("local loaded = load(LoadResourceFile('bridge', '{folder}/server/services.lua'))\nif loaded then loaded() end\n")
+    };
+    let manifest = |folder: &str| {
+        format!("fx_version 'cerulean'\ngame 'gta5'\nshared_script '@bridge/{folder}/load.lua'\nserver_script 'server/*.lua'\n")
+    };
+    let workspace = TempWorkspace::new(
+        "loaded",
+        &[
+            ("bridge/fxmanifest.lua", "fx_version 'cerulean'\ngame 'gta5'\nfiles { 'phone/**.lua', 'tablet/**.lua' }\n"),
+            ("bridge/phone/load.lua", &loader("phone")),
+            ("bridge/phone/server/services.lua", "AddCheck('bridge')\nprint(GetEquippedPhone())\n"),
+            ("bridge/tablet/load.lua", &loader("tablet")),
+            ("bridge/tablet/server/queries.lua", "function LoadCollations()\n    UsersCollate = ''\nend\n"),
+            (
+                "bridge/tablet/server/services.lua",
+                "BaseCallback('services:getOnline', function(source) end)\nAddCheck('bridge')\nprint(MissingHelper)\n",
+            ),
+            ("phone/fxmanifest.lua", &manifest("phone")),
+            ("phone/.fxap", ""),
+            ("phone/server/checks.lua", "function AddCheck(name) end\n"),
+            ("tablet/fxmanifest.lua", &manifest("tablet")),
+            (
+                "tablet/server/callbacks.lua",
+                "---@param name string\n---@param handler fun(source: number)\nfunction BaseCallback(name, handler) end\n\nUsersCollate = ''\n",
+            ),
+        ],
+    );
+    let mut client = Client::start(workspace.0.clone());
+
+    let services = client.open("bridge/tablet/server/services.lua");
+    let found = findings(&mut client, "bridge/tablet/server/services.lua", &["undefined-global"]);
+    let undefined: Vec<&str> = found.iter().map(|(_, _, message)| message.as_str()).collect();
+    assert_eq!(
+        undefined,
+        ["undefined global 'AddCheck'", "undefined global 'MissingHelper'"],
+        "the tablet runs the files of the tablet folder"
+    );
+    let (l, c) = pos(&services, "BaseCallback", 0);
+    let hover = client.hover_text("bridge/tablet/server/services.lua", l, c);
+    assert!(hover.contains("*defined in* `tablet/server/callbacks.lua`"), "{hover}");
+    let (l, c) = pos(&services, "source", 0);
+    let source = client.hover_text("bridge/tablet/server/services.lua", l, c);
+    assert!(source.contains("source: number"), "the callback takes the parameters the tablet declares: {source}");
+
+    client.open("bridge/tablet/server/queries.lua");
+    assert_eq!(findings(&mut client, "bridge/tablet/server/queries.lua", &["implicit-global"]), []);
+    client.open("bridge/phone/server/services.lua");
+    let found = findings(&mut client, "bridge/phone/server/services.lua", &["undefined-global"]);
+    assert_eq!(found, [], "the escrowed phone may declare what its folder uses");
+}
+
+#[test]
 fn globals_take_their_nearest_definition() {
     let workspace = TempWorkspace::new(
         "nearest",

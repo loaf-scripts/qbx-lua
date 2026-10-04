@@ -169,3 +169,15 @@ fn fixes_are_applied_and_converge() {
     assert_eq!(applied, 1);
     assert!(fixed.starts_with("fx_version 'cerulean'\nlua54 'yes'\ngame 'gta5'"));
 }
+
+#[test]
+fn files_that_other_resources_load_see_their_globals() {
+    let root = fixtures().join("loaded");
+    let actual = render(&root.join("bridge"), &Config::default());
+    // The tablet runs the files of the tablet folder; the escrowed phone may define anything its own
+    // folder uses.
+    assert_eq!(
+        actual,
+        "tablet/server/services.lua:2:1 warning undefined-global\ntablet/server/services.lua:3:7 warning undefined-global\n"
+    );
+}

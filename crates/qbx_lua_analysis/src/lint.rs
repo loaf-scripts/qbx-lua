@@ -178,8 +178,9 @@ fn lint_resource(
     let mut reports: Vec<FileReport> = resource
         .files
         .par_iter()
-        .filter(|file| targets.contains(&file.path) && !config.ignores_diagnostics(&file.path))
-        .map(|file| {
+        .enumerate()
+        .filter(|(_, file)| targets.contains(&file.path) && !config.ignores_diagnostics(&file.path))
+        .map(|(index, file)| {
             let mut file_config = config.for_file(&file.path);
             if resource.manifest.is_map_file(&file.relative) {
                 file_config.set(rules::UNDEFINED_GLOBAL, crate::config::Level::Off);
@@ -193,7 +194,7 @@ fn lint_resource(
                 side: file.side,
                 resource: Some(ResourceInput {
                     name: &resource.name,
-                    env: &resource.env,
+                    env: resource.env_for(index),
                     manifest: &resource.manifest,
                     started_before: started_before.as_ref(),
                     installed: start_order.as_ref().map(|order| &order.installed),

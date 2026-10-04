@@ -506,6 +506,9 @@ pub struct Index {
     aliases: FxHashMap<SmolStr, Vec<Slot>>,
     /// The `members` on `exports` that declare the type of a resource's exports, by resource name.
     export_types: FxHashMap<SmolStr, Vec<Slot>>,
+    /// The other resources that run a file at runtime through one of their imports, for each such
+    /// file that its own manifest does not list as a script.
+    pub loaders: FxHashMap<FileId, Vec<ResourceId>>,
     /// Built on first use after the files change, since every lint of a resource needs them.
     declarations: OnceLock<Arc<Declarations>>,
     /// The names of the fields and methods some class keeps from other code, built on first use
@@ -882,30 +885,46 @@ impl Index {
         }
         if other.defines_for_all() {
             let provider = other.index.definition_scope.provider.as_deref();
-            return provider.is_none_or(|provider| self.imports_from(source, provider));
+            return provider.is_none_or(|provider| self.imports_from(from, source, provider));
         }
         if other.origin == FileOrigin::Stub {
             return true;
         }
-        match (source.resource, other.resource) {
-            (Some(a), Some(b)) if a == b => true,
-            (Some(a), _) => self.resource(a).is_some_and(|r| {
+        let imports = |resource: ResourceId| {
+            self.resource(resource).is_some_and(|r| {
                 r.imports
                     .iter()
                     .any(|(file, side)| *file == target && source.side.is_none_or(|s| side.is_available_on(s)))
-            }),
+            })
+        };
+        match (source.resource, other.resource) {
+            (Some(a), Some(b)) if a == b => true,
+            // A file that other resources run sees what their scripts and imports declare.
+            (Some(a), _) => {
+                imports(a)
+                    || self.loaders_of(from).iter().any(|loader| other.resource == Some(*loader) || imports(*loader))
+            }
             (None, None) => true,
             (None, Some(_)) => false,
         }
     }
 
-    /// Whether the resource of `source` loads a file of the resource `provider` on its side.
-    fn imports_from(&self, source: &FileEntry, provider: &str) -> bool {
-        let Some(resource) = source.resource.and_then(|id| self.resource(id)) else { return true };
-        resource.manifest.imports().any(|script| {
-            split_import(&script.pattern).is_some_and(|(name, _)| name.eq_ignore_ascii_case(provider))
-                && source.side.is_none_or(|side| script.side.is_available_on(side))
-        })
+    /// The other resources that run the file `file` through one of their imports.
+    pub fn loaders_of(&self, file: FileId) -> &[ResourceId] {
+        self.loaders.get(&file).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the resource of `source`, the file `from`, or one that runs it, loads a file of the
+    /// resource `provider` on its side.
+    fn imports_from(&self, from: FileId, source: &FileEntry, provider: &str) -> bool {
+        let Some(resource) = source.resource else { return true };
+        let imports = |resource: &ResourceEntry| {
+            resource.manifest.imports().any(|script| {
+                split_import(&script.pattern).is_some_and(|(name, _)| name.eq_ignore_ascii_case(provider))
+                    && source.side.is_none_or(|side| script.side.is_available_on(side))
+            })
+        };
+        std::iter::once(&resource).chain(self.loaders_of(from)).filter_map(|id| self.resource(*id)).any(imports)
     }
 
     /// Whether two files can share globals at all, regardless of the side either one runs on.
@@ -917,7 +936,7 @@ impl Index {
                 let imports = |from: ResourceId, file: FileId| {
                     self.resource(from).is_some_and(|r| r.imports.iter().any(|(imported, _)| *imported == file))
                 };
-                imports(x, b) || imports(y, a)
+                imports(x, b) || imports(y, a) || self.loaders_of(a).contains(&y) || self.loaders_of(b).contains(&x)
             }
             (None, None) => true,
             _ => false,

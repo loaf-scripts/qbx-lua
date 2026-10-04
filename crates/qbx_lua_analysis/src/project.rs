@@ -337,6 +337,34 @@ impl ResourceEnv {
         self.unresolved_imports.iter().find(|import| side.is_none_or(|s| import.side.is_available_on(s)))
     }
 
+    /// The environment of a file that `loaders`, other resources, also run: what they define and
+    /// import is there too, though this resource's own aliases win. It is opaque when this resource
+    /// is, or when every loader is.
+    pub fn with_loaders<'a>(&self, loaders: impl IntoIterator<Item = &'a ResourceEnv>) -> ResourceEnv {
+        let mut env = self.clone();
+        let mut loaded = false;
+        let mut all_opaque = true;
+        for loader in loaders {
+            loaded = true;
+            all_opaque &= loader.opaque;
+            env.client.extend(loader.client.iter().cloned());
+            env.server.extend(loader.server.iter().cloned());
+            env.field_defs.extend(loader.field_defs.iter().cloned());
+            env.file_scope.extend(loader.file_scope.iter().cloned());
+            env.module_imports.extend(loader.module_imports.iter().cloned());
+            env.imports.extend(loader.imports.iter().cloned());
+            for (path, defs) in &loader.functions {
+                env.functions.entry(path.clone()).or_default().extend(defs.iter().cloned());
+            }
+            for (name, ty) in &loader.aliases {
+                env.aliases.entry(name.clone()).or_insert_with(|| ty.clone());
+            }
+            env.unresolved_imports.extend(loader.unresolved_imports.iter().cloned());
+        }
+        env.opaque |= loaded && all_opaque;
+        env
+    }
+
     /// Adds what an `@resource/path` import provides on `side`: the globals of the files it names,
     /// and the usual globals of well-known imports such as `@ox_lib/init.lua`, which also cover
     /// imports whose resource is not installed. Any other import that names no file is recorded as
@@ -370,6 +398,8 @@ pub struct ResourceLocator {
     roots: FxHashMap<PathBuf, FxHashMap<String, PathBuf>>,
     lua_files: FxHashMap<PathBuf, Vec<PathBuf>>,
     summaries: FxHashMap<PathBuf, Option<FileSummary>>,
+    manifests: FxHashMap<PathBuf, Option<(PathBuf, Manifest)>>,
+    envs: FxHashMap<PathBuf, ResourceEnv>,
 }
 
 impl ResourceLocator {
@@ -386,7 +416,12 @@ impl ResourceLocator {
 
     pub fn locate(&mut self, from_resource: &Path, name: &str) -> Option<PathBuf> {
         let dir = Self::resources_dir(from_resource)?;
-        let index = self.roots.entry(dir.clone()).or_insert_with(|| {
+        self.resource_roots(dir).get(&name.to_lowercase()).cloned()
+    }
+
+    /// The resources in the resources folder `dir`, by lowercase name.
+    fn resource_roots(&mut self, dir: PathBuf) -> &FxHashMap<String, PathBuf> {
+        self.roots.entry(dir.clone()).or_insert_with(|| {
             let mut index = FxHashMap::default();
             let root = dir.canonicalize().ok();
             let walker = WalkDir::new(&dir).max_depth(6).follow_links(true).into_iter().filter_entry(|entry| {
@@ -404,8 +439,7 @@ impl ResourceLocator {
                 }
             }
             index
-        });
-        index.get(&name.to_lowercase()).cloned()
+        })
     }
 
     /// The summaries of the readable files an `@resource/path` import names, where the path may be
@@ -424,18 +458,89 @@ impl ResourceLocator {
             vec![path]
         };
         for path in &paths {
-            self.summaries.entry(path.clone()).or_insert_with(|| {
-                let source = read_source(path).ok()?;
-                let chunk = parse(&source);
-                Some(summarize(&source, &chunk, &resolve(&chunk)))
-            });
+            self.read_summary(path);
         }
         paths.iter().filter_map(|path| self.summaries.get(path)?.as_ref()).collect()
+    }
+
+    /// Reads the summary of the file at `path` once; `None` when it cannot be read as Lua source.
+    fn read_summary(&mut self, path: &Path) -> Option<&FileSummary> {
+        let summary = self.summaries.entry(path.to_path_buf()).or_insert_with(|| {
+            let source = read_source(path).ok()?;
+            let chunk = parse(&source);
+            Some(summarize(&source, &chunk, &resolve(&chunk)))
+        });
+        summary.as_ref()
+    }
+
+    /// The resources next to `resource_root`, the resource `name`, whose manifest or configured
+    /// imports name files of it, with the path of each such import inside it.
+    pub fn loaders(&mut self, resource_root: &Path, name: &str, config: &Config) -> Vec<(PathBuf, String)> {
+        let Some(dir) = Self::resources_dir(resource_root) else { return Vec::new() };
+        let mut roots: Vec<PathBuf> = self.resource_roots(dir).values().cloned().collect();
+        roots.sort();
+        let mut found = Vec::new();
+        for root in roots.into_iter().filter(|root| root != resource_root) {
+            let Some((manifest_path, manifest)) = self.manifest_of(&root) else { continue };
+            for (pattern, _) in resource_imports(manifest, manifest_path, config) {
+                match split_import(pattern) {
+                    Some((imported, path)) if imported.eq_ignore_ascii_case(name) => {
+                        found.push((root.clone(), path.to_string()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        found
+    }
+
+    /// The manifest of the resource at `root` and its path, read once.
+    fn manifest_of(&mut self, root: &Path) -> Option<&(PathBuf, Manifest)> {
+        let manifest = self.manifests.entry(root.to_path_buf()).or_insert_with(|| {
+            let path = manifest_path(root)?;
+            let manifest = Manifest::from_chunk(&parse(&read_source(&path).ok()?));
+            Some((path, manifest))
+        });
+        manifest.as_ref()
+    }
+
+    /// The globals the scripts of the resource at `root` see, for the files that it loads from
+    /// other resources: those of its own files and of its imports.
+    pub fn loader_env(&mut self, root: &Path, config: &Config) -> Option<ResourceEnv> {
+        if let Some(env) = self.envs.get(root) {
+            return Some(env.clone());
+        }
+        let (manifest_path, manifest) = self.manifest_of(root)?.clone();
+        let mut env = ResourceEnv { opaque: is_escrowed_resource(root), ..ResourceEnv::default() };
+        let paths = self.lua_files.entry(root.to_path_buf()).or_insert_with(|| lua_files_under(root, config)).clone();
+        for path in paths.iter().filter(|path| !is_manifest_file(path)) {
+            let side = side_of(&manifest, &relative_slash_path(root, path)).or_else(|| config.side_for(path));
+            match self.read_summary(path) {
+                Some(summary) => env.add_summary(summary, side),
+                None => env.opaque = true,
+            }
+        }
+        for (pattern, side) in resource_imports(&manifest, &manifest_path, config) {
+            env.add_import(pattern, side, self.import_summaries(root, pattern, config));
+        }
+        self.envs.insert(root.to_path_buf(), env.clone());
+        Some(env)
     }
 }
 
 pub fn split_import(pattern: &str) -> Option<(&str, &str)> {
     pattern.strip_prefix('@')?.split_once('/')
+}
+
+/// Whether an import of the file `path` of a resource, as `@lb-bridge/phone/load.lua` imports
+/// `phone/load.lua`, runs its file at `relative`, a Lua file that its manifest does not list as a
+/// script, in the importing resource: those in the folder of the file it names and below do, since
+/// such an import is usually a loader that runs them with `load(LoadResourceFile(...))`, `require` or
+/// `lib.load`. A glob names the folder before its first wildcard.
+pub fn import_loads(path: &str, relative: &str) -> bool {
+    let fixed = path.find('*').map_or(path, |wildcard| &path[..wildcard]);
+    let folder = fixed.rfind('/').map_or("", |slash| &fixed[..=slash]);
+    relative.get(..folder.len()).is_some_and(|start| start.eq_ignore_ascii_case(folder))
 }
 
 pub struct Resource {
@@ -445,9 +550,22 @@ pub struct Resource {
     pub manifest: Manifest,
     pub files: Vec<ParsedFile>,
     pub env: ResourceEnv,
+    /// The environments of the files that other resources load, one for each set of loaders.
+    loaded_envs: Vec<ResourceEnv>,
+    /// For each of `files`, its environment in `loaded_envs` when other resources load it.
+    file_envs: Vec<Option<usize>>,
 }
 
 impl Resource {
+    /// The globals that the file at `index` of `files` sees: those of the resource, and of the
+    /// resources that load it when its manifest does not list it as a script.
+    pub fn env_for(&self, index: usize) -> &ResourceEnv {
+        match self.file_envs.get(index).copied().flatten() {
+            Some(loaded) => &self.loaded_envs[loaded],
+            None => &self.env,
+        }
+    }
+
     pub fn load(root: &Path, config: &Config, locator: &mut ResourceLocator) -> Option<Self> {
         let manifest_path = manifest_path(root)?;
         let manifest_source = read_source(&manifest_path).ok()?;
@@ -472,8 +590,39 @@ impl Resource {
         for (pattern, side) in resource_imports(&manifest, &manifest_path, config) {
             env.add_import(pattern, side, locator.import_summaries(root, pattern, config));
         }
+        // What `loader_env` finds for this resource, for the files it loads from other resources.
+        locator.envs.entry(root.to_path_buf()).or_insert_with(|| env.clone());
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Some(Self { name, root: root.to_path_buf(), manifest_path, manifest, files, env })
+        let unlisted: Vec<Option<&str>> = files
+            .iter()
+            .map(|file| side_of(&manifest, &file.relative).is_none().then_some(file.relative.as_str()))
+            .collect();
+        let loads_any = |path: &str| unlisted.iter().flatten().any(|relative| import_loads(path, relative));
+        let loaders: Vec<(String, ResourceEnv)> = locator
+            .loaders(root, &name, config)
+            .into_iter()
+            .filter(|(_, path)| loads_any(path))
+            .filter_map(|(loader, path)| Some((path, locator.loader_env(&loader, config)?)))
+            .collect();
+        let mut loaded_envs = Vec::new();
+        let mut loader_sets: Vec<Vec<usize>> = Vec::new();
+        let file_envs = unlisted
+            .iter()
+            .map(|relative| {
+                let relative = (*relative)?;
+                let loading = loaders.iter().enumerate().filter(|(_, (path, _))| import_loads(path, relative));
+                let set: Vec<usize> = loading.map(|(i, _)| i).collect();
+                if set.is_empty() {
+                    return None;
+                }
+                Some(loader_sets.iter().position(|known| *known == set).unwrap_or_else(|| {
+                    loaded_envs.push(env.with_loaders(set.iter().map(|i| &loaders[*i].1)));
+                    loader_sets.push(set);
+                    loader_sets.len() - 1
+                }))
+            })
+            .collect();
+        Some(Self { name, root: root.to_path_buf(), manifest_path, manifest, files, env, loaded_envs, file_envs })
     }
 }
 

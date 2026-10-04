@@ -235,7 +235,7 @@ pub(crate) fn diagnostics_with_support(
         if is_map {
             config.set(qbx_lua_analysis::rules::UNDEFINED_GLOBAL, Level::Off);
         }
-        let env = resource_id.map(|id| ws.resource_env(id));
+        let env = resource_id.map(|id| ws.file_env(doc.file, id));
         let owned_order = if support.is_none() {
             resource.and_then(|r| qbx_lua_analysis::startup::StartOrder::discover(&r.root))
         } else {

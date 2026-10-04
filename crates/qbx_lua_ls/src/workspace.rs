@@ -5,13 +5,13 @@ use qbx_fivem_data::{Side, KNOWN_IMPORTS, STUBS};
 use qbx_lua_analysis::glob::{is_glob, manifest_glob_match};
 use qbx_lua_analysis::manifest::Manifest;
 use qbx_lua_analysis::project::{
-    find_manifest_dir, is_manifest_file, lua_files_under, manifest_path, read_source, relative_slash_path,
-    resource_imports, side_of, split_import, ResourceEnv, ResourceLocator,
+    find_manifest_dir, import_loads, is_manifest_file, lua_files_under, manifest_path, read_source,
+    relative_slash_path, resource_imports, side_of, split_import, ResourceEnv, ResourceLocator,
 };
 use qbx_lua_analysis::scope::resolve;
 use qbx_lua_analysis::Config;
 use qbx_lua_syntax::{parse, SmolStr};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::index::{
     normalize_path, Changes, DefinitionScope, FileEntry, FileId, FileIndex, FileOrigin, Index, Read, ResourceEntry,
@@ -435,14 +435,42 @@ impl Workspace {
     }
 
     pub fn link_imports(&mut self) {
+        let mut loaders: FxHashMap<FileId, Vec<ResourceId>> = FxHashMap::default();
         for id in 0..self.index.resources.len() {
             let entry = &self.index.resources[id];
-            let imports = resource_imports(&entry.manifest, &entry.manifest_path, &self.lint_config)
+            let patterns = resource_imports(&entry.manifest, &entry.manifest_path, &self.lint_config);
+            for file in patterns.iter().flat_map(|(pattern, _)| self.loaded_files(pattern, id as ResourceId)) {
+                let found = loaders.entry(file).or_default();
+                if !found.contains(&(id as ResourceId)) {
+                    found.push(id as ResourceId);
+                }
+            }
+            let imports = patterns
                 .into_iter()
                 .flat_map(|(pattern, side)| self.import_files(pattern).into_iter().map(move |file| (file, side)))
                 .collect();
             self.index.resources[id].imports = imports;
         }
+        self.index.loaders = loaders;
+    }
+
+    /// The files of another resource than `loader` that an `@resource/path` import of it runs:
+    /// those that the manifest of their resource does not list as scripts, in the folder of the
+    /// file it names or below, as `import_loads` finds them.
+    fn loaded_files(&self, pattern: &str, loader: ResourceId) -> Vec<FileId> {
+        let Some((name, path)) = split_import(pattern) else { return Vec::new() };
+        let Some((id, target)) = self.index.resource_by_name(name).filter(|(id, _)| *id != loader) else {
+            return Vec::new();
+        };
+        let runs = |file: &FileEntry| {
+            let relative = match file.path.strip_prefix(&target.root) {
+                Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
+                // Open documents keep the path spelling the editor sent.
+                Err(_) => relative_slash_path(&normalize_path(&target.root), &normalize_path(&file.path)),
+            };
+            file.resource == Some(id) && side_of(&target.manifest, &relative).is_none() && import_loads(path, &relative)
+        };
+        target.files.iter().copied().filter(|file| self.index.file(*file).is_some_and(runs)).collect()
     }
 
     /// The indexed files an `@resource/path` import names, where the path may be a manifest glob.
@@ -473,6 +501,17 @@ impl Workspace {
         }
         env.set_declarations(self.index.declarations());
         env
+    }
+
+    /// The lint environment of the file `file` of `resource`: that of the resource, and of the
+    /// other resources that run the file through their imports.
+    pub fn file_env(&self, file: FileId, resource: ResourceId) -> ResourceEnv {
+        let env = self.resource_env(resource);
+        let loaders: Vec<ResourceEnv> = self.index.loaders_of(file).iter().map(|id| self.resource_env(*id)).collect();
+        if loaders.is_empty() {
+            return env;
+        }
+        env.with_loaders(&loaders)
     }
 }
 
