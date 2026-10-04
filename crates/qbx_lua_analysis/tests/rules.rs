@@ -319,6 +319,9 @@ fn server_libraries_are_missing_on_the_client() {
         "if not IsDuplicityVersion() then\n    print(1)\nelse\n    print(os.time())\nend",
         "if lib.context == 'server' then\n    print(os.time())\nend",
         "if lib.context ~= 'client' then\n    print(os.time())\nend",
+        "local context = IsDuplicityVersion() and 'server' or 'client'\nif context == 'server' then print(os.time()) end",
+        "local context = IsDuplicityVersion() and 'server' or 'client'\nif context == 'client' then\n    print(1)\nelse\n    print(os.time())\nend",
+        "local side = lib.context\nif side ~= 'client' then print(os.time()) end",
     ] {
         assert_eq!(wrong_side(source, shared), none, "only the server runs: {source}");
     }
@@ -331,6 +334,8 @@ fn server_libraries_are_missing_on_the_client() {
         "print(not IsDuplicityVersion() and os.time())",
         "if IsDuplicityVersion() then\n    print(1)\nelse\n    print(os.time())\nend",
         "if lib.context == 'client' then\n    print(os.time())\nend",
+        "local context = IsDuplicityVersion() and 'server' or 'client'\nif context == 'client' then print(os.time()) end",
+        "local context = not IsDuplicityVersion() and 'client' or 'server'\nif context ~= 'server' then print(os.time()) end",
     ] {
         assert_eq!(wrong_side(source, shared), [os_in_client_code], "only the client runs: {source}");
     }

@@ -375,7 +375,8 @@ impl<'a> Indexer<'a> {
             let doc = doc_anchor.map(|anchor| self.ctx.doc_at(anchor));
             let visibility = doc.as_ref().map(|doc| doc.visibility).unwrap_or_default();
             let typed = doc.is_some_and(|doc| doc.ty.is_some() || !doc.classes.is_empty());
-            self.out.members.push(Member { owner, symbol, injected, visibility, typed });
+            let side = doc_anchor.and_then(|anchor| self.regions.side_at(anchor));
+            self.out.members.push(Member { owner, symbol, injected, visibility, typed, side });
         }
     }
 

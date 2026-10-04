@@ -165,6 +165,10 @@ pub struct Member {
     /// A `---@type` or `---@class` above the statement or field that sets it declares its type, so
     /// what other code stores in it does not change that type.
     pub typed: bool,
+    /// The side that a guard around the statement or field that sets it runs it on, as the `else`
+    /// of `if lib.context == 'client'` runs ox_lib's server `lib.notify`. Code of the other side does
+    /// not see it.
+    pub side: Option<Side>,
 }
 
 /// The entries of a table constructor that have no name: its array part (`key` is `None`), or its
@@ -738,9 +742,9 @@ impl Index {
         changed_groups(out, globals(before), globals(after), |a, b| a == b && a.same_origins(b));
         let members = |entry: Option<&'a FileEntry>| {
             entry.into_iter().flat_map(|entry| &entry.index.members).map(|member| {
-                let Member { owner, symbol, injected, visibility, typed } = member;
+                let Member { owner, symbol, injected, visibility, typed, side } = member;
                 let read = Read::Members(owner.clone(), Some(symbol.name.clone()));
-                (read, (symbol.kind, &symbol.ty, *injected, *visibility, *typed))
+                (read, (symbol.kind, &symbol.ty, *injected, *visibility, *typed, *side))
             })
         };
         let mut named = FxHashSet::default();

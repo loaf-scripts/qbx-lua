@@ -132,7 +132,8 @@ A `(server)` or `(client)` attribute scopes a LuaCATS declaration to one side:
 ```
 
 Overloads follow the side of the call, including `IsDuplicityVersion()` and `lib.context`
-guards. A function `@field` that repeats the name of an unscoped one is another signature of it,
+guards. Fields and functions set on a table inside such a guard, as ox_lib sets its server
+`lib.notify(playerId, data)`, only reach code of that side. A function `@field` that repeats the name of an unscoped one is another signature of it,
 as in LuaLS, and `---@field (server) Name fun(...)` repeated adds a signature for server calls
 only. Classes, fields, aliases and enums follow the manifest side of the file. Shared files and
 files of an unknown side see both sides. A `side` in a `qbxlint.toml` override gives a side

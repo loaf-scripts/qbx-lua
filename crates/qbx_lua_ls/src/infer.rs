@@ -3503,7 +3503,7 @@ impl<'a> Infer<'a> {
     fn own_members(&self, owner: &str, filter: Option<&str>, out: &mut Vec<MemberInfo>) {
         for (file, entry) in self.index.member_entries(owner, filter, self.ctx.file) {
             let symbol = &entry.symbol;
-            if filter.is_none_or(|f| f == symbol.name) {
+            if filter.is_none_or(|f| f == symbol.name) && applies_on(entry.side, self.side) {
                 let mut member = member_from_symbol(file, symbol);
                 member.inferred = !entry.typed && matches!(symbol.kind, SymbolKind::Field | SymbolKind::Variable);
                 let nested = || format!("{owner}.{}", symbol.name);

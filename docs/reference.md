@@ -234,7 +234,9 @@ globals, natives and `(server)` or `(client)` annotations of that side, and its 
 reach scripts of that side. The side is never guessed from folder names.
 
 Recognized runtime guards narrow side checks within a file. Examples include
-`IsDuplicityVersion()`, a local flag initialized from it, and `lib.context == 'server'`.
+`IsDuplicityVersion()`, a local flag initialized from it, `lib.context == 'server'`, and a local
+that holds the name of the side, as ox_lib's `local context = IsDuplicityVersion() and 'server' or
+'client'` does, compared with `'server'` or `'client'`.
 An early return such as `if not IsDuplicityVersion() then return end` narrows the following code
 to the server, and `isServer and os.time()` narrows the right side of the `and`. Event
 registrations inside these regions use that effective side.

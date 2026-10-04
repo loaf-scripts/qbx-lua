@@ -1549,6 +1549,55 @@ end
 }
 
 #[test]
+fn members_set_under_a_side_guard_stay_on_that_side() {
+    const LIBRARY: &str = "[core]/mylib/init.lua";
+    let mut client = Client::start(fixture_root());
+    client.open_with(
+        LIBRARY,
+        "Lib = {}
+local context = IsDuplicityVersion() and 'server' or 'client'
+
+---@class Test.NotifyProps
+---@field type? 'info'|'error'
+local NotifyProps = {}
+
+if context == 'client' then
+    print(NotifyProps)
+else
+    ---@param playerId number
+    ---@param data Test.NotifyProps
+    function Lib.notify(playerId, data) end
+end
+",
+    );
+    let client_text = "---@param data Test.NotifyProps
+function Lib.notify(data) end
+
+Lib.notify({ type = 'infx' })
+Lib.notify(1, { type = 'info' })
+";
+    let server_text = "Lib.notify({ type = 'info' })
+Lib.notify(1, { type = 'info' })
+";
+    client.open_with(CLIENT, client_text);
+    client.open_with(SERVER, server_text);
+    let hover = client.hover_text(CLIENT, 3, 5);
+    assert!(hover.contains("function Lib.notify(data: Test.NotifyProps)"), "{hover}");
+    let hover = client.hover_text(SERVER, 0, 5);
+    assert!(hover.contains("function Lib.notify(playerId: number, data: Test.NotifyProps)"), "{hover}");
+    let codes = ["assign-type-mismatch", "param-type-mismatch"];
+    let found = |code: &str, line: u64| (code.to_string(), line);
+    let lines =
+        |found: Vec<(String, u64, String)>| found.into_iter().map(|(code, line, _)| (code, line)).collect::<Vec<_>>();
+    assert_eq!(
+        lines(findings(&mut client, CLIENT, &codes)),
+        [found("assign-type-mismatch", 3), found("param-type-mismatch", 4)],
+        "the client sees only its own `Lib.notify`, not the one the library defines for the server"
+    );
+    assert_eq!(lines(findings(&mut client, SERVER, &codes)), [found("param-type-mismatch", 0)]);
+}
+
+#[test]
 fn callback_wrappers_link_registrations_to_their_calls() {
     const SHARED: &str = "myresource/shared/config.lua";
     let mut client = Client::start(fixture_root());
