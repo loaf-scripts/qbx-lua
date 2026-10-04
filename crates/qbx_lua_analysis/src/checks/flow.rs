@@ -324,6 +324,19 @@ impl<'ast> Visitor<'ast> for Flow<'_, '_> {
                 self.sink.report(rules::DUPLICATE_ARGUMENT, param.span, format!("duplicate argument '{}'", param.text));
             }
         }
+        // `redundant-return`: a `return` without values that ends the body, not one inside a block
+        // of it, which may skip the code after that block.
+        if let Some(Stmt { kind: StmtKind::Return(values), span }) = func.body.stmts.last() {
+            if values.is_empty() {
+                self.sink.report_with(
+                    rules::REDUNDANT_RETURN,
+                    Span::new(span.start, span.start + "return".len() as u32),
+                    "redundant return at the end of the function",
+                    Some(Tag::Unnecessary),
+                    None,
+                );
+            }
+        }
         let outer = self.function;
         self.in_new_block(|flow| {
             flow.function = flow.block;

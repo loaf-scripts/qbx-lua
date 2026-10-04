@@ -24,6 +24,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `redefined-local` | warning | A local is declared twice in one scope. |
 | `shadowed-local` | off | A local hides one in an enclosing scope. |
 | `unreachable-code` | warning | Code follows a control-flow statement that exits the path. |
+| `redundant-return` | hint | A `return` without values ends a function body, where the function returns anyway. One inside an `if` or `do` block, which skips the code after it, and one that ends the file are not reported. |
 | `empty-block` | info | A block has no statements. |
 | `trailing-space` | hint | A line ends in spaces or tabs, or holds nothing else. Whitespace inside a comment or a string, such as a long string that spans lines, is left alone, as the formatter leaves it. Fix available. |
 | `unbalanced-assignments` | warning | An assignment or `local` statement has mismatched target and value counts, as in `local a, b = 1`. A last value that is a call or `...` gives any number of values. |

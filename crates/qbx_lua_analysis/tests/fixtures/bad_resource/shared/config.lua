@@ -32,3 +32,6 @@ print(fallback)
 
 local spaced = 1   
 print(spaced)
+
+local function done() return end
+done()

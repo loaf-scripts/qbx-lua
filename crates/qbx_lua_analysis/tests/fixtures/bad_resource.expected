@@ -46,3 +46,4 @@ shared/config.lua:19:11 warning undefined-doc-param
 shared/config.lua:24:10 warning duplicate-set-field
 shared/config.lua:29:18 warning newline-call
 shared/config.lua:33:17 hint trailing-space
+shared/config.lua:36:23 hint redundant-return

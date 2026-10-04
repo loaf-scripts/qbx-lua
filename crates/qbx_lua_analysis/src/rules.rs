@@ -65,6 +65,7 @@ pub const UNDEFINED_LABEL: &str = "undefined-label";
 pub const REDEFINED_LOCAL: &str = "redefined-local";
 pub const SHADOWED_LOCAL: &str = "shadowed-local";
 pub const UNREACHABLE_CODE: &str = "unreachable-code";
+pub const REDUNDANT_RETURN: &str = "redundant-return";
 pub const EMPTY_BLOCK: &str = "empty-block";
 pub const TRAILING_SPACE: &str = "trailing-space";
 pub const UNBALANCED_ASSIGNMENTS: &str = "unbalanced-assignments";
@@ -161,6 +162,7 @@ pub static RULES: &[Rule] = &[
     rule(REDEFINED_LOCAL, Suspicious, WARN, false, "A local is declared twice in the same scope."),
     rule(SHADOWED_LOCAL, Style, OFF, false, "A local hides a local from an enclosing scope."),
     rule(UNREACHABLE_CODE, Suspicious, WARN, false, "Code follows a return, break or goto and can never run."),
+    rule(REDUNDANT_RETURN, Style, HINT, false, "A function ends with a `return` that gives no values, which changes nothing."),
     rule(EMPTY_BLOCK, Style, INFO, false, "A block has no statements."),
     rule(TRAILING_SPACE, Style, HINT, true, "A line ends in spaces or tabs outside a comment or string."),
     rule(UNBALANCED_ASSIGNMENTS, Suspicious, WARN, false, "An assignment or `local` statement has more values than targets, or leaves targets without a value."),

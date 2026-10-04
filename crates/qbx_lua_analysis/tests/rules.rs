@@ -1410,6 +1410,19 @@ print(b, c, d, e, f, g, h, i)";
 }
 
 #[test]
+fn returns_without_values_that_end_a_function() {
+    let source = "local function a() return end
+local function b() if a then return end end
+local function c() do return end end
+local function d() print(1) return; end
+local e = function() return nil end
+print(b, c, d, e)
+return";
+    assert_eq!(reported_lines(source, "redundant-return"), [1, 4]);
+    assert_eq!(findings(source, "redundant-return")[0].1, "redundant return at the end of the function");
+}
+
+#[test]
 fn whitespace_at_the_end_of_lines() {
     let source = "local a = 1  \nlocal b = 2\t\n   \n-- comment  \nlocal s = [[x  \ny]]  \nprint(a, b, s) --[[ c ]]  \r\nprint(1)  ";
     assert_eq!(reported_lines(source, "trailing-space"), [1, 2, 3, 6, 7, 8]);

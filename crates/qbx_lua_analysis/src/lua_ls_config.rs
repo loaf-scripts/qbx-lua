@@ -55,6 +55,7 @@ const EQUIVALENT_CODES: &[&str] = &[
     "undefined-field",
     "newline-call",
     "trailing-space",
+    "redundant-return",
 ];
 
 #[derive(Debug, Default)]
