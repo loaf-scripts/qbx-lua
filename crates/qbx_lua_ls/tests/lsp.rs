@@ -6511,6 +6511,59 @@ use(value, decoded)
 }
 
 #[test]
+fn closed_locals_need_a_value_that_can_be_closed() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Name string
+---@type Test.Name
+local name
+---@type number?
+local maybe
+---@class Test.Handle
+local handle = {}
+local function pair() return 1, nil end
+local count <close> = 1
+local label <close> = 'text'
+local flag <close> = true
+local callback <close> = function() end
+local alias <close> = name
+local empty <close>
+local first, second <close> = 1
+local nothing <close> = nil
+local off <close> = false
+local optional <close> = maybe
+local object <close> = handle
+local closable <close> = setmetatable({}, { __close = function() end })
+local a, b <close> = pair()
+local varargs <close> = ...
+---@diagnostic disable-next-line: close-non-object
+local suppressed <close> = 2
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, message: &str| {
+        ("close-non-object".to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    let cannot = |ty: &str| {
+        format!(
+            "Cannot close a value of type `{ty}`; a `<close>` local takes `nil`, `false` or a value with a `__close` metamethod"
+        )
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["close-non-object"]),
+        [
+            finding("count <close>", &cannot("integer")),
+            finding("label <close>", &cannot("string")),
+            finding("flag <close>", &cannot("boolean")),
+            finding("callback <close>", &cannot("fun()")),
+            finding("alias <close>", &cannot("Test.Name")),
+            finding("empty <close>", "`empty` is declared `<close>` without a value to close"),
+            finding("first, second", "`second` is declared `<close>` without a value to close"),
+        ],
+        "`nil`, `false`, values that may be `nil`, tables, classes, values a call leaves out and `...` can be closed"
+    );
+}
+
+#[test]
 fn casts_to_classes_the_declared_type_does_not_extend_are_reported() {
     let mut client = Client::start(fixture_root());
     let text = "\

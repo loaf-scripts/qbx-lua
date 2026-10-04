@@ -83,8 +83,9 @@ Available features depend on the editor's LSP client.
   lua-language-server and TypeScript do. `inject-field`
   reports fields set through a value whose class or table type does not have them,
   `undefined-field` fields read from one, and
-  `need-check-nil` a value that may be `nil` used where a missing value raises an error. The opt-in
-  `no-unknown` reports parameters, locals and loop variables that have no type.
+  `need-check-nil` a value that may be `nil` used where a missing value raises an error.
+  `close-non-object` reports a `<close>` local whose value cannot be closed, such as a number. The
+  opt-in `no-unknown` reports parameters, locals and loop variables that have no type.
 - Signature help, parameter hints, semantic tokens, folding and document/workspace symbols.
 - QB-Core and ESX server callback completion, navigation and payload hints from local handlers.
 - Callback systems a resource wraps itself, declared with `---@callback`, with name completion,

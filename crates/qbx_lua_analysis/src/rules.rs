@@ -115,6 +115,8 @@ pub const CAST_LOCAL_TYPE: &str = "cast-local-type";
 /// Reported by qbx-lua-ls, which infers the types; the linter itself has no type information.
 pub const NO_UNKNOWN: &str = "no-unknown";
 pub const CONST_REASSIGN: &str = "const-reassign";
+/// Reported by qbx-lua-ls, which infers the types; the linter itself has no type information.
+pub const CLOSE_NON_OBJECT: &str = "close-non-object";
 pub const SELF_ASSIGNMENT: &str = "self-assignment";
 pub const SELF_COMPARISON: &str = "self-comparison";
 pub const COUNT_DOWN_LOOP: &str = "count-down-loop";
@@ -203,6 +205,7 @@ pub static RULES: &[Rule] = &[
     rule(CAST_LOCAL_TYPE, Correctness, WARN, false, "A local without @type or @param is given a value that the type of the value it is declared with does not take, such as a string after `local speed = 5` (language server only)."),
     rule(NO_UNKNOWN, Style, OFF, false, "A parameter, local or loop variable has no type, or a value of unknown type goes where a type is declared (language server only)."),
     rule(CONST_REASSIGN, Correctness, ERROR, false, "A <const> or <close> local is assigned to."),
+    rule(CLOSE_NON_OBJECT, Correctness, WARN, false, "A <close> local has no value, or one that cannot be closed, such as a number or a string (language server only)."),
     rule(SELF_ASSIGNMENT, Suspicious, WARN, false, "A variable is assigned to itself."),
     rule(SELF_COMPARISON, Suspicious, WARN, false, "Both sides of a comparison are the same expression."),
     rule(COUNT_DOWN_LOOP, Suspicious, WARN, true, "A numeric for loop counts up from a start above its end, or from #list to 1, without a negative step."),
