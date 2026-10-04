@@ -449,7 +449,7 @@ fn lists_every_rule_with_its_default_level() {
             "category": "suspicious",
             "default": "warning",
             "fixable": false,
-            "summary": "A local variable is never read.",
+            "summary": "A local variable is never read, or is declared with a table whose fields are set and never read.",
         })
     );
     assert_eq!(rule("shadowed-local")["default"], "off");

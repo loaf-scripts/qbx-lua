@@ -488,6 +488,36 @@ fn unused_and_shadowing() {
 }
 
 #[test]
+fn tables_whose_fields_are_only_set_are_unused() {
+    let source = "local cache = {}
+cache.a = 1
+cache['b'] = 2
+local handlers = { a = 1 }
+function handlers.f() end
+function handlers:m() end
+RegisterNetEvent('x', function(k, v) handlers[k] = v end)
+local list = {}
+list[#list + 1] = 1
+local nested = {}
+nested.a.b = 1
+local later
+later = {}
+later.a = 1
+---@class Lt.Kind
+local Kind = {}
+function Kind.new() end
+local counter = {}
+counter.n += 1
+local wrapped = setmetatable({}, {})
+wrapped.a = 1
+local returned = {}
+returned.a = 1
+return returned";
+    assert_eq!(reported_lines(source, "unused-local"), [1, 4]);
+    assert_eq!(findings(source, "unused-local")[0].1, "local 'cache' is never read; only its fields are set");
+}
+
+#[test]
 fn ignore_prefix_silences_unused() {
     assert_eq!(codes("local _ignored = 1\nlocal function cb(_a, _b) end\ncb()"), Vec::<&str>::new());
 }

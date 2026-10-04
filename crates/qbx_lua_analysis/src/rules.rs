@@ -162,7 +162,7 @@ pub static RULES: &[Rule] = &[
     rule(SYNTAX_ERROR, Correctness, ERROR, false, "The file cannot be parsed by the CfxLua 5.4 runtime."),
     rule(UNDEFINED_GLOBAL, Correctness, WARN, false, "A global is read that no script in the resource, its imports, the runtime or the natives define."),
     rule(UNDEFINED_FIELD, Correctness, WARN, false, "A field that does not exist is read from a standard library table or, in the language server, from a value whose LuaCATS class or table type does not have it."),
-    rule(UNUSED_LOCAL, Suspicious, WARN, false, "A local variable is never read."),
+    rule(UNUSED_LOCAL, Suspicious, WARN, false, "A local variable is never read, or is declared with a table whose fields are set and never read."),
     rule(UNUSED_FUNCTION, Suspicious, WARN, false, "A local function is never used."),
     rule(UNUSED_ARGUMENT, Style, HINT, false, "A function parameter is never read."),
     rule(UNUSED_LOOP_VARIABLE, Style, HINT, false, "A loop variable is never read."),
