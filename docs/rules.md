@@ -23,7 +23,7 @@ set any rule to `off`, `hint`, `info`, `warning`, or `error`.
 | `undefined-label` | error | A `goto` targets a label outside its visible scope. |
 | `redefined-local` | warning | A local is declared twice in one scope. |
 | `shadowed-local` | off | A local hides one in an enclosing scope. |
-| `unreachable-code` | warning | Code follows a control-flow statement that exits the path. |
+| `unreachable-code` | warning | Code follows a statement that never finishes: a `break` or `goto`, an `if` with an `else` none of whose branches runs past its end, by `return`, `break`, `goto` or a call of `error` or `os.exit`, or a `while true` loop that only a `return` leaves. Code from a label on can still be reached by a `goto`. A loop with a `return` in it, a `do return end` and an `error()` call of its own are not exits, as in lua-language-server. |
 | `redundant-return` | hint | A `return` without values ends a function body, where the function returns anyway. One inside an `if` or `do` block, which skips the code after it, and one that ends the file are not reported. |
 | `empty-block` | info | A block has no statements. |
 | `trailing-space` | hint | A line ends in spaces or tabs, or holds nothing else. Whitespace inside a comment or a string, such as a long string that spans lines, is left alone, as the formatter leaves it. Fix available. |

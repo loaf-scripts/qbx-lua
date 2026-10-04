@@ -82,21 +82,63 @@ impl Flow<'_, '_> {
         }
     }
 
+    /// `unreachable-code`: the statements after one that never finishes, up to a label, which a
+    /// `goto` may still reach.
     fn unreachable(&mut self, block: &Block) {
-        let exit = block.stmts.iter().position(|s| matches!(s.kind, StmtKind::Break | StmtKind::Goto(_)));
-        let Some(exit) = exit else { return };
-        let Some(next) = block.stmts.get(exit + 1) else { return };
-        if matches!(next.kind, StmtKind::Label(_)) {
-            return;
-        }
-        let end = block.stmts.last().map_or(next.span.end, |s| s.span.end);
+        let Some(exit) = block.stmts.iter().position(|stmt| self.never_finishes(stmt)) else { return };
+        let rest = &block.stmts[exit + 1..];
+        let reachable = rest.iter().position(|stmt| matches!(stmt.kind, StmtKind::Label(_))).unwrap_or(rest.len());
+        let (Some(first), Some(last)) = (rest.first(), rest[..reachable].last()) else { return };
         self.sink.report_with(
             rules::UNREACHABLE_CODE,
-            Span::new(next.span.start, end),
+            Span::new(first.span.start, last.span.end),
             "unreachable code",
             Some(Tag::Unnecessary),
             None,
         );
+    }
+
+    /// Whether running `stmt` never goes on to the statement after it: a `break` or `goto`, an `if`
+    /// with an `else` none of whose branches runs past its end, or a `while true` loop that nothing
+    /// leaves but a `return`. A loop with a `return` in it may still run zero times, and a `do`
+    /// block is left alone, as `do return end` skips the rest of a function on purpose.
+    fn never_finishes(&self, stmt: &Stmt) -> bool {
+        match &stmt.kind {
+            StmtKind::Break | StmtKind::Goto(_) => true,
+            StmtKind::If { branches, else_block: Some(else_block) } => {
+                branches.iter().map(|branch| &branch.block).chain([else_block]).all(|block| self.leaves(block))
+            }
+            StmtKind::While { cond, body } => {
+                matches!(cond.unparen().kind, ExprKind::True | ExprKind::Number(_) | ExprKind::String(_))
+                    && !leaves_loop(body)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a branch of an `if` never runs past its end. Like lua-language-server, a call of
+    /// `error` or `os.exit` counts here, though not as a statement of its own.
+    fn leaves(&self, block: &Block) -> bool {
+        block
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt.kind, StmtKind::Return(_)) || self.never_finishes(stmt) || self.exits(stmt))
+    }
+
+    /// A call of the global `error` or `os.exit`.
+    fn exits(&self, stmt: &Stmt) -> bool {
+        let StmtKind::Expr(Expr { kind: ExprKind::Call { callee, .. }, .. }) = &stmt.kind else { return false };
+        let global = |name: &Name, wanted: &str| {
+            name.text == wanted
+                && matches!(self.input.resolution.resolve_at(name.span.start), Some(Resolved::Global(_)))
+        };
+        match &callee.kind {
+            ExprKind::Name(name) => global(name, "error"),
+            ExprKind::Field { base, name, .. } => {
+                name.text == "exit" && matches!(&base.kind, ExprKind::Name(base) if global(base, "os"))
+            }
+            _ => false,
+        }
     }
 
     fn balance(&mut self, targets: usize, exprs: &[Expr], stmt_span: Span) {
@@ -295,6 +337,45 @@ fn same_place(a: &Expr, b: &Expr) -> bool {
         (Some(a), Some(b)) => a == b,
         _ => false,
     }
+}
+
+/// Whether the body of a loop can leave it other than by `return`: by a `break` of its own, or by a
+/// `goto` to a label it does not have.
+fn leaves_loop(body: &Block) -> bool {
+    fn labels<'a>(block: &'a Block, out: &mut Vec<&'a str>) {
+        for stmt in &block.stmts {
+            match &stmt.kind {
+                StmtKind::Label(name) => out.push(&name.text),
+                StmtKind::Do(body)
+                | StmtKind::While { body, .. }
+                | StmtKind::Repeat { body, .. }
+                | StmtKind::NumericFor { body, .. }
+                | StmtKind::GenericFor { body, .. } => labels(body, out),
+                StmtKind::If { branches, else_block } => {
+                    branches.iter().map(|branch| &branch.block).chain(else_block).for_each(|block| labels(block, out))
+                }
+                _ => {}
+            }
+        }
+    }
+    fn escapes(block: &Block, labels: &[&str], own: bool) -> bool {
+        block.stmts.iter().any(|stmt| match &stmt.kind {
+            StmtKind::Break => own,
+            StmtKind::Goto(name) => !labels.contains(&name.text.as_str()),
+            StmtKind::Do(body) => escapes(body, labels, own),
+            StmtKind::If { branches, else_block } => {
+                branches.iter().map(|branch| &branch.block).chain(else_block).any(|block| escapes(block, labels, own))
+            }
+            StmtKind::While { body, .. }
+            | StmtKind::Repeat { body, .. }
+            | StmtKind::NumericFor { body, .. }
+            | StmtKind::GenericFor { body, .. } => escapes(body, labels, false),
+            _ => false,
+        })
+    }
+    let mut inside = Vec::new();
+    labels(body, &mut inside);
+    escapes(body, &inside, true)
 }
 
 /// An `if` with a branch that ends in `return`.

@@ -170,7 +170,7 @@ pub static RULES: &[Rule] = &[
     rule(UNDEFINED_LABEL, Correctness, ERROR, false, "A goto targets a label that is not visible."),
     rule(REDEFINED_LOCAL, Suspicious, WARN, false, "A local is declared twice in the same scope."),
     rule(SHADOWED_LOCAL, Style, OFF, false, "A local hides a local from an enclosing scope."),
-    rule(UNREACHABLE_CODE, Suspicious, WARN, false, "Code follows a return, break or goto and can never run."),
+    rule(UNREACHABLE_CODE, Suspicious, WARN, false, "Code follows a break or goto, an `if` with an `else` none of whose branches runs past its end, or a `while true` loop that only a return leaves, and can never run."),
     rule(REDUNDANT_RETURN, Style, HINT, false, "A function ends with a `return` that gives no values, which changes nothing."),
     rule(EMPTY_BLOCK, Style, INFO, false, "A block has no statements."),
     rule(TRAILING_SPACE, Style, HINT, true, "A line ends in spaces or tabs outside a comment or string."),

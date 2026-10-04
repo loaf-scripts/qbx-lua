@@ -1550,6 +1550,36 @@ print(a, b)";
 }
 
 #[test]
+fn code_after_statements_that_never_finish() {
+    let source = "local c = math.random() > 0.5
+local function a() if c then return 1 else return 2 end print(1) end
+local function b() if c then return 1 elseif c then return 2 else if c then return 3 else return 4 end end print(1) end
+local function d() if c then error('x') else os.exit(1) end print(1) end
+local function e() while true do if c then return end Wait(0) end print(1) end
+local function f() for i = 1, 2 do if i then break else goto continue end print(i) ::continue:: end end
+local function g() if c then return 1 else return 2 end ::later:: print(1) end
+local function h() if c then return 1 else return 2 end print(1) ::later:: print(2) end
+print(a, b, d, e, f, g, h)
+if c then return else return end
+print(1)";
+    assert_eq!(reported_lines(source, "unreachable-code"), [2, 3, 4, 5, 6, 8, 11]);
+    for source in [
+        "local function f() if math.random() > 0.5 then return 1 end print(1) end\nprint(f)",
+        "local function f() error('x') print(1) end\nprint(f)",
+        "local function f() do return end print(1) end\nprint(f)",
+        "local function f() while math.random() do Wait(0) end print(1) end\nprint(f)",
+        "local function f() while true do if math.random() then break end end print(1) end\nprint(f)",
+        "local function f() while true do goto out end ::out:: print(1) end\nprint(f)",
+        "local function f() while true do for _ = 1, 2 do goto done end end ::done:: print(1) end\nprint(f)",
+        "local function f(t) if t then for _, v in pairs(t) do return v end else return end print(1) end\nprint(f)",
+        "local function f() repeat Wait(0) until false print(1) end\nprint(f)",
+        "local function error() end\nlocal function f() if math.random() then error() else return end print(1) end\nprint(f)",
+    ] {
+        assert_eq!(reported_lines(source, "unreachable-code"), Vec::<u32>::new(), "{source}");
+    }
+}
+
+#[test]
 fn returns_without_values_that_end_a_function() {
     let source = "local function a() return end
 local function b() if a then return end end
