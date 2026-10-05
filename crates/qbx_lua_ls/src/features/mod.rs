@@ -33,6 +33,7 @@ pub mod returns;
 pub mod retyped_locals;
 pub mod semantic_tokens;
 pub mod signature;
+pub mod sql_functions;
 pub mod strict_classes;
 pub mod symbols;
 pub mod undefined_fields;

@@ -12250,6 +12250,83 @@ fn event_completion_replaces_the_whole_name_across_colons() {
 }
 
 #[test]
+fn lists_the_functions_that_take_sql() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-sql-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    let write = |relative: &str, text: &str| {
+        let path = fixture.0.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "mydb/fxmanifest.lua",
+        "fx_version 'cerulean'
+game 'gta5'
+server_script 'server.lua'
+",
+    );
+    write(
+        "mydb/server.lua",
+        "---@param query sql
+---@param params? table
+function Fetch(query, params) end
+
+DB = {}
+
+---@param query sql
+function DB.fetch(query) end
+
+---@param query sql?
+function DB:query(query) end
+
+---@param name string
+function DB.other(name) end
+
+---@param id integer
+---@param query sql
+function DB.second(id, query) end
+
+---@param query sql
+local function scalar(query) end
+exports('scalar', scalar)
+
+Fetch('SELECT 1')
+Fetch(5)
+",
+    );
+    let mut client = Client::start(fixture.0.clone());
+    let functions = client.request("qbx/sqlFunctions", Value::Null);
+    assert_eq!(
+        functions,
+        json!({ "functions": ["DB.fetch", "DB:query", "Fetch", "exports.mydb:scalar"] }),
+        "the first parameter has to take `sql`, also as `sql?`, and methods and exports are listed as calls write them"
+    );
+    client.open("mydb/server.lua");
+    assert_eq!(
+        client
+            .diagnostics_for("mydb/server.lua")
+            .into_iter()
+            .filter(|(code, _)| code != "unused-argument")
+            .collect::<Vec<_>>(),
+        [("param-type-mismatch".to_string(), 24)],
+        "`sql` is a `string` to the type checks"
+    );
+}
+
+#[test]
 fn reports_the_side_of_a_file() {
     let mut client = Client::start(fixture_root());
     let info = client.request("qbx/fileInfo", json!({ "uri": client.uri(CLIENT) }));

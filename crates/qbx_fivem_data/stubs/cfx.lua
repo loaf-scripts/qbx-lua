@@ -503,6 +503,9 @@ function promise:next(onFulfilled, onRejected) end
 ---A vector of any size.
 ---@alias vector vector2|vector3|vector4
 
+---A string that holds an SQL query. Editors highlight the query in calls of a function whose first parameter has this type.
+---@alias sql string
+
 ---Quaternion value type. Multiplying by a vector3 rotates that vector.
 ---@class quat
 ---@field x number

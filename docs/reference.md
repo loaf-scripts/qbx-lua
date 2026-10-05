@@ -1228,6 +1228,26 @@ passed as, `@vararg` and a `...T` `@return` as documentation, takes a comment ab
 `return` gives no value, and marks the name of a function that needs a comment rather than the
 whole function.
 
+## SQL queries
+
+The runtime stubs declare `sql` as a `string` that holds an SQL query. Give it to the first
+parameter of a function that runs queries:
+
+```lua
+---@param query sql
+---@param params? table
+function DB.fetch(query, params)
+    return MySQL.query.await(query, params)
+end
+```
+
+The type checks read it as `string`. Editors use it to highlight the query in calls: the
+`qbx/sqlFunctions` request lists the global, member and exported functions whose first parameter
+takes `sql`, also as `sql?`, as calls write them, such as `DB.fetch`, `DB:query` for a function
+defined with `:`, or `exports.mydb:scalar` for an export. Local functions are not listed.
+lua-language-server does not know the type; a definition file with `---@alias sql string`
+declares it there.
+
 ## Events, exports, and locales
 
 The CLI first collects event registrations and exports from the resources being analyzed, then

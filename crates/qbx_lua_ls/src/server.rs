@@ -901,6 +901,9 @@ impl Server {
                     .collect();
                 Ok(json!(rules))
             }
+            "qbx/sqlFunctions" => {
+                Ok(json!({ "functions": crate::features::sql_functions::sql_functions(&self.ws.index) }))
+            }
             "qbx/referenceSearch" => {
                 if !raw.is_null() && !raw.is_object() {
                     return Err("reference search parameters must be an object or null".into());
