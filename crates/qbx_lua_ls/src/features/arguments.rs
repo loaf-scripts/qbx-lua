@@ -25,7 +25,8 @@
 //! values after it go unknown, when the call passes fewer values than the native takes. With
 //! `strict`, as TypeScript reads the declared types, numbers and booleans no longer pass for each
 //! other, and a string parameter takes no number or boolean, also one written out, while `nil`,
-//! hashed strings and vectors still pass as the runtime takes them.
+//! hashed strings and vectors still pass as the runtime takes them, and so does the number of a
+//! player's server id, which only the native data calls a string.
 //!
 //! Parameters typed with a generic of the function called are left out, as the arguments of the
 //! call bind them. The function a callee passes to a callback, such as `resolve` of
@@ -370,12 +371,15 @@ fn native_mismatch(classes: &Classes, param: &Param, arg: &Expr, given: &Type, s
         return Some(format!("Cannot assign `{given}` to parameter `{}` of type `{expected}`", param.name));
     }
     let given = given.without_nil();
-    let written = is_literal(arg) || PLAYER_ID_PARAMS.contains(&param.name.as_str());
+    let player_id = PLAYER_ID_PARAMS.contains(&param.name.as_str());
+    let written = is_literal(arg) || player_id;
     // With `strict`, as TypeScript reads a declared type, a number or a boolean is no string, and
-    // a `BOOL` is no number.
+    // a `BOOL` is no number. The server id of a player is a number to scripts either way: the
+    // native data only declares it a string.
     let converts = |part: &Type| {
         let converted = |kind: Type| !classes.rejects(&kind, from, part);
         match expected {
+            Type::String if player_id && strict => converted(Type::Number),
             Type::String => !strict && written && (converted(Type::Number) || converted(Type::Boolean)),
             Type::Handle(name) if name == "Hash" => converted(Type::String) || converted(Type::Boolean),
             Type::Number | Type::Integer | Type::Handle(_) => !strict && converted(Type::Boolean),

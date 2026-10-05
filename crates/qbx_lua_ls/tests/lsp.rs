@@ -8086,10 +8086,9 @@ DropPlayer(src, 'kicked')
         "a player's server id is a number to scripts"
     );
     client.set_strict(true);
-    assert_eq!(
-        findings(&mut client, SERVER, &["param-type-mismatch"]).len(),
-        1,
-        "with `strict`, it is no string either"
+    assert!(
+        findings(&mut client, SERVER, &["param-type-mismatch"]).is_empty(),
+        "with `strict` too, as only the native data calls it a string"
     );
 }
 

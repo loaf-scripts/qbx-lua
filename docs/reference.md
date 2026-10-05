@@ -485,7 +485,8 @@ Natives are checked as the runtime passes their arguments on:
   passes a hash, not the name.
 - With [`strict`](#strict-mode), as TypeScript reads the declared types, numbers and booleans no
   longer pass for each other, and a string parameter takes no number or boolean at all, while `nil`,
-  hashed strings and vectors still pass.
+  hashed strings and vectors still pass, and so does a number for the server id of a player, which
+  only the native data calls a string.
 - A hash parameter takes a string, which the wrappers hash.
 - A vector fills a number parameter for each of its parts, as in `SetEntityCoords(ped, coords, ...)`.
   The values after a value of unknown type that may be a vector are not checked when the call
