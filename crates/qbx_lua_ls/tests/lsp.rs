@@ -11094,7 +11094,7 @@ print(nano, delta, clock, trimmed, kind, entries, length)
         ("delta = os", "delta: integer\n"),
         ("clock = os", "clock: number\n"),
         ("trimmed = string", "trimmed: string\n"),
-        ("kind = table", "kind: string\n"),
+        ("kind = table", "kind: \"empty\"|\"array\"|\"hash\"|\"mixed\"\n"),
         ("entries = io", "entries: directory? {"),
         ("length = utf8", "length: integer\n"),
         // The functions CfxLua adds belong to the same table as the ones Lua defines.
@@ -12223,6 +12223,32 @@ fn native_callbacks_take_the_parameters_their_documentation_gives() {
     let hover = client.hover_text(SERVER, 4, 19);
     assert!(hover.contains("request: HttpHandlerRequest"), "{hover}");
     assert_eq!(client.diagnostics_for(SERVER), []);
+}
+
+#[test]
+fn runtime_stubs_follow_the_cfxlua_runtime() {
+    let mut client = Client::start(fixture_root());
+    let text = [
+        "local id = CreateThread(function() end)",
+        "local removed = ClearTimeout(id)",
+        "local yielded = Citizen.CreateThreadNow(function() end, 'name')",
+        "Citizen.Trace(5)",
+        "local decoded = json.decode('{}', 1, nil, {}, {})",
+        "local unpacked = msgpack.unpack('', 1, 0)",
+        "local t = table.new(2, 0)",
+        "local copy = table.clone(table.clear(t), {})",
+        "local kind = table.type(copy)",
+        "print(removed, yielded, decoded, unpacked, kind)",
+    ]
+    .join("\n");
+    client.open_with(CLIENT, &text);
+    for (line, expected) in [(0, "id: integer"), (1, "removed: boolean"), (2, "yielded: boolean")] {
+        let hover = client.hover_text(CLIENT, line, 6);
+        assert!(hover.contains(expected), "{expected}: {hover}");
+    }
+    let hover = client.hover_text(CLIENT, 8, 6);
+    assert!(hover.contains("empty") && hover.contains("mixed"), "{hover}");
+    assert_eq!(client.diagnostics_for(CLIENT), []);
 }
 
 #[test]

@@ -7,13 +7,16 @@ Citizen = {}
 ---@param msec integer
 function Citizen.Wait(msec) end
 
----Queues `handler` as a new scheduler thread (coroutine) that starts on the next tick.
+---Queues `handler` as a new scheduler thread (coroutine) that starts on the next tick, and returns an id that `Citizen.ClearTimeout` cancels it with before it starts.
 ---@param handler fun()
+---@return integer threadId
 function Citizen.CreateThread(handler) end
 
----Creates a scheduler thread and runs it immediately up to its first yield, instead of waiting for the next tick.
+---Creates a scheduler thread and runs it immediately up to its first yield, instead of waiting for the next tick. Returns whether the thread yielded, so that it is still running. `name` names the thread in profiler and error output.
 ---@param handler fun()
-function Citizen.CreateThreadNow(handler) end
+---@param name? string
+---@return boolean yielded
+function Citizen.CreateThreadNow(handler, name) end
 
 ---Runs `callback` once in a new thread after `msec` milliseconds and returns a timer id usable with `Citizen.ClearTimeout`.
 ---@param msec integer
@@ -21,8 +24,9 @@ function Citizen.CreateThreadNow(handler) end
 ---@return integer timerId
 function Citizen.SetTimeout(msec, callback) end
 
----Cancels a pending timer created by `Citizen.SetTimeout`.
+---Cancels a pending timer created by `Citizen.SetTimeout`, or a thread created by `Citizen.CreateThread` that has not started yet. Returns whether one was cancelled.
 ---@param timerId integer
+---@return boolean removed
 function Citizen.ClearTimeout(timerId) end
 
 ---Yields the current thread until the promise settles. Returns the resolved value, or raises the rejection value as an error.
@@ -30,8 +34,8 @@ function Citizen.ClearTimeout(timerId) end
 ---@return any ...
 function Citizen.Await(p) end
 
----Writes raw text to the console/log without appending a newline.
----@param text string
+---Writes raw text to the console/log without appending a newline. A number is written as text.
+---@param text string|number
 function Citizen.Trace(text) end
 
 ---Calls a game native by hash. Arguments may include the pointer and result marker values produced by the other `Citizen.*` helpers.
@@ -149,6 +153,7 @@ function Wait(msec) end
 
 ---Alias of `Citizen.CreateThread`.
 ---@param handler fun()
+---@return integer threadId
 function CreateThread(handler) end
 
 ---Alias of `Citizen.SetTimeout`.
@@ -159,6 +164,7 @@ function SetTimeout(msec, callback) end
 
 ---Alias of `Citizen.ClearTimeout`.
 ---@param timerId integer
+---@return boolean removed
 function ClearTimeout(timerId) end
 
 ---Handle returned by `AddEventHandler`; pass it to `RemoveEventHandler` to unregister the handler.
@@ -249,15 +255,17 @@ json.null = {}
 ---@nodiscard
 function json.encode(value, state) end
 
----Parses a JSON string starting at `pos`. Returns the value, or nil with the failing position and an error message. `nullval` replaces JSON null.
+---Parses a JSON string starting at `pos`. Returns the value, or nil with the failing position and an error message. `nullval` replaces JSON null, and `objectmeta` and `arraymeta` become the metatables of the decoded objects and arrays.
 ---@param str string
 ---@param pos? integer
 ---@param nullval? any
+---@param objectmeta? table
+---@param arraymeta? table
 ---@return any value
 ---@return integer? nextPos
 ---@return string? err
 ---@nodiscard
-function json.decode(str, pos, nullval) end
+function json.decode(str, pos, nullval, objectmeta, arraymeta) end
 
 ---Returns the value of a global encoding/decoding option.
 ---@param option json_options
@@ -318,11 +326,14 @@ function msgpack.pack(...) end
 ---@nodiscard
 function msgpack.pack_args(...) end
 
----Decodes a MessagePack byte string and returns every value it contains.
+---Decodes a MessagePack byte string and returns every value it contains, or up to `limit` values from `position` on, as far as `endPosition`.
 ---@param data string
+---@param position? integer
+---@param limit? integer
+---@param endPosition? integer
 ---@return any ...
 ---@nodiscard
-function msgpack.unpack(data) end
+function msgpack.unpack(data, position, limit, endPosition) end
 
 ---Decodes up to `limit` values starting at `position` and returns where decoding stopped, 0 at the end of the string, followed by the values.
 ---@param data string
@@ -674,9 +685,15 @@ function string.strconcat(...) end
 
 ---Creates a table with preallocated array and hash parts. CfxLua extension.
 ---@param narr integer
----@param nrec? integer
+---@param nrec integer
 ---@return table
 function table.create(narr, nrec) end
+
+---Same as `table.create`. CfxLua extension.
+---@param narr integer
+---@param nrec integer
+---@return table
+function table.new(narr, nrec) end
 
 ---Removes every key from the table and returns it. CfxLua extension.
 ---@generic T: table
@@ -684,16 +701,23 @@ function table.create(narr, nrec) end
 ---@return T
 function table.wipe(t) end
 
----Describes the table layout: "empty", "array", "hash" or "mixed". CfxLua extension.
----@param t table
----@return string
-function table.type(t) end
-
----Returns a shallow copy of the table. CfxLua extension.
+---Same as `table.wipe`. CfxLua extension.
 ---@generic T: table
 ---@param t T
 ---@return T
-function table.clone(t) end
+function table.clear(t) end
+
+---Describes the table layout. CfxLua extension.
+---@param t table
+---@return 'empty'|'array'|'hash'|'mixed'
+function table.type(t) end
+
+---Returns a shallow copy of the table, written into `destination` when one is given. CfxLua extension.
+---@generic T: table
+---@param t T
+---@param destination? table
+---@return T
+function table.clone(t, destination) end
 
 ---Converts every argument to a string and returns them all. CfxLua extension.
 ---@param ... any
