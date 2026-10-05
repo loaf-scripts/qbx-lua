@@ -18,7 +18,7 @@ enum ArgumentKind {
 }
 
 fn argument_kind(native: Native, index: usize) -> Option<ArgumentKind> {
-    let (parameter, _) = native.params().nth(index)?;
+    let (parameter, _, _) = native.params().nth(index)?;
     if native.namespace == "PAD" && parameter == "control" {
         Some(ArgumentKind::Control)
     } else if matches!(native.name, "SetPedConfigFlag" | "GetPedConfigFlag") && parameter == "flagId" {

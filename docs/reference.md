@@ -491,6 +491,12 @@ Natives are checked as the runtime passes their arguments on:
   The values after a value of unknown type that may be a vector are not checked when the call
   passes fewer values than the native takes, since they may go to later parameters.
 
+The values a native writes through its pointers are returned after its result, as FiveM's Lua
+wrappers return them: `local _, size = GetGroupSize(group)`. The wrappers take a pointer as an
+argument only when it is the native's one pointer and comes last, as an optional initial value,
+like the `entity` of `GetEntityPlayerIsFreeAimingAt(player, entity)`. Natives that release a handle,
+such as `DeleteEntity`, still need theirs.
+
 Other parameters of natives do not take `nil`: `DoesEntityExist(entity)` with an `Entity?` is
 reported. Only clear cases count, and the rest is left alone:
 

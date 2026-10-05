@@ -83,13 +83,18 @@ impl Native {
         self.returns.split(',').filter(|r| !r.is_empty())
     }
 
-    /// `(name, type)` pairs.
-    pub fn params(&self) -> impl Iterator<Item = (&'static str, &'static str)> {
-        self.params.split(',').filter_map(|p| p.split_once(':'))
+    /// `(name, type, optional)` triples. The table writes an optional parameter `name?`: the
+    /// pointer that the Lua wrapper takes as an initial value, which nil leaves 0.
+    pub fn params(&self) -> impl Iterator<Item = (&'static str, &'static str, bool)> {
+        self.params.split(',').filter_map(|p| p.split_once(':')).map(|(name, ty)| match name.strip_suffix('?') {
+            Some(name) => (name, ty, true),
+            None => (name, ty, false),
+        })
     }
 
     pub fn signature(&self) -> String {
-        let params: Vec<String> = self.params().map(|(n, t)| format!("{n}: {t}")).collect();
+        let params: Vec<String> =
+            self.params().map(|(n, t, optional)| format!("{n}{}: {t}", if optional { "?" } else { "" })).collect();
         let returns: Vec<&str> = self.returns().collect();
         let mut out = format!("function {}({})", self.name, params.join(", "));
         if !returns.is_empty() {
@@ -290,7 +295,7 @@ mod tests {
     fn looks_up_natives() {
         let native = native("GetEntityCoords").unwrap();
         assert_eq!(native.returns().collect::<Vec<_>>(), ["vector3"]);
-        assert_eq!(native.params().next(), Some(("entity", "Entity")));
+        assert_eq!(native.params().next(), Some(("entity", "Entity", false)));
         assert_eq!(super::native("GetPlayerIdentifier").unwrap().side, Side::Server);
         assert!(super::native("NotARealNative").is_none());
         assert!(native_count() > 6000);
@@ -309,6 +314,31 @@ mod tests {
         // A native without a server signature of its own is the same everywhere.
         let health = native("GetEntityHealth").unwrap();
         assert_eq!(health.on(Some(Side::Server)).hash, health.hash);
+    }
+
+    #[test]
+    fn pointers_follow_the_lua_wrappers() {
+        let shape = |name: &str| {
+            let native = native(name).unwrap();
+            (native.params().collect::<Vec<_>>(), native.returns().collect::<Vec<_>>())
+        };
+        // Two pointers: both are returned, neither is an argument.
+        assert_eq!(shape("GetGroupSize"), (vec![("groupID", "integer", false)], vec!["integer", "integer"]));
+        // The one pointer, last: an optional initial value, and returned.
+        assert_eq!(
+            shape("GetEntityPlayerIsFreeAimingAt"),
+            (vec![("player", "Player", false), ("entity", "Entity", true)], vec!["boolean", "Entity"])
+        );
+        // A native that releases the handle it is given needs one.
+        assert_eq!(shape("DeleteEntity"), (vec![("entity", "Entity", false)], vec!["Entity"]));
+        let server = native("DeleteEntity").unwrap().on(Some(Side::Server));
+        assert_eq!(server.returns().count(), 0, "the server native takes the handle itself");
+        // The wrapper reads an Any* as an integer, and passes none it does not take.
+        assert_eq!(shape("DataarrayGetInt"), (vec![("arrayIndex", "integer", false)], vec!["integer", "integer"]));
+        assert_eq!(
+            native("GetEntityPlayerIsFreeAimingAt").unwrap().signature(),
+            "function GetEntityPlayerIsFreeAimingAt(player: Player, entity?: Entity): boolean, Entity"
+        );
     }
 
     #[test]

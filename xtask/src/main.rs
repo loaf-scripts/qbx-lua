@@ -7,7 +7,7 @@ use serde_json::Value;
 mod references;
 
 const SOURCES: &[&str] =
-    &["https://runtime.fivem.net/doc/natives.json", "https://runtime.fivem.net/doc/natives_cfx.json"];
+    &["https://static.cfx.re/natives/natives.json", "https://static.cfx.re/natives/natives_cfx.json"];
 
 struct Native {
     side: char,
@@ -135,13 +135,26 @@ fn add_native(natives: &mut BTreeMap<String, Native>, ns: &str, hash: &str, nati
     let mut params = Vec::new();
     let mut out_types = Vec::new();
     let mut param_docs = String::new();
-    for param in native["params"].as_array().into_iter().flatten() {
+    let declared: Vec<&Value> = native["params"].as_array().into_iter().flatten().collect();
+    let type_of = |param: &Value| param["type"].as_str().unwrap_or("Any").to_string();
+    // FiveM's Lua wrappers (ext/natives/codegen_out_lua.lua) return the value of every pointer after
+    // the result, and take a pointer as an argument only when it is the native's one pointer and its
+    // last parameter, as an initial value that nil leaves 0.
+    let pointers = declared.iter().filter(|param| is_pointer(&type_of(param))).count();
+    let last_is_pointer = declared.last().is_some_and(|param| is_pointer(&type_of(param)));
+    let takes_pointer = pointers == 1 && last_is_pointer;
+    for param in &declared {
         let param_name = sanitize_param(param["name"].as_str().unwrap_or("arg"));
-        let ty = param["type"].as_str().unwrap_or("Any");
-        if is_out_param(raw_name, ty) {
-            out_types.push(lua_type(ty.trim_end_matches('*')));
+        let ty = type_of(param);
+        if is_pointer(&ty) {
+            out_types.push(pointer_type(&ty));
+            if takes_pointer {
+                // A native that releases the handle it is given does nothing without one.
+                let optional = if consumes_handle(raw_name) { "" } else { "?" };
+                params.push((format!("{param_name}{optional}"), pointer_type(&ty)));
+            }
         } else {
-            params.push((param_name.clone(), lua_type(ty)));
+            params.push((param_name.clone(), lua_type(&ty)));
         }
         if let Some(desc) = param["description"].as_str().filter(|d| !d.trim().is_empty()) {
             writeln!(param_docs, "- `{param_name}`: {}", desc.trim().replace('\n', " ")).unwrap();
@@ -252,13 +265,22 @@ fn lua_name(raw: &str) -> String {
     out
 }
 
-fn is_out_param(raw_name: &str, ty: &str) -> bool {
-    if !ty.ends_with('*') || matches!(ty, "char*" | "Any*") {
-        return false;
+/// Whether a parameter of this type is a pointer, whose value the Lua wrapper returns: a `char*` is
+/// a string.
+fn is_pointer(ty: &str) -> bool {
+    ty.ends_with('*') && ty != "char*"
+}
+
+/// The type of the value a pointer gives back. The wrapper reads an `Any*` as an integer.
+fn pointer_type(ty: &str) -> String {
+    match ty {
+        "Any*" => "integer".into(),
+        other => lua_type(other.trim_end_matches('*')),
     }
-    let consumes_handle =
-        raw_name.starts_with("DELETE_") || raw_name.starts_with("REMOVE_") || raw_name.contains("_AS_NO_LONGER_NEEDED");
-    !consumes_handle
+}
+
+fn consumes_handle(raw_name: &str) -> bool {
+    raw_name.starts_with("DELETE_") || raw_name.starts_with("REMOVE_") || raw_name.contains("_AS_NO_LONGER_NEEDED")
 }
 
 fn lua_type(ty: &str) -> String {

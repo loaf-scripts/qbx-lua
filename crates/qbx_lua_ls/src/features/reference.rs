@@ -323,7 +323,7 @@ pub fn detail(params: DetailParams) -> Result<Option<ReferenceDetail>, String> {
         let native = native(detail.item.name).expect("catalog comes from bundled native metadata");
         let params: Vec<_> = native.params().collect();
         detail.signature = Some(native.signature());
-        detail.parameters = Some(params.iter().map(|&(name, lua_type)| Parameter { name, lua_type }).collect());
+        detail.parameters = Some(params.iter().map(|&(name, lua_type, _)| Parameter { name, lua_type }).collect());
         detail.returns = Some(native.returns().collect());
         detail.documentation = native_docs(native.name)
             .filter(|doc| !doc.trim().is_empty())
@@ -331,14 +331,14 @@ pub fn detail(params: DetailParams) -> Result<Option<ReferenceDetail>, String> {
         detail.source_url = format!("https://docs.fivem.net/natives/?_{}", native.hash);
         detail.copy_text = native.name.into();
         detail.insert_text =
-            format!("{}({})", native.name, params.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "));
+            format!("{}({})", native.name, params.iter().map(|(name, _, _)| *name).collect::<Vec<_>>().join(", "));
         detail.insert_snippet = Some(format!(
             "{}({})$0",
             snippet_escape(native.name),
             params
                 .iter()
                 .enumerate()
-                .map(|(index, (name, _))| format!("${{{}:{}}}", index + 1, snippet_escape(name)))
+                .map(|(index, (name, _, _))| format!("${{{}:{}}}", index + 1, snippet_escape(name)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));

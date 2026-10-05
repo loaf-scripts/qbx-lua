@@ -576,7 +576,12 @@ pub fn native_fun_type(native: &qbx_fivem_data::Native) -> FunType {
     FunType {
         params: native
             .params()
-            .map(|(name, ty)| Param { name: SmolStr::new(name), ty: native_type(ty), ..Param::default() })
+            .map(|(name, ty, optional)| Param {
+                name: SmolStr::new(name),
+                ty: native_type(ty),
+                optional,
+                ..Param::default()
+            })
             .collect(),
         returns: native.returns().map(native_type).collect(),
         ..FunType::default()
