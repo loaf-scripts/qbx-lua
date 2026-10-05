@@ -12210,6 +12210,22 @@ fn builtin_events_complete_hover_and_type_their_handlers() {
 }
 
 #[test]
+fn native_callbacks_take_the_parameters_their_documentation_gives() {
+    let mut client = Client::start(fixture_root());
+    let text = "RegisterCommand('heal', function(source, args, rawCommand)\n    print(source, args[1], rawCommand)\nend, false)\nSetHttpHandler(function(request, response)\n    response.send(request.path)\nend)";
+    client.open_with(SERVER, text);
+    let hover = client.hover_text(SERVER, 0, 3);
+    assert!(hover.contains("handler: fun(source: integer, args: string[], rawCommand: string)"), "{hover}");
+    for (character, expected) in [(11, "source: integer"), (19, "args: string[]"), (28, "rawCommand: string")] {
+        let hover = client.hover_text(SERVER, 1, character);
+        assert!(hover.contains(expected), "{expected}: {hover}");
+    }
+    let hover = client.hover_text(SERVER, 4, 19);
+    assert!(hover.contains("request: HttpHandlerRequest"), "{hover}");
+    assert_eq!(client.diagnostics_for(SERVER), []);
+}
+
+#[test]
 fn event_completion_replaces_the_whole_name_across_colons() {
     for snippets in [false, true] {
         let mut client = Client::start_with_capabilities(
@@ -12951,11 +12967,11 @@ function PlainGreeting(name) end
             "RegisterNuiCallback",
             "RegisterNuiCallback('${1:name}', function(${2:data, cb})\n\t$0\nend)",
         ),
-        // Native data only says `function`.
+        // A native's callback takes the parameters its documentation gives.
         (
             "AddStateBagChange|",
             "AddStateBagChangeHandler",
-            "AddStateBagChangeHandler('${1:keyFilter}', '${2:bagFilter}', function(${3})\n\t$0\nend)",
+            "AddStateBagChangeHandler('${1:keyFilter}', '${2:bagFilter}', function(${3:bagName, key, value, reserved, replicated})\n\t$0\nend)",
         ),
     ];
     for (typed, label, expected) in cases {

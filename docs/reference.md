@@ -497,6 +497,11 @@ argument only when it is the native's one pointer and comes last, as an optional
 like the `entity` of `GetEntityPlayerIsFreeAimingAt(player, entity)`. Natives that release a handle,
 such as `DeleteEntity`, still need theirs.
 
+The functions natives call back take the parameters their documentation gives: the handler of
+`RegisterCommand` takes `source: integer, args: string[], rawCommand: string`, and those of
+`AddStateBagChangeHandler`, `AddConvarChangeListener`, `RegisterConsoleListener` and
+`SetHttpHandler` take theirs, the last a `request` and `response` with their fields.
+
 Other parameters of natives do not take `nil`: `DoesEntityExist(entity)` with an `Entity?` is
 reported. Only clear cases count, and the rest is left alone:
 

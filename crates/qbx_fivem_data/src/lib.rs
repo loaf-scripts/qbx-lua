@@ -84,11 +84,17 @@ impl Native {
     }
 
     /// `(name, type, optional)` triples. The table writes an optional parameter `name?`: the
-    /// pointer that the Lua wrapper takes as an initial value, which nil leaves 0.
+    /// pointer that the Lua wrapper takes as an initial value, which nil leaves 0. A function
+    /// parameter has the LuaCATS type of `CALLBACK_TYPES` where that table gives one.
     pub fn params(&self) -> impl Iterator<Item = (&'static str, &'static str, bool)> {
-        self.params.split(',').filter_map(|p| p.split_once(':')).map(|(name, ty)| match name.strip_suffix('?') {
-            Some(name) => (name, ty, true),
-            None => (name, ty, false),
+        let native = self.name;
+        self.params.split(',').filter_map(|p| p.split_once(':')).map(move |(name, ty)| {
+            let (name, optional) = match name.strip_suffix('?') {
+                Some(name) => (name, true),
+                None => (name, false),
+            };
+            let callback = CALLBACK_TYPES.iter().find(|(owner, param, _)| *owner == native && *param == name);
+            (name, callback.map_or(ty, |(_, _, ty)| ty), optional)
         })
     }
 
@@ -104,6 +110,28 @@ impl Native {
         out
     }
 }
+
+/// The LuaCATS types of the function parameters of natives, which the native data only calls
+/// `function`, as their documentation describes the functions: `(native, parameter, type)`. The
+/// classes they name are declared in the stubs. `RegisterRawNuiCallback` is left out, as nothing
+/// documents what its callback receives.
+pub static CALLBACK_TYPES: &[(&str, &str, &str)] = &[
+    ("RegisterCommand", "handler", "fun(source: integer, args: string[], rawCommand: string)"),
+    (
+        "AddStateBagChangeHandler",
+        "handler",
+        "fun(bagName: string, key: string, value: any, reserved: number, replicated: boolean)",
+    ),
+    ("AddConvarChangeListener", "handler", "fun(conVarName: string, reserved: any)"),
+    ("RegisterConsoleListener", "listener", "fun(channel: string, message: string)"),
+    ("SetHttpHandler", "handler", "fun(request: HttpHandlerRequest, response: HttpHandlerResponse)"),
+    ("RegisterNuiCallback", "callback", "fun(data: unknown, cb: fun(response: any))"),
+    ("RegisterRawKeymap", "onKeyDown", "fun()|nil"),
+    ("RegisterRawKeymap", "onKeyUp", "fun()|nil"),
+    ("ScanResourceRoot", "callback", "fun(results: table)"),
+    ("RegisterResourceBuildTaskFactory", "factoryFn", "fun(): ResourceBuildTask"),
+    ("RegisterArchetypes", "factory", "fun(): table[]"),
+];
 
 struct LineTable {
     text: &'static str,
@@ -339,6 +367,16 @@ mod tests {
             native("GetEntityPlayerIsFreeAimingAt").unwrap().signature(),
             "function GetEntityPlayerIsFreeAimingAt(player: Player, entity?: Entity): boolean, Entity"
         );
+    }
+
+    #[test]
+    fn callback_types_name_function_parameters() {
+        for (name, param, ty) in CALLBACK_TYPES {
+            let native = native(name).unwrap_or_else(|| panic!("{name} is no native"));
+            let declared = native.params.split(',').filter_map(|p| p.split_once(':')).find(|(n, _)| n == param);
+            assert_eq!(declared.map(|(_, ty)| ty), Some("function"), "{name}({param})");
+            assert!(native.params().any(|(n, t, _)| n == *param && t == *ty));
+        }
     }
 
     #[test]

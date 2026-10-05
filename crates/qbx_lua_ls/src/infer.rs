@@ -569,6 +569,10 @@ fn native_type(name: &str) -> Type {
     if NATIVE_HANDLE_TYPES.contains(&name) {
         return Type::Handle(SmolStr::new(name));
     }
+    // The callbacks that natives take are written as LuaCATS types, as `fun(source: integer, ...)`.
+    if name.starts_with("fun(") {
+        return TypeParser::new(name).parse();
+    }
     Type::named(name)
 }
 

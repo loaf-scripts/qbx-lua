@@ -59,6 +59,29 @@ function PerformHttpRequest(url, cb, method, data, headers, options) end
 ---@return string? errorData
 function PerformHttpRequestAwait(url, method, data, headers, options) end
 
+---A request that `SetHttpHandler` receives, sent to `http://<server>/<resource>/<path>`.
+---@class HttpHandlerRequest
+---@field address string # The IP address of the sender.
+---@field headers table<string, string>
+---@field method string
+---@field path string # The path after the resource name, as `/ping`.
+---@field setDataHandler fun(handler: fun(data: string), binary?: 'binary') # Sets the function that receives the body of the request.
+---@field setCancelHandler fun(handler: fun()) # Sets the function called when the request is cancelled.
+local HttpHandlerRequest = {}
+
+---The response to a request that `SetHttpHandler` receives.
+---@class HttpHandlerResponse
+---@field writeHead fun(code: integer, headers?: table<string, string|string[]>) # Sets the status code and headers, once and before the other functions.
+---@field write fun(data: string) # Adds to the body without sending it.
+---@field send fun(data?: string) # Adds to the body and sends the response.
+local HttpHandlerResponse = {}
+
+---What the factory of `RegisterResourceBuildTaskFactory` returns.
+---@class ResourceBuildTask
+---@field shouldBuild fun(resourceName: string): boolean # Whether the resource needs building.
+---@field build fun(resourceName: string, cb: fun(success: boolean, status: string)) # Builds the resource, then calls `cb`.
+local ResourceBuildTask = {}
+
 ---Writes a structured entry to the server log that RCON clients and txAdmin can read.
 ---@param data table
 function RconLog(data) end
