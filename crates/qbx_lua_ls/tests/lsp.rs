@@ -4530,6 +4530,26 @@ local account = { name = 'Ann' }
 }
 
 #[test]
+fn missing_fields_are_not_reported_in_meta_files() {
+    let mut client = Client::start(fixture_root());
+    let declared = "\
+---@class Test.Config
+---@field Language string
+
+---@type Test.Config
+TestConfig = {}
+";
+    let missing = |client: &mut Client| -> Vec<u64> {
+        let found = client.diagnostics_for(SERVER);
+        found.into_iter().filter(|(code, _)| code == "missing-fields").map(|(_, line)| line).collect()
+    };
+    client.open_with(SERVER, declared);
+    assert_eq!(missing(&mut client), [4], "a script's table needs the fields");
+    client.change(SERVER, 2, &format!("---@meta\n\n{declared}"));
+    assert!(missing(&mut client).is_empty(), "a `---@meta` file only declares the type of `TestConfig`");
+}
+
+#[test]
 fn missing_fields_of_partial_classes_leave_out_inherited_fields() {
     let mut client = Client::start(fixture_root());
     const SHARED: &str = "myresource/shared/config.lua";

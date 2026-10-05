@@ -913,6 +913,9 @@ union that also lists an array, a `table<K, V>`, a tuple or a type that takes an
 `Dog|Cat` for an entry of `Dog[]|Cat[]`. As in TypeScript and unlike in lua-language-server, the
 tables held by one that may be a `table` or `any`, as for `Dog[]|table`, are not checked.
 
+Unlike in lua-language-server, nothing is reported in a `---@meta` file. It never runs, so a
+`---@type Config` above `Config = {}` there only declares the type of `Config`.
+
 ## Local types
 
 `cast-local-type` reports an assignment that gives a local without a `---@type` or `@param` a value

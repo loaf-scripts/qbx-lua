@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use qbx_lua_analysis::env::is_meta_file;
 use qbx_lua_analysis::scope::Resolved;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
@@ -1059,8 +1060,13 @@ impl<'c> Visitor<'c> for Innermost {
 /// are required too, as in LuaLS, and a class marked `(partial)` requires only the fields it
 /// declares itself. A table typed as a union of classes and shapes has to set the required fields
 /// of one of them, and its message has a line for each, as LuaLS's does. A table that may be an
-/// array, a map or a tuple is not reported, but the tables it holds are.
+/// array, a map or a tuple is not reported, but the tables it holds are. Nothing is reported in a
+/// `---@meta` file, which never runs: there, `---@type Config` above `Config = {}` only declares
+/// the type of `Config`.
 pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
+    if is_meta_file(infer.ctx.source, chunk) {
+        return Vec::new();
+    }
     let classes = Classes::new(infer);
     required_tables(infer, chunk)
         .into_iter()
