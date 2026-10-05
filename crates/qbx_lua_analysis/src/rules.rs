@@ -243,7 +243,7 @@ pub static RULES: &[Rule] = &[
     rule(MANIFEST_MISSING_DEPENDENCY, Manifest, INFO, false, "Exports of another resource are used but the resource is not listed under dependencies, so load order is not guaranteed."),
     rule(EVENT_ARGUMENT_COUNT, FiveM, WARN, false, "An event is triggered with more arguments than its handler takes; the extra values are lost."),
     rule(EVENT_MISSING_ARGUMENTS, FiveM, INFO, false, "An event is triggered with fewer arguments than its handler declares; fine for optional parameters, a bug otherwise."),
-    rule(EVENT_WRONG_SIDE, FiveM, WARN, false, "An event is triggered towards a side where nothing handles it, while a handler exists on the other side."),
+    rule(EVENT_WRONG_SIDE, FiveM, WARN, false, "An event is triggered towards a side where nothing handles it, while a handler exists on the other side, or a handler waits for an event that FiveM only triggers on the other side."),
     rule(EXPORT_ARGUMENT_COUNT, FiveM, WARN, false, "An export is called with more arguments than the exported function accepts."),
     rule(UNKNOWN_EXPORT, FiveM, INFO, false, "A resource that is part of the workspace does not register the export that is called."),
     rule(RESOURCE_NOT_FOUND, FiveM, INFO, false, "An export of a resource is called outside any condition, but the server's resources folder contains no such resource. The enclosing function may still never run."),

@@ -1534,6 +1534,10 @@ impl<'a> Infer<'a> {
         if (*index < 2 && self.on_cache_param(call).is_some()) || self.triggered_returns(call, *arg_index).is_some() {
             return None;
         }
+        if let Some(handler) = self.builtin_event_handler(call, *arg_index) {
+            let param = handler.params.get(*index)?;
+            return Some(if param.optional && self.strict { param.ty.clone().optional() } else { param.ty.clone() });
+        }
         let (base, method, exprs) = match &call.kind {
             ExprKind::Call { callee, args, .. } => (callee, None, args),
             ExprKind::MethodCall { base, method, args, .. } => (base, Some(method), args),
@@ -1570,6 +1574,9 @@ impl<'a> Infer<'a> {
     pub fn declared_fun_type(&self, func: &FuncBody) -> Option<Arc<FunType>> {
         let expected = self.ctx.functions.get(&func.params_span.start)?;
         let (ty, callee_generics) = match *expected {
+            Expected::Arg { call, arg_index } if self.builtin_event_handler(call, arg_index).is_some() => {
+                (self.expected_type(expected)?, Vec::new())
+            }
             Expected::Arg { call, arg_index } => {
                 let (base, method, args) = match &call.kind {
                     ExprKind::Call { callee, args, .. } => (callee, None, args),
@@ -1659,6 +1666,25 @@ impl<'a> Infer<'a> {
         (!handler.returns.is_empty()).then(|| handler.returns.clone())
     }
 
+    /// The handler that `AddEventHandler('onResourceStop', function(resourceName) end)` registers
+    /// for an event that FiveM itself triggers on the side of the call, when argument `arg_index` of
+    /// `call` is that function.
+    fn builtin_event_handler(&self, call: &Expr, arg_index: usize) -> Option<Arc<FunType>> {
+        let ExprKind::Call { callee, args, .. } = &call.kind else { return None };
+        let registers = matches!(
+            callee.dotted_path().as_deref(),
+            Some("AddEventHandler" | "RegisterNetEvent" | "RegisterServerEvent")
+        );
+        if arg_index != 1 || !registers {
+            return None;
+        }
+        let name = args.first()?.as_string()?;
+        let side = self.side_at(call.span.start);
+        let mut events = self.index.builtin_events();
+        let (field, _) = events.find(|(field, field_side)| field.name == *name && applies_on(*field_side, side))?;
+        self.fun_of(&field.ty)
+    }
+
     /// The function type that a function literal written where `expected` says has to be.
     pub fn expected_fun(&self, expected: &Expected) -> Option<Arc<FunType>> {
         self.fun_of(&self.expected_type(expected)?)
@@ -1668,6 +1694,9 @@ impl<'a> Infer<'a> {
     fn expected_type(&self, expected: &Expected) -> Option<Type> {
         match *expected {
             Expected::Arg { call, arg_index } => {
+                if let Some(handler) = self.builtin_event_handler(call, arg_index) {
+                    return Some(Type::Fun(handler));
+                }
                 let (fun, args, via_method) = self.call_parts(call)?;
                 let (skip_params, skip_args) = fun.call_offsets(via_method);
                 let param = &fun.params.get((arg_index + skip_params).checked_sub(skip_args)?)?.ty;

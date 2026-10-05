@@ -1163,6 +1163,13 @@ impl Index {
         self.class_slots(name).find(|(_, class)| applies_on(class.side, side))
     }
 
+    /// The events that FiveM itself triggers, as the fields of the `CfxEvents` stub class declare the
+    /// handlers that `AddEventHandler` registers for them, each with the only side that triggers it.
+    pub fn builtin_events(&self) -> impl Iterator<Item = (&Symbol, Option<Side>)> {
+        let class = self.class("CfxEvents", None).map(|(_, class)| class);
+        class.into_iter().flat_map(|class| class.fields.iter().zip(class.field_sides.iter().copied()))
+    }
+
     /// Whether any class is declared `(strict)` or `(exact)`.
     pub fn has_strict_class(&self) -> bool {
         self.files().any(|(_, f)| f.index.classes.iter().any(|class| class.strict == Some(true)))

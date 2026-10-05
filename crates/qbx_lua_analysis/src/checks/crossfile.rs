@@ -158,6 +158,26 @@ impl CrossFile<'_, '_> {
         }
     }
 
+    /// `AddEventHandler('playerDropped', ...)` in client code: FiveM triggers that event on the
+    /// server only, so the handler never runs.
+    fn builtin_handler(&mut self, call: &str, expr: &Expr, args: &[Expr]) {
+        if !matches!(call, "AddEventHandler" | "RegisterNetEvent" | "RegisterServerEvent") {
+            return;
+        }
+        let Some(name_arg) = args.first() else { return };
+        let Some(name) = name_arg.as_string() else { return };
+        let Some(event) = qbx_fivem_data::builtin_event(name) else { return };
+        let Some(own_side) = self.regions.effective(expr.span.start, self.input.side) else { return };
+        if event.side.is_available_on(own_side) {
+            return;
+        }
+        self.sink.report(
+            rules::EVENT_WRONG_SIDE,
+            name_arg.span,
+            format!("'{name}' is a {} event; this {} handler never runs", event.side.label(), own_side.label()),
+        );
+    }
+
     /// Whether this file also delivers the event to the other side with a network trigger.
     fn mirrors_over_network(&self, event: &str) -> bool {
         ["TriggerServerEvent", "TriggerClientEvent", "TriggerLatentServerEvent", "TriggerLatentClientEvent"].iter().any(
@@ -327,9 +347,12 @@ impl<'ast> Visitor<'ast> for CrossFile<'_, '_> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
         match &expr.kind {
             ExprKind::Call { callee, args, .. } => {
-                if let (Some(refs), ExprKind::Name(name)) = (self.input.crossrefs, &callee.kind) {
+                if let ExprKind::Name(name) = &callee.kind {
                     if self.is_global(name) {
-                        self.trigger(refs, &name.text, expr, args);
+                        self.builtin_handler(&name.text, expr, args);
+                        if let Some(refs) = self.input.crossrefs {
+                            self.trigger(refs, &name.text, expr, args);
+                        }
                     }
                 }
                 // `pcall(function() return exports.x:Get() end)` probes for an optional resource.

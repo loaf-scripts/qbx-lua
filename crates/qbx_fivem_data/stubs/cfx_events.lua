@@ -1,0 +1,141 @@
+---@meta
+
+---The events that FiveM itself triggers. Each field is the handler that `AddEventHandler` registers
+---for the event of its name; `(client)` and `(server)` name the only side that triggers it.
+---@class CfxEvents
+---@field onResourceStart fun(resourceName: string) # Triggered immediately when a resource has started. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onResourceStart/)
+---@field onResourceStarting fun(resourceName: string) # Triggered when a resource is trying to start; `CancelEvent()` prevents it from starting. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onResourceStarting/)
+---@field onResourceStop fun(resourceName: string) # Triggered immediately when a resource is stopping. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onResourceStop/)
+---@field (client) onClientResourceStart fun(resourceName: string) # Queued after a resource has started. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onClientResourceStart/)
+---@field (client) onClientResourceStop fun(resourceName: string) # Triggered after a resource has stopped. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onClientResourceStop/)
+---@field (client) gameEventTriggered fun(name: string, data: integer[]) # Triggered when the game triggers an internal network event, such as `CEventNetworkEntityDamage`, with its type-specific data. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/gameEventTriggered/)
+---@field (client) entityDamaged fun(victim: integer, culprit: integer, weapon: integer, baseDamage: number) # Triggered when an entity is damaged locally; `victim` and `culprit` are 0 when there is none, and `weapon` is a weapon hash. [Docs](https://docs.fivem.net/docs/scripting-reference/events/client-events/#entitydamaged)
+---@field (client) mumbleConnected fun(address: string, reconnecting: boolean) # Triggered when the game completes (re)connecting to a Mumble server. [Docs](https://docs.fivem.net/docs/scripting-reference/events/client-events/#mumbleconnected)
+---@field (client) mumbleDisconnected fun(address: string) # Triggered when the game disconnects from a Mumble server without being reconnected. [Docs](https://docs.fivem.net/docs/scripting-reference/events/client-events/#mumbledisconnected)
+---@field (client) populationPedCreating fun(x: number, y: number, z: number, model: integer, overrideCalls: PopulationPedOverrides) # Triggered when the population system is creating a ped; `CancelEvent()` stops it, and `overrideCalls` changes its model or position. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/populationPedCreating/)
+---@field (server) onServerResourceStart fun(resourceName: string) # Queued after a resource has started. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#onserverresourcestart)
+---@field (server) onServerResourceStop fun(resourceName: string) # Triggered after a resource has stopped. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#onserverresourcestop)
+---@field (server) onResourceListRefresh fun() # Triggered when the `refresh` command completes. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#onresourcelistrefresh)
+---@field (server) playerConnecting fun(playerName: string, setKickReason: fun(reason: string), deferrals: PlayerConnectingDeferrals) # Triggered when a player is trying to connect; `source` is their temporary id. `CancelEvent()` refuses them with the reason given to `setKickReason`. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/playerConnecting/)
+---@field (server) playerJoining fun(oldID: string) # Triggered when a player has their final server id, which `source` holds; `oldID` is the temporary id of `playerConnecting`. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#playerjoining)
+---@field (server) playerDropped fun(reason: string, resourceName: string, clientDropReason: integer) # Triggered when a player leaves the server; `source` is the player. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/playerDropped/)
+---@field (server) playerEnteredScope fun(data: PlayerScopeData) # Triggered when a player enters the scope of another player. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#playerenteredscope)
+---@field (server) playerLeftScope fun(data: PlayerScopeData) # Triggered when a player leaves the scope of another player. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#playerleftscope)
+---@field (server) entityCreating fun(handle: integer) # Triggered when an entity is being created; `CancelEvent()` stops it. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#entitycreating)
+---@field (server) entityCreated fun(handle: integer) # Triggered when an entity has been created. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#entitycreated)
+---@field (server) entityRemoved fun(entity: integer) # Triggered when an entity is removed. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#entityremoved)
+---@field (server) onEntityBucketChange fun(entity: integer, bucket: integer, oldBucket: integer) # Triggered when an entity moves to another routing bucket. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onEntityBucketChange/)
+---@field (server) onPlayerBucketChange fun(player: string, bucket: integer, oldBucket: integer) # Triggered when a player moves to another routing bucket. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onPlayerBucketChange/)
+---@field (server) weaponDamageEvent fun(sender: string, data: WeaponDamageEventData) # Triggered when a client wants to damage an entity that another player owns; `CancelEvent()` blocks the damage. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#weapondamageevent)
+---@field (server) startProjectileEvent fun(sender: string, data: StartProjectileEventData) # Triggered when a client creates a projectile; `CancelEvent()` blocks it. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#startprojectileevent)
+---@field (server) ptFxEvent fun(sender: string, data: PtFxEventData) # Triggered when a client creates a particle effect; `CancelEvent()` blocks it. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#ptfxevent)
+---@field (server) removeAllWeaponsEvent fun(sender: string, data: RemoveAllWeaponsEventData) # Triggered when a client removes all weapons from a ped that another player owns; `CancelEvent()` blocks it. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#removeallweaponsevent)
+---@field (server) respawnPlayerPedEvent fun(sender: string, data: RespawnPlayerPedEventData) # Triggered when a player respawns. Needs OneSync. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/respawnPlayerPedEvent/)
+---@field (server) vehicleComponentControlEvent fun(sender: string, data: VehicleComponentControlEventData) # Triggered when a ped takes control of a component of a vehicle, such as a seat. Needs OneSync. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/vehicleComponentControlEvent/)
+---@field (server) rconCommand fun(command: string, arguments: string[]) # Deprecated: use `RegisterCommand` with `restricted` instead. Triggered when a command is executed over RCON. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/rconCommand/)
+
+---The functions of `populationPedCreating` that change the ped being created.
+---@class PopulationPedOverrides
+---@field setModel fun(model: string|integer) # Creates the ped with this model, a name or hash.
+---@field setPosition fun(x: number, y: number, z: number) # Creates the ped at this position.
+
+---Controls the connection of a player from `playerConnecting`. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/playerConnecting/#deferring-connections)
+---@class PlayerConnectingDeferrals
+---@field defer fun() # Holds the connection until `done` is called. Wait a tick before calling the other functions.
+---@field update fun(message: string) # Shows a progress message to the connecting player.
+---@field presentCard fun(card: string|table, cb?: fun(data: any, rawData: string)) # Shows an Adaptive Card, given as a table or as JSON, and calls `cb` when the player submits it.
+---@field handover fun(data: table<string, any>) # Passes data to the connecting client.
+---@field done fun(failureReason?: string) # Lets the player connect, or refuses them with `failureReason`.
+
+---The players of `playerEnteredScope` and `playerLeftScope`, as server ids.
+---@class PlayerScopeData
+---@field for string # The player whose scope the other player entered or left.
+---@field player string # The player that entered or left the scope.
+
+---What a client sends with `weaponDamageEvent`. Some fields differ between game builds.
+---@class WeaponDamageEventData
+---@field damageType integer
+---@field weaponType integer # The hash of the weapon.
+---@field weaponDamage number
+---@field damageFlags integer
+---@field damageTime integer
+---@field willKill boolean
+---@field hitGlobalId integer # The network id of the entity hit.
+---@field hitGlobalIds integer[] # The network ids of the entities hit.
+---@field hitComponent integer
+---@field parentGlobalId integer # The network id of the entity that deals the damage.
+---@field overrideDefaultDamage boolean
+---@field hitEntityWeapon boolean
+---@field hitWeaponAmmoAttachment boolean
+---@field silenced boolean
+---@field hasActionResult boolean
+---@field actionResultName integer
+---@field actionResultId integer
+---@field isNetTargetPos boolean
+---@field localPosX number
+---@field localPosY number
+---@field localPosZ number
+---@field hasVehicleData boolean
+---@field tyreIndex integer
+---@field suspensionIndex integer
+---@field hasImpactDir boolean
+---@field impactDirX number
+---@field impactDirY number
+---@field impactDirZ number
+---@field [string] any
+
+---What a client sends with `startProjectileEvent`.
+---@class StartProjectileEventData
+---@field ownerId integer # The network id of the entity that fires.
+---@field projectileHash integer
+---@field weaponHash integer
+---@field initialPositionX number
+---@field initialPositionY number
+---@field initialPositionZ number
+---@field firePositionX number
+---@field firePositionY number
+---@field firePositionZ number
+---@field targetEntity integer
+---@field effectGroup integer
+---@field commandFireSingleBullet boolean
+---@field throwTaskSequence integer
+---@field [string] any
+
+---What a client sends with `ptFxEvent`.
+---@class PtFxEventData
+---@field effectHash integer
+---@field assetHash integer
+---@field posX number
+---@field posY number
+---@field posZ number
+---@field offsetX number
+---@field offsetY number
+---@field offsetZ number
+---@field rotX number
+---@field rotY number
+---@field rotZ number
+---@field scale number
+---@field axisBitset integer
+---@field isOnEntity boolean
+---@field entityNetId integer
+---@field [string] any
+
+---What a client sends with `removeAllWeaponsEvent`.
+---@class RemoveAllWeaponsEventData
+---@field pedId integer # The network id of the ped.
+
+---What a client sends with `respawnPlayerPedEvent`. Some fields differ between game builds.
+---@class RespawnPlayerPedEventData
+---@field posX number
+---@field posY number
+---@field posZ number
+---@field [string] any
+
+---What a client sends with `vehicleComponentControlEvent`.
+---@class VehicleComponentControlEventData
+---@field vehicleGlobalId integer # The network id of the vehicle.
+---@field pedGlobalId integer # The network id of the ped.
+---@field componentIndex integer
+---@field request boolean
+---@field componentIsSeat boolean
+---@field pedInSeat integer # The network id of the ped in the seat, or 0.

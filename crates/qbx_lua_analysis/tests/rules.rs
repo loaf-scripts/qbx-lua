@@ -115,6 +115,24 @@ fn events_are_checked_against_their_handlers() {
 }
 
 #[test]
+fn handlers_of_builtin_events_of_the_other_side() {
+    let none = Vec::<&str>::new();
+    let dropped = "AddEventHandler('playerDropped', function() end)";
+    assert_eq!(project(dropped, Side::Client, &[]), ["fivem/event-wrong-side"]);
+    assert_eq!(project(dropped, Side::Server, &[]), none);
+    assert_eq!(
+        project("RegisterNetEvent('onClientResourceStart', function() end)", Side::Server, &[]),
+        ["fivem/event-wrong-side"]
+    );
+    let stop = "AddEventHandler('onResourceStop', function() end)";
+    assert_eq!(project(stop, Side::Client, &[]), none, "both sides trigger it");
+    let shared = |source: &str| codes_in_project(source, &FileConfig::default(), None, &[], None);
+    assert_eq!(shared(dropped), none, "a shared file may run on the server");
+    assert_eq!(shared(&format!("if IsDuplicityVersion() then\n    {dropped}\nend")), none);
+    assert_eq!(shared(&format!("if not IsDuplicityVersion() then\n    {dropped}\nend")), ["fivem/event-wrong-side"]);
+}
+
+#[test]
 fn event_checks_distinguish_own_handlers_from_other_resources() {
     let none = Vec::<&str>::new();
     let own_handler = ("hud", Some(Side::Client), "RegisterNetEvent('hud:update', function(value) print(value) end)");

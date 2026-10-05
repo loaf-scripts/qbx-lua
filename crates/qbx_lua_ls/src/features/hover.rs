@@ -927,6 +927,22 @@ pub(super) fn event_handler_signature(event: &EventDef) -> Option<String> {
     Some(payload.signature(""))
 }
 
+/// The name of an event that FiveM itself triggers, as `'playerDropped'` in
+/// `AddEventHandler('playerDropped', ...)`: the handler it calls, the side that triggers it and what
+/// it is for, in place of the handlers that the workspace registers for it.
+fn builtin_event_hover(infer: &Infer, name: &str) -> Option<String> {
+    let (field, side) = infer.index.builtin_events().find(|(field, _)| field.name == name)?;
+    let handler = infer.fun_of(&field.ty)?;
+    let kind = side.map_or("event".to_string(), |side| format!("{} event", side.label()));
+    let signature = handler.signature(name);
+    let mut out = lua_block(&format!("({kind}) {}", signature.strip_prefix("function ").unwrap_or(&signature)));
+    if let Some(doc) = &field.doc {
+        out.push_str("\n\n");
+        out.push_str(doc);
+    }
+    Some(out)
+}
+
 fn string_hover(ws: &Workspace, infer: &Infer, doc: &Document, offset: u32) -> Option<(String, Span)> {
     let located = locate(&doc.chunk, offset);
     let (string, call) = located.string?;
@@ -943,6 +959,11 @@ fn string_hover(ws: &Workspace, infer: &Infer, doc: &Document, offset: u32) -> O
         return Some((format!("`{value}` · locales/{file}\n\n{text}"), string.span));
     }
     let context = event_string_context(infer, call);
+    if context.as_ref().is_some_and(|context| context.family == EventFamily::Native) {
+        if let Some(text) = builtin_event_hover(infer, value) {
+            return Some((text, string.span));
+        }
+    }
     let registrations: Vec<_> = ws
         .index
         .events()

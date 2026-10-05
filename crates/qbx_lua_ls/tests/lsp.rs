@@ -12182,6 +12182,34 @@ fn event_completion_follows_the_call_direction() {
 }
 
 #[test]
+fn builtin_events_complete_hover_and_type_their_handlers() {
+    let mut client = Client::start(fixture_root());
+    client.open_with(CLIENT, "AddEventHandler('')");
+    let labels = client.completion_labels(CLIENT, 0, 17);
+    for name in ["onClientResourceStart", "onResourceStop", "gameEventTriggered"] {
+        assert!(labels.iter().any(|label| label == name), "the client triggers {name}: {labels:?}");
+    }
+    assert!(!labels.iter().any(|label| label == "playerDropped"), "only the server triggers it: {labels:?}");
+    client.open_with(SERVER, "AddEventHandler('')");
+    let labels = client.completion_labels(SERVER, 0, 17);
+    assert!(labels.iter().any(|label| label == "playerDropped"), "{labels:?}");
+    assert!(!labels.iter().any(|label| label == "onClientResourceStart"), "{labels:?}");
+
+    let text = "AddEventHandler('playerDropped', function(reason)\n    print(reason)\nend)";
+    client.change(SERVER, 2, text);
+    let hover = client.hover_text(SERVER, 0, 20);
+    let signature = "(server event) playerDropped(reason: string, resourceName: string, clientDropReason: integer)";
+    assert!(hover.contains(signature), "{hover}");
+    assert!(hover.contains("`source` is the player"), "{hover}");
+    let hover = client.hover_text(SERVER, 1, 11);
+    assert!(hover.contains("reason: string"), "the handler takes the parameters FiveM passes: {hover}");
+    assert_eq!(client.diagnostics_for(SERVER), []);
+
+    client.change(CLIENT, 2, text);
+    assert_eq!(client.diagnostics_for(CLIENT), [("fivem/event-wrong-side".to_string(), 0)]);
+}
+
+#[test]
 fn event_completion_replaces_the_whole_name_across_colons() {
     for snippets in [false, true] {
         let mut client = Client::start_with_capabilities(

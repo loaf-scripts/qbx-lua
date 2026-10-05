@@ -208,7 +208,43 @@ pub static STUBS: &[Stub] = &[
     stub("glm.lua", Side::Shared, false, include_str!("../stubs/glm.lua")),
     stub("cfx_client.lua", Side::Client, false, include_str!("../stubs/cfx_client.lua")),
     stub("cfx_server.lua", Side::Server, false, include_str!("../stubs/cfx_server.lua")),
+    stub("cfx_events.lua", Side::Shared, false, EVENTS_STUB),
 ];
+
+static EVENTS_STUB: &str = include_str!("../stubs/cfx_events.lua");
+
+/// An event that FiveM itself triggers, such as `onResourceStop` or `playerDropped`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuiltinEvent {
+    pub name: &'static str,
+    /// The only side that triggers it, or `Shared` when both do.
+    pub side: Side,
+}
+
+/// The events that FiveM itself triggers, as the `---@field` lines of the `CfxEvents` class in
+/// `cfx_events.lua` declare them: a `(client)` or `(server)` before the name scopes one to that side.
+pub fn builtin_events() -> &'static [BuiltinEvent] {
+    static EVENTS: OnceLock<Vec<BuiltinEvent>> = OnceLock::new();
+    EVENTS.get_or_init(|| {
+        let class = EVENTS_STUB.lines().skip_while(|line| *line != "---@class CfxEvents").skip(1);
+        class
+            .map_while(|line| line.strip_prefix("---@field "))
+            .filter_map(|field| {
+                let (side, field) = match field.split_once(") ") {
+                    Some(("(client", rest)) => (Side::Client, rest),
+                    Some(("(server", rest)) => (Side::Server, rest),
+                    _ => (Side::Shared, field),
+                };
+                Some(BuiltinEvent { name: field.split(' ').next()?, side })
+            })
+            .collect()
+    })
+}
+
+/// The event `name` when FiveM itself triggers it.
+pub fn builtin_event(name: &str) -> Option<BuiltinEvent> {
+    builtin_events().iter().find(|event| event.name == name).copied()
+}
 
 pub struct KnownImport {
     pub path: &'static str,
@@ -287,6 +323,17 @@ mod tests {
         assert!(is_hash_native_name("N_0xabcdef12"));
         assert!(!is_hash_native_name("N_0x"));
         assert!(!is_hash_native_name("Foo"));
+    }
+
+    #[test]
+    fn builtin_events_keep_their_side() {
+        let side = |name| builtin_event(name).map(|event| event.side);
+        assert_eq!(side("onResourceStop"), Some(Side::Shared));
+        assert_eq!(side("onClientResourceStart"), Some(Side::Client));
+        assert_eq!(side("playerDropped"), Some(Side::Server));
+        assert_eq!(side("rconCommand"), Some(Side::Server));
+        assert_eq!(side("setModel"), None, "the fields of other classes are no events");
+        assert_eq!(builtin_events().len(), 30);
     }
 
     #[cfg(feature = "docs")]

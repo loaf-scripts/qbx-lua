@@ -1260,6 +1260,13 @@ checks report excess arguments and unknown names. Unavailable resources and comp
 these checks. A diagnostic about missing event arguments may describe an intentional optional
 parameter.
 
+The events that FiveM itself triggers, such as `onResourceStop`, `playerDropped` and
+`onClientResourceStart`, are known without any handler in the workspace. Completion in
+`AddEventHandler('` and `RegisterNetEvent('` lists those of the code's side, hovering the name shows
+the handler FiveM calls and what the event is for, and the parameters of the handler take the types
+FiveM passes, as `resourceName: string`. A handler for an event that only the other side triggers,
+such as `playerDropped` in client code, reports `fivem/event-wrong-side`.
+
 qbx-lua-ls also takes the type of a resource's exports from LuaLS definitions:
 `---@type PhoneExports` above `exports.phone = {}` or `exports['phone'] = {}`, or
 `---@class qbx_core` above `exports.qbx_core = {}` with methods such as

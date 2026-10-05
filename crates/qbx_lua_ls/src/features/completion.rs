@@ -24,6 +24,7 @@ use crate::document::Document;
 use crate::index::{EnumTable, EventFamily, EventKind, FileOrigin, SymbolKind};
 use crate::infer::{native_fun_type, Infer, MemberInfo};
 use crate::locate::{locate, string_content_span};
+use crate::luacats::applies_on;
 use crate::types::{CallbackRole, DescribedValue, FunType, Param, Type};
 use crate::workspace::Workspace;
 
@@ -143,6 +144,26 @@ fn item(label: &str, kind: CompletionItemKind, sort_group: u8) -> CompletionItem
         sort_text: Some(format!("{sort_group}{label}")),
         ..CompletionItem::default()
     }
+}
+
+/// The events that FiveM itself triggers on the side of `call`, which registers a handler, each
+/// with the handler it calls and what it is for.
+fn builtin_event_items(infer: &Infer, call: &Expr, range: Range) -> Vec<CompletionItem> {
+    let side = infer.side_at(call.span.start);
+    let events = infer.index.builtin_events().filter(|(_, event_side)| applies_on(*event_side, side));
+    events
+        .map(|(field, event_side)| {
+            let mut out = item(&field.name, CompletionItemKind::EVENT, 0);
+            if range.start.line == range.end.line {
+                out.text_edit = Some(TextEdit { range, new_text: field.name.to_string() }.into());
+            }
+            let side = event_side.map_or(String::new(), |side| format!(" ({})", side.label()));
+            let handler = infer.fun_of(&field.ty).map(|handler| format!(" · {}", handler.signature("")));
+            out.detail = Some(format!("FiveM{side}{}", handler.unwrap_or_default()));
+            out.documentation = field.doc.as_ref().map(|d| Documentation::MarkupContent(markdown(d.to_string())));
+            out
+        })
+        .collect()
 }
 
 /// Snippets sort ahead of the plain name they share a label with, otherwise accepting the first
@@ -864,11 +885,22 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
                 }
             }
         }
+        // FiveM triggers its own events, such as `playerDropped`, whether or not the workspace
+        // handles them yet; they stand in for the handlers it registers.
+        let registers = context.family == EventFamily::Native && target_side.is_none();
+        let mut items = match registers {
+            true => with_infer(ws, doc, |infer| builtin_event_items(infer, call, range)),
+            false => Vec::new(),
+        };
+        let builtin: FxHashSet<SmolStr> = match registers {
+            true => ws.index.builtin_events().map(|(field, _)| field.name.clone()).collect(),
+            false => FxHashSet::default(),
+        };
         let candidates = |strict: bool| {
             let mut seen = FxHashSet::default();
             ws.index
                 .events()
-                .filter(|(_, event)| event.family == context.family)
+                .filter(|(_, event)| event.family == context.family && !builtin.contains(&event.name))
                 .filter(|(_, e)| (e.kind == EventKind::Callback) == wants_callbacks || e.kind == EventKind::Trigger)
                 .filter(|(_, e)| !strict || (e.kind != EventKind::Trigger && handled_on_target(e.side)))
                 .filter(|(_, event)| !context.framework() || context.accepts_registration(event))
@@ -895,7 +927,8 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
                 })
                 .collect::<Vec<_>>()
         };
-        return candidates(target_side.is_some());
+        items.extend(candidates(target_side.is_some()));
+        return items;
     }
     let literals = || with_infer(ws, doc, |infer| literal_items(infer, call, arg_index, range, quote));
     let Some(path) = path else { return literals() };
