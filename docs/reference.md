@@ -248,8 +248,13 @@ registrations inside these regions use that effective side.
 FiveM only loads the `io` and `os` libraries on the server. `fivem/native-wrong-side` reports them
 in client scripts, and in shared scripts too, since those also run on the client, unless one of
 these guards keeps the code on the server. Scripts whose side is unknown are not reported. Natives
-and the other runtime globals of one side, such as `TriggerClientEvent`, are only reported in
-scripts or guarded code of the other side, as shared code usually calls them where they exist. In
+and the other runtime globals of one side, such as `TriggerClientEvent`, and the globals that the
+resource only defines in scripts of one side, such as a function of `client/utils.lua`, are reported
+in scripts or guarded code of the other side, and in code of a shared script that runs while it
+loads: outside functions, or in a thread that `CreateThread` or `SetTimeout` starts then. A function
+of a shared script is left to the side that calls it, as the callbacks of a shared config usually
+only run on the client. With [`strict`](#strict-mode), as TypeScript knows no sides, they are
+reported anywhere in a shared script that no guard keeps on their side. In
 client scripts, `os` and `io` are not completed and have no hover. Their functions are FiveM's:
 there is no `os.exit`, `io.input`, `io.output` or `io.read`, and CfxLua adds `os.createdir`,
 `io.readdir` and timers such as `os.nanotime`.
@@ -326,6 +331,9 @@ With `strict`:
   table declares for it, `nil` included, and a function without `@return` also gives the `nil` of
   running past the end of its body, and that of a `return nil` when it is called through `exports`.
   See [Nil checks](#nil-checks).
+- `fivem/native-wrong-side` reports the names of one side anywhere in a shared script that no guard
+  keeps on that side, not only in the code that runs while it loads. See
+  [Globals and client/server context](#globals-and-clientserver-context).
 - A local without `---@type` or `@param` may hold the `nil` that code running at other times gives
   it, such as `coords = nil` in another function, and a parameter of a callback marked optional,
   such as the `body?: string` of `PerformHttpRequest`, may hold `nil`. lua-language-server leaves

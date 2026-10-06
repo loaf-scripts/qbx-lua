@@ -228,7 +228,7 @@ pub static RULES: &[Rule] = &[
     rule(DEPRECATED, Style, WARN, false, "A deprecated runtime function is used or, in the language server, a global, field or method whose definitions are all marked @deprecated."),
     rule(LOOP_NEVER_YIELDS, FiveM, ERROR, false, "An infinite loop has no Wait and will freeze the game or server thread."),
     rule(SOURCE_AFTER_YIELD, FiveM, WARN, false, "The global 'source' is read after a yield or inside a deferred callback, where it may belong to another event."),
-    rule(NATIVE_WRONG_SIDE, FiveM, ERROR, false, "A native or runtime global is used on a side that lacks it, such as a client-only native in a server script, or the server's `os` and `io` libraries in client or unguarded shared code."),
+    rule(NATIVE_WRONG_SIDE, FiveM, ERROR, false, "A native or runtime global is used on a side that lacks it, such as a client-only native in a server script, the server's `os` and `io` libraries in client or unguarded shared code, or a name of one side in unguarded shared code that runs while the script loads, or anywhere with `strict`."),
     rule(CITIZEN_PREFIX, FiveM, INFO, true, "Citizen.Wait/CreateThread/SetTimeout have shorter global aliases."),
     rule(HASH_LITERAL, Performance, INFO, true, "GetHashKey/joaat of a string literal can be a compile-time `hash` literal."),
     rule(DEPRECATED_NATIVE_USAGE, Performance, INFO, true, "A slow legacy native pattern has a faster modern replacement."),

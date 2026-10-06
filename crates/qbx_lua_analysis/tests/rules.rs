@@ -327,7 +327,11 @@ fn server_libraries_are_missing_on_the_client() {
         ["'os' only exists on the server, but this shared script also runs on the client"]
     );
     assert_eq!(wrong_side("print(string.format('%d', math.floor(1.5)))", shared), none);
-    assert_eq!(wrong_side("TriggerClientEvent('a', -1)", shared), none, "CfxLua globals follow the calling side");
+    assert_eq!(
+        wrong_side("local function push() TriggerClientEvent('a', -1) end\nreturn push", shared),
+        none,
+        "CfxLua globals in functions follow the calling side"
+    );
 
     for source in [
         "if IsDuplicityVersion() then\n    print(os.time())\nend",
@@ -360,6 +364,70 @@ fn server_libraries_are_missing_on_the_client() {
     ] {
         assert_eq!(wrong_side(source, shared), [os_in_client_code], "only the client runs: {source}");
     }
+}
+
+#[test]
+fn shared_scripts_use_names_of_one_side_only_where_that_side_runs() {
+    let others = [
+        (Some(Side::Client), "function GetEmptyBlipCategory() return 12 end"),
+        (Some(Side::Server), "function SaveBlips() end"),
+        (Some(Side::Shared), "function Translate(key) return key end"),
+    ];
+    let wrong_side = |source: &str| call_messages("fivem/native-wrong-side", source, Some(Side::Shared), &others);
+    let strict = {
+        let mut config = FileConfig::default();
+        config.set_strict_default(true);
+        config
+    };
+    let strict_wrong_side =
+        |source: &str| call_messages_with("fivem/native-wrong-side", source, Some(Side::Shared), &others, &strict);
+    let none = Vec::<String>::new();
+    let client_global =
+        "'GetEmptyBlipCategory' is only defined by client scripts of this resource, but this is a shared script that also runs on the server";
+    let client_native = "native 'AddTextEntry' is client-only, but this shared script also runs on the server";
+
+    // Code that runs while the script loads runs on both sides.
+    assert_eq!(wrong_side("local category = GetEmptyBlipCategory()"), [client_global]);
+    assert_eq!(wrong_side("AddTextEntry('BLIP_CAT_12', 'Shops')"), [client_native]);
+    assert_eq!(
+        wrong_side("SaveBlips()"),
+        ["'SaveBlips' is only defined by server scripts of this resource, but this is a shared script that also runs on the client"]
+    );
+    assert_eq!(
+        wrong_side("TriggerClientEvent('a', -1)"),
+        ["'TriggerClientEvent' only exists on the server, but this shared script also runs on the client"]
+    );
+    assert_eq!(wrong_side("CreateThread(function() AddTextEntry('a', 'b') end)"), [client_native]);
+    assert_eq!(
+        wrong_side("SetTimeout(0, function()\n    Citizen.CreateThread(function() AddTextEntry('a', 'b') end)\nend)"),
+        [client_native],
+        "a thread that a thread started at load starts"
+    );
+    assert_eq!(wrong_side("print(Translate('a'), GetGameTimer())"), none, "both sides have them");
+
+    // A function is left to the side that calls it, except with `strict`.
+    for source in [
+        "function DrawBlips() AddTextEntry('a', 'b') return GetEmptyBlipCategory() end",
+        "Config = { Func = function() return GetEmptyBlipCategory() end }",
+        "RegisterNetEvent('blips:add', function() AddTextEntry('a', 'b') end)",
+        "local CreateThread = function(fn) return fn end\nCreateThread(function() AddTextEntry('a', 'b') end)",
+    ] {
+        assert_eq!(wrong_side(source), none, "{source}");
+    }
+    assert_eq!(
+        strict_wrong_side("function DrawBlips() AddTextEntry('a', 'b') return GetEmptyBlipCategory() end"),
+        [client_native, client_global]
+    );
+
+    // Guards keep the code on one side.
+    let client_code =
+        "if not IsDuplicityVersion() then\n    AddTextEntry('a', 'b')\n    print(GetEmptyBlipCategory())\nend";
+    assert_eq!(wrong_side(client_code), none);
+    assert_eq!(strict_wrong_side(client_code), none);
+    assert_eq!(
+        wrong_side("if IsDuplicityVersion() then\n    print(GetEmptyBlipCategory())\nend"),
+        ["'GetEmptyBlipCategory' is only defined by client scripts of this resource, but this is code that only runs on the server"]
+    );
 }
 
 #[test]
@@ -778,6 +846,16 @@ fn redundant_parameters(source: &str, side: Option<Side>, others: &[(Option<Side
 /// The messages of `code` for `source`, a `side` script of a resource whose other scripts are
 /// `others` (side, source).
 fn call_messages(code: &str, source: &str, side: Option<Side>, others: &[(Option<Side>, &str)]) -> Vec<String> {
+    call_messages_with(code, source, side, others, &FileConfig::default())
+}
+
+fn call_messages_with(
+    code: &str,
+    source: &str,
+    side: Option<Side>,
+    others: &[(Option<Side>, &str)],
+    config: &FileConfig,
+) -> Vec<String> {
     let chunk = parse(source);
     let resolution = resolve(&chunk);
     let summary = summarize(source, &chunk, &resolution);
@@ -799,13 +877,12 @@ fn call_messages(code: &str, source: &str, side: Option<Side>, others: &[(Option
         started_before: None,
         installed: None,
     };
-    let config = FileConfig::default();
     let input = FileInput {
         source,
         chunk: &chunk,
         resolution: &resolution,
         summary: &summary,
-        config: &config,
+        config,
         side,
         resource: Some(resource),
         crossrefs: None,

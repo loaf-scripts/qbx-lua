@@ -2,11 +2,14 @@ use qbx_fivem_data::{is_hash_native_name, native, Side, KNOWN_IMPORTS};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 
+use rustc_hash::FxHashSet;
+
+use super::fivem::DEFERRING_CALLS;
 use super::{FileInput, Sink};
 use crate::diagnostic::Tag;
 use crate::env::{builtins, is_meta_file};
 use crate::rules;
-use crate::scope::{GlobalRef, GlobalRefKind, Resolved, MAIN_CHUNK};
+use crate::scope::{GlobalRef, GlobalRefKind, Resolution, Resolved, MAIN_CHUNK};
 use crate::side_guard::{other, SideRegions};
 
 /// Fields ox_lib adds to standard library tables when it is imported.
@@ -26,12 +29,13 @@ const AMBIGUOUS_IMPORT_GLOBALS: &[&str] = &["player", "_", "require"];
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let regions = SideRegions::of(input.source, input.chunk);
+    let shared = SharedCode::of(input);
     // A definition file declares the globals that other code defines, such as ox_lib's `noop` and
     // `cache`, which lua-language-server does not report as lowercase or implicit globals.
     let meta = is_meta_file(input.source, input.chunk);
     for global in &input.resolution.globals {
         match global.kind {
-            GlobalRefKind::Read => check_read(input, global, &regions, sink),
+            GlobalRefKind::Read => check_read(input, global, &regions, &shared, sink),
             GlobalRefKind::Write | GlobalRefKind::FunctionDecl => check_definition(input, global, meta, sink),
         }
     }
@@ -56,20 +60,117 @@ fn defined_in_project(input: &FileInput, name: &str) -> bool {
     }
 }
 
-fn check_read(input: &FileInput, global: &GlobalRef, regions: &SideRegions, sink: &mut Sink) {
+/// The code of a shared script, which runs on both sides, as far as names that only one side has go.
+struct SharedCode {
+    /// The functions that run on every side the script loads on, as long as the side is not known.
+    load_time: Option<FxHashSet<u32>>,
+}
+
+impl SharedCode {
+    fn of(input: &FileInput) -> Self {
+        let shared = input.side == Some(Side::Shared) && !input.config.strict();
+        Self { load_time: shared.then(|| load_time_functions(input.resolution, input.chunk)) }
+    }
+
+    /// Whether the code at `global`, in an unguarded part of a shared script, runs on both sides.
+    /// With `strict`, as TypeScript knows no sides, any code may. Otherwise only code that runs
+    /// while the script loads does: outside function bodies, and in the functions that
+    /// `CreateThread` or `SetTimeout` start then. A function the script defines is left to the side
+    /// that calls it, as the callbacks of a shared config only one side calls are.
+    fn runs_on_both(&self, input: &FileInput, global: &GlobalRef) -> bool {
+        let Some(load_time) = &self.load_time else { return true };
+        let function = input.resolution.functions.get(global.func as usize);
+        global.func == MAIN_CHUNK || function.is_some_and(|function| load_time.contains(&function.span.start))
+    }
+}
+
+/// The functions, by where they start, that `CreateThread` or `SetTimeout` start while the script
+/// loads, also from such a function.
+fn load_time_functions(resolution: &Resolution, chunk: &Chunk) -> FxHashSet<u32> {
+    struct LoadTime<'a> {
+        resolution: &'a Resolution,
+        at_load: bool,
+        functions: FxHashSet<u32>,
+    }
+
+    impl<'ast> Visitor<'ast> for LoadTime<'_> {
+        fn visit_func_body(&mut self, func: &'ast FuncBody) {
+            let outer = std::mem::replace(&mut self.at_load, self.functions.contains(&func.span.start));
+            visit::walk_func_body(self, func);
+            self.at_load = outer;
+        }
+
+        fn visit_expr(&mut self, expr: &'ast Expr) {
+            if let (true, ExprKind::Call { callee, args, .. }) = (self.at_load, &expr.kind) {
+                if starts_thread(self.resolution, callee) {
+                    let started = args.iter().filter_map(|arg| match &arg.kind {
+                        ExprKind::Function(func) => Some(func.span.start),
+                        _ => None,
+                    });
+                    self.functions.extend(started);
+                }
+            }
+            visit::walk_expr(self, expr);
+        }
+    }
+
+    let mut finder = LoadTime { resolution, at_load: true, functions: FxHashSet::default() };
+    finder.visit_block(&chunk.block);
+    finder.functions
+}
+
+/// Whether `callee` is the global `CreateThread`, `SetTimeout` or one of their `Citizen` names.
+fn starts_thread(resolution: &Resolution, callee: &Expr) -> bool {
+    let mut root = callee;
+    while let ExprKind::Field { base, .. } = &root.kind {
+        root = base;
+    }
+    let ExprKind::Name(name) = &root.kind else { return false };
+    matches!(resolution.resolve_at(name.span.start), Some(Resolved::Global(_)))
+        && callee.dotted_path().is_some_and(|path| DEFERRING_CALLS.contains(&path.as_str()))
+}
+
+/// `fivem/native-wrong-side` for a global the resource defines in the scripts of one side only:
+/// read from code of a shared script that also runs on the other side, or that a guard keeps there.
+fn check_one_sided(input: &FileInput, global: &GlobalRef, guarded: Option<Side>, shared: &SharedCode, sink: &mut Sink) {
+    let (Some(resource), Some(Side::Shared)) = (&input.resource, input.side) else { return };
     let name = global.name.as_str();
-    if defined_in_project(input, name) || is_configured(input, name) {
+    let only = match (resource.env.defines(name, Some(Side::Client)), resource.env.defines(name, Some(Side::Server))) {
+        (true, false) => Side::Client,
+        (false, true) => Side::Server,
+        _ => return,
+    };
+    let place = match guarded {
+        Some(side) if side != only => format!("code that only runs on the {}", side.label()),
+        None if shared.runs_on_both(input, global) => {
+            format!("a shared script that also runs on the {}", other(only).label())
+        }
+        _ => return,
+    };
+    let message = format!("'{name}' is only defined by {} scripts of this resource, but this is {place}", only.label());
+    sink.report(rules::NATIVE_WRONG_SIDE, global.span, message);
+}
+
+fn check_read(input: &FileInput, global: &GlobalRef, regions: &SideRegions, shared: &SharedCode, sink: &mut Sink) {
+    let name = global.name.as_str();
+    if is_configured(input, name) {
         return;
     }
     let guarded = regions.side_at(global.span.start);
+    if defined_in_project(input, name) {
+        check_one_sided(input, global, guarded, shared, sink);
+        return;
+    }
     let side = guarded.or(input.side).unwrap_or(Side::Shared);
     let place = if guarded.is_some() { "code that only runs on the" } else { "a" };
     let unit = if guarded.is_some() { "" } else { " script" };
+    // A shared script also runs on the side that lacks a name, unless a guard keeps the code off it.
+    let unguarded_shared = guarded.is_none() && input.side == Some(Side::Shared);
     if let Some(builtin) = builtins().get(name) {
-        // A shared script also runs where a standard library is missing, unless a guard keeps the
-        // code off that side. Natives and CfxLua globals are left to the side calling the code.
+        // A standard library is missing anywhere on that side; other CfxLua globals, like natives,
+        // only where the code runs on both sides.
         let missing_from_shared =
-            builtin.library && builtin.side != Side::Shared && guarded.is_none() && input.side == Some(Side::Shared);
+            builtin.side != Side::Shared && unguarded_shared && (builtin.library || shared.runs_on_both(input, global));
         if !builtin.side.is_available_on(side) {
             sink.report(
                 rules::NATIVE_WRONG_SIDE,
@@ -107,6 +208,16 @@ fn check_read(input: &FileInput, global: &GlobalRef, regions: &SideRegions, sink
                 rules::NATIVE_WRONG_SIDE,
                 global.span,
                 format!("native '{name}' is {}-only, but this is {place} {}{unit}", native.side.label(), side.label()),
+            );
+        } else if native.side != Side::Shared && unguarded_shared && shared.runs_on_both(input, global) {
+            sink.report(
+                rules::NATIVE_WRONG_SIDE,
+                global.span,
+                format!(
+                    "native '{name}' is {}-only, but this shared script also runs on the {}",
+                    native.side.label(),
+                    other(native.side).label()
+                ),
             );
         }
         return;

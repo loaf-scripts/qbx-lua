@@ -11,7 +11,7 @@ use crate::rules;
 use crate::scope::Resolved;
 
 const CITIZEN_ALIASES: &[&str] = &["Wait", "CreateThread", "SetTimeout", "ClearTimeout"];
-const DEFERRING_CALLS: &[&str] =
+pub(super) const DEFERRING_CALLS: &[&str] =
     &["SetTimeout", "CreateThread", "Citizen.SetTimeout", "Citizen.CreateThread", "Citizen.CreateThreadNow"];
 const MAY_RUN_CALLBACKS: &[&str] =
     &["pcall", "xpcall", "load", "loadstring", "dofile", "require", "select", "assert", "error"];
