@@ -313,6 +313,9 @@ impl Server {
     }
 
     fn main_loop(&mut self) -> AnyResult<()> {
+        // A client may send nothing after `initialized`, as one that registers no file watchers has
+        // no request of the server to answer, so the files nobody has open are reported right away.
+        self.publish_if_idle();
         while let Ok(message) = self.connection.receiver.recv() {
             match message {
                 Message::Request(request) => {
@@ -334,12 +337,17 @@ impl Server {
                 }
                 Message::Response(_) => {}
             }
-            if self.connection.receiver.is_empty() {
-                self.isolated(Self::publish_dirty);
-                self.isolated(Self::publish_workspace);
-            }
+            self.publish_if_idle();
         }
         Ok(())
+    }
+
+    /// Publishes the diagnostics that changed once no message is waiting.
+    fn publish_if_idle(&mut self) {
+        if self.connection.receiver.is_empty() {
+            self.isolated(Self::publish_dirty);
+            self.isolated(Self::publish_workspace);
+        }
     }
 
     /// A bug in one request must not take the editor's language server down with it.

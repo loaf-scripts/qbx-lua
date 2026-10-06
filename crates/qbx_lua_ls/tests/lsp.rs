@@ -6617,6 +6617,18 @@ fn open_files_keep_their_hints_when_the_client_spells_uris_its_own_way() {
     assert_eq!(codes(&client, &indexed).unwrap(), ["lowercase-global"]);
 }
 
+#[test]
+fn closed_files_are_reported_when_the_client_sends_nothing_after_initialized() {
+    // A client that registers no file watchers has no request of the server to answer.
+    let mut client = Client::start_with_capabilities(fixture_root(), json!({}));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !client.diagnostics.values().any(|list| !list.as_array().unwrap().is_empty()) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let message = client.connection.receiver.recv_timeout(left).expect("no diagnostics were published");
+        client.handle_incoming(message);
+    }
+}
+
 /// The findings of `file` for the given codes as (code, line, message), sorted by line.
 fn findings(client: &mut Client, file: &str, codes: &[&str]) -> Vec<(String, u64, String)> {
     client.diagnostics_for(file);
