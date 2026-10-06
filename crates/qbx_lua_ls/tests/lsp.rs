@@ -2784,6 +2784,91 @@ fn many_functions_that_assign_the_same_locals_stay_fast() {
 }
 
 #[test]
+fn guards_narrow_the_fields_of_globals_until_something_may_change_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Logs
+---@field Enabled boolean
+---@field Service? string
+
+---@class Probe.Settings
+---@field Logs? Probe.Logs
+---@field Name? string
+---@field Framework? 'auto'|'esx'
+
+---@type Probe.Settings
+Settings = {}
+
+---@param text string
+local function show(text) print(text) end
+
+local function check()
+    if Settings.Name then
+        print(Settings.Name) -- held
+        show(Settings.Name)
+    end
+    print(Settings.Name) -- after
+    show(Settings.Name) -- unguarded
+    print(not Settings.Name or Settings.Name:lower())
+    if Settings.Framework == 'auto' or not Settings.Framework then
+        Settings.Framework = 'esx'
+    end
+    print(Settings.Framework) -- assigned
+    if Settings.Name then
+        reset(Settings)
+        print(Settings.Name) -- passed
+    end
+    if Settings.Name then
+        Wait(0)
+        print(Settings.Name) -- waited
+    end
+    if Settings.Name then
+        CreateThread(function()
+            print(Settings.Name) -- later
+        end)
+    end
+    if Settings.Name then
+        Settings = {}
+        print(Settings.Name) -- global assigned
+    end
+    if not Settings.Logs?.Enabled then return end
+    print(Settings.Logs) -- read through
+end
+check()
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("Name) -- held", "Name: string\n"),
+        ("Name) -- after", "Name: string?\n"),
+        // An assignment gives the part of the declared type that the value is: no `nil`.
+        ("Framework) -- assigned", "Framework: \"auto\"|\"esx\"\n"),
+        // A call that is given the table may change its fields, as may the code that runs while a
+        // call yields, or later in a function, or a new table that the global is given.
+        ("Name) -- passed", "Name: string?\n"),
+        ("Name) -- waited", "Name: string?\n"),
+        ("Name) -- later", "Name: string?\n"),
+        ("Name) -- global assigned", "Name: string?\n"),
+        // `?.` only reads a field from a table.
+        ("Logs) -- read through", "Logs: Probe.Logs {"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    client.set_strict(true);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil", "param-type-mismatch"]),
+        [(
+            "param-type-mismatch".to_string(),
+            line("show(Settings.Name) -- unguarded"),
+            "Cannot assign `string?` to parameter `text` of type `string`".to_string()
+        )],
+        "with `strict`, the fields of a global are checked through the guards before them, as those of locals are"
+    );
+}
+
+#[test]
 fn guards_narrow_the_fields_of_locals_until_something_may_change_them() {
     let mut client = Client::start(fixture_root());
     let text = "\

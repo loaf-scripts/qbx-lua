@@ -112,12 +112,10 @@ impl Finder<'_, '_> {
     }
 
     /// With `strict`, as TypeScript checks any expression, a field, key or call whose declared type
-    /// allows `nil` or `false` there, and `nil` written out. The fields read through a global, as
-    /// `Config.blips`, are left alone, as no guard narrows them.
+    /// allows `nil` or `false` there, and `nil` written out.
     fn check_expression(&mut self, operand: &Expr) {
         let message = match &operand.kind {
             ExprKind::Nil => "`nil` raises an error here".to_string(),
-            ExprKind::Field { .. } | ExprKind::Index { .. } if self.read_through_global(operand) => return,
             ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
                 let ty = self.declared.of(operand);
                 let Some(missing) = missing_value(&self.infer.expand_aliases(&ty, 0), |_| true) else { return };
@@ -126,16 +124,6 @@ impl Finder<'_, '_> {
             _ => return,
         };
         self.out.push((operand.span, message));
-    }
-
-    /// Whether `expr`, a field or key, is read through a global, as `Config.Blips.Shop` is.
-    fn read_through_global(&self, expr: &Expr) -> bool {
-        let mut base = expr;
-        while let ExprKind::Field { base: inner, .. } | ExprKind::Index { base: inner, .. } = &base.unparen().kind {
-            base = inner;
-        }
-        let ExprKind::Name(name) = &base.unparen().kind else { return false };
-        !matches!(self.infer.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Local(_)))
     }
 
     /// Reports the locals among `args` that may hold `nil` where each signature the call may use

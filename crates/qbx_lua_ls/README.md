@@ -271,10 +271,10 @@ are taken to change no local.
 
 ### Fields
 
-A guard on a field of a local, as `self.target`, `data.job.name` or `data["job"]`, narrows it like a
-local, which lua-language-server does not, and an assignment to one gives it the part of its
-declared type that the value is, as `entry.length = entry.length or 1` leaves a `number` of a
-`number?`:
+A guard on a field of a local or a global, as `self.target`, `data.job.name`, `data["job"]` or
+`Config.Logs.Service`, narrows it like a local, which lua-language-server does not, and an
+assignment to one gives it the part of its declared type that the value is, as
+`entry.length = entry.length or 1` leaves a `number` of a `number?`:
 
 ```lua
 ---@param data { job: Job? }
@@ -287,13 +287,14 @@ end
 
 Reading through a field tells that it holds a value too, so `data.job.grade` inside
 `if data.job.name then` reads from a `Job`. What a guard tells about a field holds until something
-may change it: an assignment to the local, or to a field of the same name of any table, as
-`other.job = nil` may set the same table through another name; a call that is given the local, a
+may change it: an assignment to the local or global, or to a field of the same name of any table,
+as `other.job = nil` may set the same table through another name; a call that is given it, a
 table the field is read through, a local copied from one of them or a table built with them, or an
 assignment to a key of one that is not known, as `reset(data)`, `data:reset()`, `reset(job)` after
 `local job = data.job`, `clearAll({ data })` or `data[key] = nil`; a call that yields; and a loop
 whose code may do any of these before it starts again. A function does not see what the guards
-around it tell about fields, as it runs later. Other calls are taken to change no field, and an
+around it tell about fields, as it runs later. Other calls are taken to change no field, as
+TypeScript takes them, although the code of another file may assign the fields of a global, and an
 assignment to a field still has to store a value of the type the field is declared with.
 
 ### Casts

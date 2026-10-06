@@ -297,6 +297,22 @@ type Values = Rc<[Version]>;
 /// The keys that a field of a local is read through, as `job` and `name` for `data.job.name`.
 type Keys = Box<[SmolStr]>;
 
+/// What a tracked field is read from: a local, or a global by its name, as `Config` is for
+/// `Config.Logs.Service`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Root {
+    Local(LocalId),
+    Global(SmolStr),
+}
+
+/// The root that `name` reads fields from.
+fn name_root(resolution: &Resolution, name: &Name) -> Root {
+    match resolution.resolve_at(name.span.start) {
+        Some(Resolved::Local(local)) => Root::Local(local),
+        _ => Root::Global(name.text.clone()),
+    }
+}
+
 /// Which of the values given to the locals of a file may reach each point of its code, and what the
 /// guards on the way tell about them. A value reaches the code after the statement that assigns it,
 /// branches join where they meet, and a loop starts with what its runs before leave. Calls are
@@ -307,12 +323,14 @@ type Keys = Box<[SmolStr]>;
 /// that yields, as `Wait(0)` does, lets that code run too, so after one the locals it may assign
 /// hold any value it gives them again.
 ///
-/// The fields of locals that guards test or assignments set, as `self.target` or `data.job.name`,
-/// are narrowed like locals, an assignment giving one the value it stores, until something may
-/// change them: an assignment to the local or to a field of the same name of any table; a call that
-/// is given, or an assignment for a key that is not known to, the local, a table the field is read
-/// through, a local copied from one of them or a table built with them; a call that yields; or the
-/// start of a function, which runs later.
+/// The fields of locals and globals that guards test or assignments set, as `self.target`,
+/// `data.job.name` or `Config.Logs.Service`, are narrowed like locals, an assignment giving one the
+/// value it stores, until something may change them: an assignment to the local or global or to a
+/// field of the same name of any table; a call that is given, or an assignment for a key that is not
+/// known to, the local or global, a table the field is read through, a local copied from one of them
+/// or a table built with them; a call that yields; or the start of a function, which runs later.
+/// Other calls are taken to change no field, as TypeScript takes them, although the code of another
+/// file may assign a global.
 #[derive(Debug)]
 pub struct Flow<'a> {
     origins: Vec<Origin<'a>>,
@@ -335,9 +353,9 @@ pub struct Flow<'a> {
     /// the call returns.
     links: Vec<Vec<(LocalId, u32, usize)>>,
     link_of: FxHashMap<(LocalId, u32), usize>,
-    /// The fields that guards test, by the local they are read from, each with the keys after it and
-    /// the number it is tracked under, after those of the locals.
-    paths: FxHashMap<LocalId, Vec<(Keys, LocalId)>>,
+    /// The fields that guards test, by the local or global they are read from, each with the keys
+    /// after it and the number it is tracked under, after those of the locals.
+    paths: FxHashMap<Root, Vec<(Keys, LocalId)>>,
 }
 
 impl<'a> Flow<'a> {
@@ -404,7 +422,7 @@ impl<'a> Flow<'a> {
             return None;
         }
         let (root, keys) = field_path(resolution, expr)?;
-        self.path_of(root, &keys)
+        self.path_of(&root, &keys)
     }
 
     /// The number that the field `key` of the table `base` names or reads is tracked under, when
@@ -414,18 +432,15 @@ impl<'a> Flow<'a> {
             return None;
         }
         let (root, mut keys) = match &base.unparen().kind {
-            ExprKind::Name(name) => match resolution.resolve_at(name.span.start) {
-                Some(Resolved::Local(root)) => (root, Vec::new()),
-                _ => return None,
-            },
+            ExprKind::Name(name) => (name_root(resolution, name), Vec::new()),
             _ => field_path(resolution, base)?,
         };
         keys.push(SmolStr::new(key));
-        self.path_of(root, &keys)
+        self.path_of(&root, &keys)
     }
 
-    fn path_of(&self, root: LocalId, keys: &[SmolStr]) -> Option<LocalId> {
-        let paths = self.paths.get(&root)?;
+    fn path_of(&self, root: &Root, keys: &[SmolStr]) -> Option<LocalId> {
+        let paths = self.paths.get(root)?;
         paths.iter().find(|(path, _)| **path == *keys).map(|(_, id)| *id)
     }
 
@@ -581,9 +596,9 @@ struct CastValue {
     reads: bool,
 }
 
-/// The locals that hold a table read from another local, as `local child = self.child` does, each
-/// with the tables it was read from, as a local and the keys after it.
-type Aliases = FxHashMap<LocalId, Vec<(LocalId, Vec<SmolStr>)>>;
+/// The locals that hold a table read from another local or a global, as `local child = self.child`
+/// does, each with the tables it was read from, as a root and the keys after it.
+type Aliases = FxHashMap<LocalId, Vec<(Root, Vec<SmolStr>)>>;
 
 /// Walks the code of a file in the order it runs and records what its locals may hold. It keeps what
 /// they hold where it is, with a trail of what each change replaced: the ways through an `if` or a
@@ -644,10 +659,10 @@ struct Walker<'a, 'r> {
     kinds: FxHashMap<LocalId, (LocalId, bool, Option<Vec<u32>>)>,
     /// The locals that hold `type`, or with `true` `math.type`, as after `local type = type`.
     type_functions: FxHashMap<LocalId, bool>,
-    /// The fields that guards test, each as the local it is read from and the keys after it, tracked
-    /// under `first_path` and the numbers after it.
-    paths: RefCell<Vec<(LocalId, Keys)>>,
-    path_ids: RefCell<FxHashMap<(LocalId, Keys), LocalId>>,
+    /// The fields that guards test, each as the local or global it is read from and the keys after
+    /// it, tracked under `first_path` and the numbers after it.
+    paths: RefCell<Vec<(Root, Keys)>>,
+    path_ids: RefCell<FxHashMap<(Root, Keys), LocalId>>,
     first_path: LocalId,
 }
 
@@ -854,7 +869,7 @@ impl<'a, 'r> Walker<'a, 'r> {
     fn note_alias(&mut self, local: LocalId, value: &Expr) {
         let mut tables = Vec::new();
         tables_of(self.resolution, &self.aliases, value, &mut tables);
-        tables.retain(|(root, _)| *root != local);
+        tables.retain(|(root, _)| *root != Root::Local(local));
         if tables.is_empty() {
             return;
         }
@@ -871,11 +886,20 @@ impl<'a, 'r> Walker<'a, 'r> {
         id >= self.first_path
     }
 
-    /// The local that `id` is, or that the field it is the number of is read from.
-    fn root(&self, id: LocalId) -> LocalId {
+    /// The local that `id` is, or the local or global that the field it is the number of is read
+    /// from.
+    fn root(&self, id: LocalId) -> Root {
         match self.is_path(id) {
-            true => self.paths.borrow()[(id - self.first_path) as usize].0,
-            false => id,
+            true => self.paths.borrow()[(id - self.first_path) as usize].0.clone(),
+            false => Root::Local(id),
+        }
+    }
+
+    /// Whether `code` declares the local that `root` is, which a global is not.
+    fn declares(&self, code: Span, root: &Root) -> bool {
+        match root {
+            Root::Local(local) => code.contains(self.resolution.local(*local).decl.start),
+            Root::Global(_) => false,
         }
     }
 
@@ -895,16 +919,16 @@ impl<'a, 'r> Walker<'a, 'r> {
         Some(id)
     }
 
-    /// Forgets what the guards told about the fields that `changed` picks by the local they are
-    /// read from and the keys after it, from `at` on.
-    fn forget_fields(&mut self, at: u32, changed: impl Fn(LocalId, &[SmolStr]) -> bool) {
+    /// Forgets what the guards told about the fields that `changed` picks by the local or global
+    /// they are read from and the keys after it, from `at` on.
+    fn forget_fields(&mut self, at: u32, changed: impl Fn(&Root, &[SmolStr]) -> bool) {
         if self.fields.is_empty() {
             return;
         }
         let paths = self.paths.borrow();
         let fields = self.fields.iter().filter(|id| {
             let (root, keys) = &paths[(**id - self.first_path) as usize];
-            changed(*root, keys)
+            changed(root, keys)
         });
         let fields: Vec<LocalId> = fields.copied().collect();
         drop(paths);
@@ -923,8 +947,8 @@ impl<'a, 'r> Walker<'a, 'r> {
             return;
         }
         self.forget_fields(at, |root, keys| {
-            let within = |(table, prefix): &(LocalId, Vec<SmolStr>)| {
-                root == *table && keys.len() > prefix.len() && keys.starts_with(prefix)
+            let within = |(table, prefix): &(Root, Vec<SmolStr>)| {
+                root == table && keys.len() > prefix.len() && keys.starts_with(prefix)
             };
             tables.iter().any(within)
         });
@@ -1160,7 +1184,7 @@ impl<'a, 'r> Walker<'a, 'r> {
         for index in first..first + count {
             let CastValue { local, origin, at, .. } = self.casts[index];
             self.set(local, at, Rc::from([Version { origin, facts: FactList::default() }]));
-            self.forget_fields(at, |root, _| root == local);
+            self.forget_fields(at, |root, _| *root == Root::Local(local));
         }
     }
 
@@ -1196,7 +1220,7 @@ impl<'a, 'r> Walker<'a, 'r> {
                         if self.state.contains_key(&id) {
                             self.set(id, stmt.span.end, self.flow.declared.clone());
                         }
-                        self.forget_fields(stmt.span.end, |root, _| root == id);
+                        self.forget_fields(stmt.span.end, |root, _| *root == Root::Local(id));
                         if let Some(value) = exprs.get(index) {
                             self.note_alias(id, value);
                         }
@@ -1354,13 +1378,17 @@ impl<'a, 'r> Walker<'a, 'r> {
         self.set(field, at, Rc::from([Version { origin, facts: FactList::default() }]));
     }
 
-    /// Makes the local whose name `name` assigns hold the value it is given from `at` on.
+    /// Makes the local whose name `name` assigns hold the value it is given from `at` on. A global
+    /// it assigns holds a table whose fields nothing tells about.
     fn assigned(&mut self, name: &Name, at: u32) {
-        let Some(Resolved::Local(id)) = self.resolution.resolve_at(name.span.start) else { return };
+        let Some(Resolved::Local(id)) = self.resolution.resolve_at(name.span.start) else {
+            let global = Root::Global(name.text.clone());
+            return self.forget_fields(at, |root, _| *root == global);
+        };
         let Some(origin) = self.flow.written_at(name.span.start) else { return };
         let values: Values = Rc::from([Version { origin, facts: FactList::default() }]);
         self.set(id, at, values);
-        self.forget_fields(at, |root, _| root == id);
+        self.forget_fields(at, |root, _| *root == Root::Local(id));
     }
 
     fn if_stmt(&mut self, stmt: &'a Stmt, branches: &'a [IfBranch], else_block: Option<&'a Block>) {
@@ -1464,6 +1492,7 @@ impl<'a, 'r> Walker<'a, 'r> {
             resolution: self.resolution,
             aliases: &self.aliases,
             locals: Vec::new(),
+            globals: Vec::new(),
             keys: Vec::new(),
             tables: Vec::new(),
         };
@@ -1471,7 +1500,7 @@ impl<'a, 'r> Walker<'a, 'r> {
         let paths = self.paths.borrow();
         for id in &self.fields {
             let (root, keys) = &paths[(*id - self.first_path) as usize];
-            if span.contains(self.resolution.local(*root).decl.start) || changes.changes(*root, keys) {
+            if self.declares(span, root) || changes.changes(root, keys) {
                 entry.insert(*id, self.flow.declared.clone());
             }
         }
@@ -1482,7 +1511,7 @@ impl<'a, 'r> Walker<'a, 'r> {
     /// again.
     fn within(&self, stmt: &Stmt, mut delta: Delta) -> Delta {
         for (local, values) in delta.iter_mut() {
-            if stmt.span.contains(self.resolution.local(self.root(*local)).decl.start) {
+            if self.declares(stmt.span, &self.root(*local)) {
                 *values = self.flow.declared.clone();
             }
         }
@@ -2152,10 +2181,10 @@ impl<'ast> Visitor<'ast> for Yields<'_> {
     }
 }
 
-/// Adds the tables that `expr` names or reads to `out`, each as a local and the keys after it, with
-/// those that the locals it reads from were read from, and for a table it builds, those of the
-/// values in it.
-fn tables_of(resolution: &Resolution, aliases: &Aliases, expr: &Expr, out: &mut Vec<(LocalId, Vec<SmolStr>)>) {
+/// Adds the tables that `expr` names or reads to `out`, each as a local or global and the keys after
+/// it, with those that the locals it reads from were read from, and for a table it builds, those of
+/// the values in it.
+fn tables_of(resolution: &Resolution, aliases: &Aliases, expr: &Expr, out: &mut Vec<(Root, Vec<SmolStr>)>) {
     let expr = expr.unparen();
     if let ExprKind::Table(fields) = &expr.kind {
         for field in fields {
@@ -2169,37 +2198,42 @@ fn tables_of(resolution: &Resolution, aliases: &Aliases, expr: &Expr, out: &mut 
         return;
     }
     let table = match &expr.kind {
-        ExprKind::Name(name) => match resolution.resolve_at(name.span.start) {
-            Some(Resolved::Local(local)) => Some((local, Vec::new())),
-            _ => None,
-        },
+        ExprKind::Name(name) => Some((name_root(resolution, name), Vec::new())),
         _ => field_path(resolution, expr),
     };
     let Some((root, keys)) = table else { return };
-    for (alias, prefix) in aliases.get(&root).into_iter().flatten() {
-        out.push((*alias, prefix.iter().chain(&keys).cloned().collect()));
+    if let Root::Local(local) = &root {
+        for (alias, prefix) in aliases.get(local).into_iter().flatten() {
+            out.push((alias.clone(), prefix.iter().chain(&keys).cloned().collect()));
+        }
     }
     out.push((root, keys));
 }
 
-/// What the code of a loop may change before it starts again: the locals and the fields of each name
-/// it assigns, and the fields of the tables it gives calls or assigns keys of that are not known.
+/// What the code of a loop may change before it starts again: the locals, globals and the fields of
+/// each name it assigns, and the fields of the tables it gives calls or assigns keys of that are not
+/// known.
 struct Changes<'r> {
     resolution: &'r Resolution,
     aliases: &'r Aliases,
     locals: Vec<LocalId>,
+    globals: Vec<SmolStr>,
     keys: Vec<SmolStr>,
-    tables: Vec<(LocalId, Vec<SmolStr>)>,
+    tables: Vec<(Root, Vec<SmolStr>)>,
 }
 
 impl Changes<'_> {
-    fn changes(&self, root: LocalId, keys: &[SmolStr]) -> bool {
-        self.locals.contains(&root)
+    fn changes(&self, root: &Root, keys: &[SmolStr]) -> bool {
+        let assigned = match root {
+            Root::Local(local) => self.locals.contains(local),
+            Root::Global(name) => self.globals.contains(name),
+        };
+        assigned
             || keys.iter().any(|key| self.keys.contains(key))
             || self
                 .tables
                 .iter()
-                .any(|(table, prefix)| *table == root && keys.len() > prefix.len() && keys.starts_with(prefix))
+                .any(|(table, prefix)| table == root && keys.len() > prefix.len() && keys.starts_with(prefix))
     }
 
     /// Notes that the fields of the tables `expr` names or reads may change.
@@ -2209,11 +2243,10 @@ impl Changes<'_> {
 
     fn assigned(&mut self, target: &Expr) {
         match &target.unparen().kind {
-            ExprKind::Name(name) => {
-                if let Some(Resolved::Local(id)) = self.resolution.resolve_at(name.span.start) {
-                    self.locals.push(id);
-                }
-            }
+            ExprKind::Name(name) => match self.resolution.resolve_at(name.span.start) {
+                Some(Resolved::Local(id)) => self.locals.push(id),
+                _ => self.globals.push(name.text.clone()),
+            },
             ExprKind::Field { name, .. } => self.keys.push(name.text.clone()),
             ExprKind::Index { base, index, .. } => match index.as_string() {
                 Some(key) => self.keys.push(SmolStr::new(key)),
@@ -2254,9 +2287,9 @@ impl<'ast> Visitor<'ast> for Changes<'_> {
     fn visit_func_body(&mut self, _: &'ast FuncBody) {}
 }
 
-/// The local that `expr` reads a field from and the keys it reads through, as `data` and `job`,
-/// `name` for `data.job.name` or `data["job"].name`, for at most `MAX_KEYS` keys written out.
-pub fn field_path(resolution: &Resolution, expr: &Expr) -> Option<(LocalId, Vec<SmolStr>)> {
+/// The local or global that `expr` reads a field from and the keys it reads through, as `data` and
+/// `job`, `name` for `data.job.name` or `data["job"].name`, for at most `MAX_KEYS` keys written out.
+pub fn field_path(resolution: &Resolution, expr: &Expr) -> Option<(Root, Vec<SmolStr>)> {
     let mut keys = Vec::new();
     let mut expr = expr.unparen();
     loop {
@@ -2270,9 +2303,8 @@ pub fn field_path(resolution: &Resolution, expr: &Expr) -> Option<(LocalId, Vec<
                 expr = base.unparen();
             }
             ExprKind::Name(name) if !keys.is_empty() && keys.len() <= MAX_KEYS => {
-                let Some(Resolved::Local(root)) = resolution.resolve_at(name.span.start) else { return None };
                 keys.reverse();
-                return Some((root, keys));
+                return Some((name_root(resolution, name), keys));
             }
             _ => return None,
         }

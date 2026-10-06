@@ -420,9 +420,17 @@ impl<'a, 'b> Declared<'a, 'b> {
     }
 
     /// The type of a global typed as one class by everything that sets it. Its other values are
-    /// inferred from what is assigned to it.
+    /// inferred from what is assigned to it. With `strict`, as TypeScript reads a declared global, a
+    /// class that one of them declares wins, as it does for the type of the global, so
+    /// `---@type Settings` above `Config = {}` types `Config` beside a `Config = Config or {}`.
     fn global(&self, name: &str) -> Type {
         let symbols = self.infer.index.globals_named(name, self.classes.file());
+        if self.infer.strict() {
+            let preferred = self.infer.preferred_global(&symbols).map(|(_, symbol)| &symbol.ty);
+            if let Some(ty @ Type::Named(..)) = preferred {
+                return ty.clone();
+            }
+        }
         match symbols.split_first() {
             Some(((_, first), rest))
                 if matches!(first.ty, Type::Named(..)) && rest.iter().all(|(_, symbol)| symbol.ty == first.ty) =>
