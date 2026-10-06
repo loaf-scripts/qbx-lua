@@ -6052,6 +6052,35 @@ return keys, walk
 }
 
 #[test]
+fn tonumber_gives_back_a_number_it_is_given() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param x number
+---@param i integer
+---@param s string
+local function convert(x, i, s)
+    local fromNumber = tonumber(x)
+    local fromInteger = tonumber(i)
+    local fromString = tonumber(s)
+    local withBase = tonumber(x, 16)
+    return fromNumber, fromInteger, fromString, withBase
+end
+return convert
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("fromNumber =", "fromNumber: number\n"),
+        ("fromInteger =", "fromInteger: integer\n"),
+        ("fromString =", "fromString: number?\n"),
+        ("withBase =", "withBase: number?\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn comparisons_of_types_that_share_no_value_are_reported() {
     let mut client = Client::start(fixture_root());
     let text = "\
