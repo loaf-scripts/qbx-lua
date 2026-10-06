@@ -525,7 +525,9 @@ reported. Only clear cases count, and the rest is left alone:
   declares nothing. A function that a callee passes to a callback, such as `resolve` of
   `fun(resolve: fun(value: T))`, takes and returns what the other arguments of that call declare
   for the generic, as the `boolean` of `Promise:New('boolean', function(resolve) end)` for a
-  `` `T` ``, and any value for a generic they leave unbound.
+  `` `T` ``, and any value for a generic they leave unbound. What a generic function returns is
+  declared as far as the declared types of the arguments bind its generics, as the `string?` of
+  `first(names)` for `fun(list: V[]): V?` and a `names` declared as `string[]`.
 - Parameters typed with the name of a native handle such as `Vehicle`, which resources also declare
   as classes.
 - Calls through globals in an opaque resource, such as an escrowed one; see

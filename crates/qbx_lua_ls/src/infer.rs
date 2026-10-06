@@ -2688,6 +2688,44 @@ impl<'a> Infer<'a> {
         })
     }
 
+    /// What `call` returns when its function is a generic that declares its values with `@return`,
+    /// with the generics bound from the types `declared` gives the arguments, as TypeScript binds
+    /// them: `first(names)` gives a `string?` for `fun(list: V[]): V?` and a `names` declared as
+    /// `string[]`. A generic they leave unbound is unknown. `None` when the function is no generic,
+    /// infers its values, or is one whose call `call_values` reads in its own way, as
+    /// `setmetatable`, or when `call` is no call.
+    pub fn declared_generic_returns(&self, call: &Expr, declared: impl Fn(&Expr) -> Type) -> Option<Vec<Type>> {
+        self.guarded(|| {
+            let (base, method, exprs) = match &call.kind {
+                ExprKind::Call { callee, args, .. } => (callee, None, args),
+                ExprKind::MethodCall { base, method, args, .. } => (base, Some(method), args),
+                _ => return None,
+            };
+            if method.is_none()
+                && matches!(
+                    base.dotted_path().as_deref(),
+                    Some("require" | "lib.require" | "lib.load" | "setmetatable")
+                )
+            {
+                return None;
+            }
+            let via_method = method.is_some();
+            let args = CallArgs::new(exprs);
+            let fun = match self.sided_definition(base, method, &args) {
+                Some(fun) => fun?,
+                None => self.callee_fun(base, method)?.0,
+            };
+            let fun = self.signature_for(&fun, &args, via_method, base.span.start);
+            let awaits = Wrapper::of(&fun, via_method).is_some_and(|w| w.tag.role == CallbackRole::Await);
+            if fun.generics.is_empty() || fun.returns_inferred || fun.returns_nothing || awaits {
+                return None;
+            }
+            let generics = self.bind_generics(&fun, &CallArgs::typed(exprs, &declared), via_method, false);
+            let values = fun.returns.iter().map(|ret| substitute(ret, &generics)).collect();
+            Some(self.asserted(base, method, values, || exprs.first().map(&declared)))
+        })
+    }
+
     /// `values` of a call of `base`, or its `method`, where an `assert(v)` gives its `v`, of the type
     /// `first` gives it, without the `nil` and `false` it raises an error for, as lua-language-server
     /// reads it. A generic would widen the `false` of a `string|false` to a `boolean`.

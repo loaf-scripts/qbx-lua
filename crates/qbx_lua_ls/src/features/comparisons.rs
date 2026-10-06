@@ -526,7 +526,10 @@ impl<'a, 'b> Declared<'a, 'b> {
             true => self.infer.annotated_returns(call),
             false => self.infer.declared_returns(call),
         };
-        let values = declared.or_else(|| self.callback_returns(call)).or_else(|| self.returned_nils(call))?;
+        let values = declared
+            .or_else(|| self.callback_returns(call))
+            .or_else(|| self.generic_returns(call))
+            .or_else(|| self.returned_nils(call))?;
         if !self.is_native_call(call) {
             return Some(values);
         }
@@ -550,6 +553,14 @@ impl<'a, 'b> Declared<'a, 'b> {
         let fun = self.infer.fun_of(&self.declaration(id))?;
         let fun = self.infer.call_signature(&fun, args, false, call.span.start);
         fun.generics.is_empty().then(|| fun.returns.clone())
+    }
+
+    /// What a call of a generic returns when the declared types of its arguments bind its generics:
+    /// `first(names)` gives a `string?` for `fun(list: V[]): V?` and a `names` declared as
+    /// `string[]`. Bound from the values the call passes, as inference binds them, it would tell
+    /// what the code passes today, not what it may.
+    fn generic_returns(&self, call: &Expr) -> Option<Vec<Type>> {
+        self.infer.declared_generic_returns(call, |arg| self.of(arg))
     }
 
     /// With `returned_nils`, what `call` returns where its function, without `@return`, returns

@@ -8466,6 +8466,55 @@ local text = assert(named, 'no name')
 }
 
 #[test]
+fn generic_calls_return_what_the_declared_arguments_bind() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@generic V
+---@param list V[]
+---@return V? value
+local function first(list) return list[1] end
+---@param text string
+local function takes(text) end
+
+---@type string[]
+local names = {}
+local found = first(names)
+takes(found)
+takes(first(names))
+print(first(names) .. '!')
+local function relay(list)
+    takes(first(list))
+end
+relay(names)
+---@type string?
+local maybe
+local sure = assert(maybe)
+print(sure:upper(), assert(maybe):upper())
+assert(load('return 1'))()
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |code: &str, needle: &str, message: &str| (code.to_string(), line(needle), message.to_string());
+    let codes = ["param-type-mismatch", "need-check-nil"];
+    let relaxed = findings(&mut client, CLIENT, &codes);
+    assert_eq!(
+        relaxed,
+        [
+            finding(codes[0], "takes(found)", "Cannot assign `string?` to parameter `text` of type `string`"),
+            finding(codes[0], "takes(first(names))", "Cannot assign `string?` to parameter `text` of type `string`"),
+        ],
+        "a generic returns what the declared types of the arguments bind, as in lua-language-server, and a \
+         generic that nothing declares stays unknown"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &codes)),
+        [finding(codes[1], "first(names) .. '!'", "`first(names)` may be nil: its type here is `string?`")],
+        "with `strict`, the value is checked as any other declared one, and what `assert` returns is no `nil`"
+    );
+}
+
+#[test]
 fn parameters_of_callbacks_have_the_types_their_callee_declares() {
     let mut client = Client::start(fixture_root());
     let text = "\
