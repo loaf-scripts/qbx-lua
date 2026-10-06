@@ -79,8 +79,14 @@ impl Native {
         }
     }
 
+    /// The types of the values it returns. A `table` has the LuaCATS type of `RETURN_TYPES` where
+    /// that table gives one.
     pub fn returns(&self) -> impl Iterator<Item = &'static str> {
-        self.returns.split(',').filter(|r| !r.is_empty())
+        let native = self.name;
+        self.returns.split(',').filter(|r| !r.is_empty()).map(move |ty| match ty {
+            "table" => RETURN_TYPES.iter().find(|(owner, _)| *owner == native).map_or(ty, |(_, ty)| ty),
+            _ => ty,
+        })
     }
 
     /// `(name, type, optional)` triples. The table writes an optional parameter `name?`: the
@@ -131,6 +137,29 @@ pub static CALLBACK_TYPES: &[(&str, &str, &str)] = &[
     ("ScanResourceRoot", "callback", "fun(results: table)"),
     ("RegisterResourceBuildTaskFactory", "factoryFn", "fun(): ResourceBuildTask"),
     ("RegisterArchetypes", "factory", "fun(): table[]"),
+];
+
+/// The LuaCATS types of the tables that natives return, which the native data only calls `table`:
+/// `(native, type)`. Each is what the native serializes in the source of the runtime: a list of
+/// handles, hashes or names, of `[a, b]` pairs, or of command objects. `GetStateBagValue` gives the
+/// stored value itself, which may be of any type.
+pub static RETURN_TYPES: &[(&str, &str)] = &[
+    ("DoorSystemGetActive", "[Hash, Object][]"),
+    ("GetActivePlayers", "Player[]"),
+    ("GetAllObjects", "Object[]"),
+    ("GetAllPeds", "Ped[]"),
+    ("GetAllRopes", "integer[]"),
+    ("GetAllTrackJunctions", "integer[]"),
+    ("GetAllVehicleModels", "string[]"),
+    ("GetAllVehicles", "Vehicle[]"),
+    ("GetClosestTrackNodes", "[integer, integer][]"),
+    ("GetEntitiesInRadius", "Entity[]"),
+    ("GetGamePool", "Entity[]"),
+    ("GetPedDecorations", "[Hash, Hash][]"),
+    ("GetRegisteredCommands", "{ name: string, resource: string, arity: integer }[]"),
+    ("GetResourceCommands", "{ name: string, resource: string, arity: integer }[]"),
+    ("GetStateBagKeys", "string[]"),
+    ("GetStateBagValue", "any"),
 ];
 
 struct LineTable {
@@ -335,7 +364,7 @@ mod tests {
         assert_eq!(vehicles.on(Some(Side::Client)).returns().collect::<Vec<_>>(), ["integer", "integer"]);
         assert_eq!(vehicles.on(None).returns().collect::<Vec<_>>(), ["integer", "integer"]);
         let server = vehicles.on(Some(Side::Server));
-        assert_eq!(server.returns().collect::<Vec<_>>(), ["table"]);
+        assert_eq!(server.returns().collect::<Vec<_>>(), ["Vehicle[]"]);
         assert_eq!((server.side, server.namespace, server.hash), (Side::Server, "CFX", "0x332169F5"));
         let weapon = native("GetCurrentPedWeapon").unwrap().on(Some(Side::Server));
         assert_eq!(weapon.signature(), "function GetCurrentPedWeapon(ped: Ped): Hash");
@@ -376,6 +405,20 @@ mod tests {
             let declared = native.params.split(',').filter_map(|p| p.split_once(':')).find(|(n, _)| n == param);
             assert_eq!(declared.map(|(_, ty)| ty), Some("function"), "{name}({param})");
             assert!(native.params().any(|(n, t, _)| n == *param && t == *ty));
+        }
+    }
+
+    #[test]
+    fn return_types_name_tables_that_natives_return() {
+        for (name, ty) in RETURN_TYPES {
+            let native = native(name).unwrap_or_else(|| panic!("{name} is no native"));
+            let returns = native.server.map_or(native.returns, |(_, server, _)| server);
+            assert!(
+                native.returns.split(',').chain(returns.split(',')).any(|r| r == "table"),
+                "{name} returns no table"
+            );
+            let side = native.server.map(|_| Side::Server);
+            assert!(native.on(side).returns().any(|r| r == *ty), "{name}");
         }
     }
 

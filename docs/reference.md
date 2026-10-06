@@ -515,7 +515,11 @@ such as `DeleteEntity`, still need theirs.
 The functions natives call back take the parameters their documentation gives: the handler of
 `RegisterCommand` takes `source: integer, args: string[], rawCommand: string`, and those of
 `AddStateBagChangeHandler`, `AddConvarChangeListener`, `RegisterConsoleListener` and
-`SetHttpHandler` take theirs, the last a `request` and `response` with their fields.
+`SetHttpHandler` take theirs, the last a `request` and `response` with their fields. The tables
+that natives return hold what the runtime puts in them: `GetActivePlayers()` gives a `Player[]`,
+`GetGamePool(name)` an `Entity[]`, `GetPedDecorations(ped)` `[Hash, Hash]` pairs and
+`GetRegisteredCommands()` tables with a `name`, `resource` and `arity`, while
+`GetStateBagValue` gives the stored value, of any type.
 
 Other parameters of natives do not take `nil`: `DoesEntityExist(entity)` with an `Entity?` is
 reported. Only clear cases count, and the rest is left alone:

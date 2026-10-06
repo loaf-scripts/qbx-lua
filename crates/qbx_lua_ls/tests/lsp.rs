@@ -512,7 +512,7 @@ fn server_code_calls_the_server_native_of_a_shared_name() {
     let mut client = Client::start(fixture_root());
     let text = "local vehicles = GetAllVehicles()\nlocal weapon = GetCurrentPedWeapon(1)\nprint(vehicles, weapon)\n";
     for (file, vehicles, weapon) in
-        [(SERVER, "vehicles: table", "weapon: Hash"), (CLIENT, "vehicles: integer", "weapon: boolean")]
+        [(SERVER, "vehicles: Vehicle[]", "weapon: Hash"), (CLIENT, "vehicles: integer", "weapon: boolean")]
     {
         client.open_with(file, text);
         for expected in [vehicles, weapon] {
@@ -523,7 +523,33 @@ fn server_code_calls_the_server_native_of_a_shared_name() {
     }
     let (l, c) = pos(text, "GetAllVehicles", 0);
     let hover = client.hover_text(SERVER, l, c);
-    assert!(hover.contains("function GetAllVehicles(): table") && hover.contains("*server native* · `CFX`"), "{hover}");
+    assert!(
+        hover.contains("function GetAllVehicles(): Vehicle[]") && hover.contains("*server native* · `CFX`"),
+        "{hover}"
+    );
+}
+
+#[test]
+fn natives_that_return_tables_type_what_the_tables_hold() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+for _, player in ipairs(GetActivePlayers()) do print(player) end
+for _, decoration in ipairs(GetPedDecorations(PlayerPedId())) do print(decoration[1]) end
+for _, command in ipairs(GetRegisteredCommands()) do print(command.name) end
+local value = GetStateBagValue('global', 'key')
+print(value)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("player in", "player: Player\n"),
+        ("decoration in", "decoration: [Hash, Hash]\n"),
+        ("command in", "command: {\n    name: string,\n    resource: string,\n    arity: integer,\n}"),
+        ("value =", "value: any\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
 }
 
 #[test]

@@ -615,11 +615,28 @@ fn native_type(name: &str) -> Type {
     if NATIVE_HANDLE_TYPES.contains(&name) {
         return Type::Handle(SmolStr::new(name));
     }
-    // The callbacks that natives take are written as LuaCATS types, as `fun(source: integer, ...)`.
+    // The callbacks that natives take are written as LuaCATS types, as `fun(source: integer, ...)`,
+    // and so are the tables some return, as `Player[]`.
     if name.starts_with("fun(") {
         return TypeParser::new(name).parse();
     }
+    if name.contains(['[', '{']) {
+        return with_handles(TypeParser::new(name).parse());
+    }
     Type::named(name)
+}
+
+/// `ty` with the handle names in its arrays and tuples read as handles, as `native_type` reads one
+/// alone: the `Player` of `Player[]`.
+fn with_handles(ty: Type) -> Type {
+    match ty {
+        Type::Named(name, args) if args.is_empty() && NATIVE_HANDLE_TYPES.contains(&name.text.as_str()) => {
+            Type::Handle(name.text)
+        }
+        Type::Array(inner) => Type::Array(Box::new(with_handles(*inner))),
+        Type::Tuple(items) => Type::Tuple(items.into_iter().map(with_handles).collect()),
+        other => other,
+    }
 }
 
 pub fn native_fun_type(native: &qbx_fivem_data::Native) -> FunType {
