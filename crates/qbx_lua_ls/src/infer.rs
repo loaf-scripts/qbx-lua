@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1009,7 +1010,7 @@ impl<'a> Infer<'a> {
     /// rules out the last of them, if it gives one. An alias such as `Name = string|nil` is narrowed
     /// through what it stands for, and a type the facts leave whole stays as it is written.
     fn facts_left<'f>(&self, ty: &Type, facts: impl Iterator<Item = &'f Fact>) -> Result<Type, Option<Type>> {
-        let mut facts = facts.peekable();
+        let mut facts = facts.flat_map(|fact| self.typed_facts(fact)).flatten().peekable();
         if facts.peek().is_none() {
             return Ok(ty.clone());
         }
@@ -1026,6 +1027,40 @@ impl<'a> Infer<'a> {
             }
         }
         Ok(if narrowed != declared { narrowed } else { ty.clone() })
+    }
+
+    /// `fact`, or for a comparison with a local, what the type of that local where the comparison
+    /// reads it tells, as TypeScript narrows by equality: `cam == activeCam` for an `activeCam` that
+    /// is never `nil` or `false` rules those out of `cam`, and one with a local that holds a single
+    /// literal tells that `cam` holds it, or with `~=` that it does not.
+    fn typed_facts<'f>(&self, fact: &'f Fact) -> [Option<Cow<'f, Fact>>; 2] {
+        let (other, at, equal) = match fact {
+            Fact::SameAs { other, at } => (*other, *at, true),
+            Fact::NotSameAs { other, at } => (*other, *at, false),
+            _ => return [Some(Cow::Borrowed(fact)), None],
+        };
+        let ty = self.guarded(|| self.expand_aliases(&self.local_type_at(other, at), 0));
+        let parts = match &ty {
+            Type::Union(parts) => &parts[..],
+            one => std::slice::from_ref(one),
+        };
+        let unit = |part: &Type| matches!(part, Type::Nil | Type::BooleanLit(_) | Type::StringLit(_) | Type::IntLit(_));
+        if parts.iter().any(Type::is_unknown) || parts.contains(&Type::Any) {
+            return [None, None];
+        }
+        match (parts, equal) {
+            ([value], true) if unit(value) => [Some(Cow::Owned(Fact::Is(value.clone()))), None],
+            ([value], false) if unit(value) => [Some(Cow::Owned(Fact::IsNot(value.clone()))), None],
+            (_, true) => {
+                let never_nil = !parts.contains(&Type::Nil);
+                let never_false = !parts.iter().any(|part| matches!(part, Type::Boolean | Type::BooleanLit(false)));
+                [
+                    never_nil.then_some(Cow::Owned(Fact::IsNot(Type::Nil))),
+                    never_false.then_some(Cow::Owned(Fact::IsNot(Type::BooleanLit(false)))),
+                ]
+            }
+            (_, false) => [None, None],
+        }
     }
 
     /// `ty`, the type of the field of a local that `expr` reads, as `self.target` or `data.job`,

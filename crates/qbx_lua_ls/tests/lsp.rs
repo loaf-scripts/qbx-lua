@@ -2784,6 +2784,64 @@ fn many_functions_that_assign_the_same_locals_stay_fast() {
 }
 
 #[test]
+fn comparisons_with_locals_narrow_by_what_their_types_rule_out() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param n number
+local function takes(n) end
+
+---@type number?
+local cam
+function ClearCam() cam = nil end
+
+local function apply()
+    if not cam then return end
+    local activeCam = cam
+    Wait(0)
+    if cam ~= activeCam then return end
+    takes(cam)
+end
+
+---@param x number?
+---@param y number
+---@param z number?
+local function compare(x, y, z)
+    if x == y then takes(x) end
+    if x == z then takes(x) end
+    if x ~= y then takes(x) end
+end
+
+---@param state 'idle'|'busy'|nil
+local function check(state)
+    ---@type 'busy'
+    local busy = 'busy'
+    if state == busy then print(state) end -- same
+    if state ~= busy then print(state) end -- other
+end
+return apply, compare, check
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in
+        [("state) end -- same", "state: \"busy\"\n"), ("state) end -- other", "state: \"idle\"?\n")]
+    {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    client.set_strict(true);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let mismatch = |needle: &str| {
+        let message = "Cannot assign `number?` to parameter `n` of type `number`".to_string();
+        ("param-type-mismatch".to_string(), line(needle), message)
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [mismatch("x == z"), mismatch("x ~= y")],
+        "a value equal to one that is never `nil` is not `nil` either, as TypeScript narrows by equality"
+    );
+}
+
+#[test]
 fn guards_narrow_the_fields_of_globals_until_something_may_change_them() {
     let mut client = Client::start(fixture_root());
     let text = "\

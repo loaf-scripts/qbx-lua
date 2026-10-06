@@ -42,6 +42,12 @@ pub enum Fact {
     NotKind(&'static str),
     /// The facts of one of these lists hold, as after `type(x) == 'string' or type(x) == 'number'`.
     AnyOf(Vec<Vec<Fact>>),
+    /// It equals the value of the local `other` where the comparison reads it, at `at`, as after
+    /// `cam == activeCam`. What that rules out depends on the type of `other` there, which
+    /// `Infer::facts_left` reads; until then it rules out nothing.
+    SameAs { other: LocalId, at: u32 },
+    /// It differs from the value of the local `other` where the comparison reads it, at `at`.
+    NotSameAs { other: LocalId, at: u32 },
 }
 
 impl Fact {
@@ -108,6 +114,7 @@ impl Fact {
     fn apply_part(&self, ty: &Type) -> Option<Type> {
         let unknown = matches!(ty, Type::Unknown | Type::Any);
         match self {
+            Fact::SameAs { .. } | Fact::NotSameAs { .. } => Some(ty.clone()),
             Fact::AnyOf(alternatives) => {
                 let kept: Vec<Type> = alternatives
                     .iter()
@@ -1858,6 +1865,21 @@ impl<'a, 'r> Walker<'a, 'r> {
                 };
                 if let Some((local, value)) = compared {
                     out.push((local, if equal { Fact::Is(value) } else { Fact::IsNot(value) }));
+                } else {
+                    // `cam == activeCam` tells about `cam` what the type of `activeCam` there rules
+                    // out, and the other way around.
+                    for (side, other) in [(lhs, rhs), (rhs, lhs)] {
+                        if let (Some(place), Some(other_local)) = (self.place(side), self.local(other)) {
+                            let at = other.span.start;
+                            out.push((
+                                place,
+                                match equal {
+                                    true => Fact::SameAs { other: other_local, at },
+                                    false => Fact::NotSameAs { other: other_local, at },
+                                },
+                            ));
+                        }
+                    }
                 }
                 if let Some((local, kind)) = self.kind_check(lhs, rhs).or_else(|| self.kind_check(rhs, lhs)) {
                     out.push((local, if equal { Fact::Kind(kind) } else { Fact::NotKind(kind) }));
