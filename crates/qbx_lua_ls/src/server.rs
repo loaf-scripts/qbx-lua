@@ -11,6 +11,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::check;
 use crate::document::Document;
 use crate::features::diagnostics::RuleSettings;
 use crate::features::{
@@ -70,17 +71,7 @@ impl Settings {
             .rules
             .iter()
             .filter(|(code, _)| qbx_lua_analysis::rules::find(code).is_some())
-            .filter_map(|(code, level)| {
-                let level = match level.as_str() {
-                    "off" => Level::Off,
-                    "hint" => Level::Hint,
-                    "info" => Level::Info,
-                    "warning" | "warn" => Level::Warning,
-                    "error" => Level::Error,
-                    _ => return None,
-                };
-                Some((code.clone(), level))
-            })
+            .filter_map(|(code, level)| Some((code.clone(), diagnostics::parse_level(level)?)))
             .collect()
     }
 }
@@ -475,23 +466,14 @@ impl Server {
         let in_scope = |resource: Option<crate::index::ResourceId>| everything || scope.contains(&resource);
         let settings = &self.settings.diagnostics;
         let enabled = settings.enable.unwrap_or(true) && settings.workspace.unwrap_or(true);
-        let mut targets: Vec<(Url, PathBuf, Option<crate::index::FileId>)> = Vec::new();
-        if enabled {
-            let in_workspace = |path: &std::path::Path| self.ws.roots.iter().any(|root| path.starts_with(root));
-            let stale = |id: crate::index::FileId, file: &crate::index::FileEntry| {
-                in_scope(file.resource) || stale_files.contains(&id)
-            };
-            let files = self.ws.index.files().filter(|(id, f)| f.origin == FileOrigin::Workspace && stale(*id, f));
-            for (id, file) in files {
-                targets.push((file.uri.clone(), file.path.clone(), Some(id)));
-            }
-            for (id, resource) in self.ws.index.resources.iter().enumerate() {
-                if in_workspace(&resource.manifest_path) && in_scope(Some(id as crate::index::ResourceId)) {
-                    let uri = crate::workspace::path_to_uri(&resource.manifest_path);
-                    targets.push((uri, resource.manifest_path.clone(), None));
-                }
-            }
-        }
+        let targets = match enabled {
+            true => check::targets(
+                &self.ws,
+                |id, file| in_scope(file.resource) || stale_files.contains(&id),
+                |id| in_scope(Some(id)),
+            ),
+            false => Vec::new(),
+        };
 
         let rule_settings = self.settings.rule_settings();
         // A client spells the URI of a file in its own way, as VS Code does with `file:///c%3A/...`,
@@ -499,7 +481,7 @@ impl Server {
         // replace what it shows with this list, which has no hints.
         let open: FxHashMap<PathBuf, &Document> =
             self.docs.values().map(|doc| (normalize_path(&doc.path), doc)).collect();
-        let checked: FxHashSet<Url> = targets.iter().map(|(uri, ..)| uri.clone()).collect();
+        let checked: FxHashSet<Url> = targets.iter().map(|target| target.uri.clone()).collect();
         let mut reported: FxHashSet<Url> = if everything {
             FxHashSet::default()
         } else {
@@ -508,67 +490,36 @@ impl Server {
         let crossrefs = self.ws.crossrefs();
         let mut locale_usage: FxHashMap<crate::index::ResourceId, Vec<qbx_lua_analysis::locale::LocaleUsage>> =
             FxHashMap::default();
-        for (uri, path, file) in targets {
-            let resource = file.and_then(|id| self.ws.index.file(id)).and_then(|f| f.resource);
-            if let Some(open) = open.get(&normalize_path(&path)) {
-                if let Some(resource) = resource {
+        for target in &targets {
+            if let Some(open) = open.get(&normalize_path(&target.path)) {
+                if let Some(resource) = target.resource {
                     locale_usage.entry(resource).or_default().push(qbx_lua_analysis::locale::locale_usage(&open.chunk));
                 }
                 continue;
             }
-            let Ok(text) = qbx_lua_analysis::project::read_source(&path) else { continue };
-            let mut doc = Document::new(uri.clone(), path, 0, text);
-            doc.file = file.unwrap_or_else(|| self.ws.index.allocate(&doc.path));
-            if let Some(resource) = resource {
-                locale_usage.entry(resource).or_default().push(qbx_lua_analysis::locale::locale_usage(&doc.chunk));
+            let Ok(text) = qbx_lua_analysis::project::read_source(&target.path) else { continue };
+            let (mut found, usage) = check::file_diagnostics(&mut self.ws, target, text, &rule_settings, &crossrefs);
+            if let Some(resource) = target.resource {
+                locale_usage.entry(resource).or_default().push(usage);
             }
-            let mut found = diagnostics::diagnostics(&self.ws, &doc, &rule_settings, &crossrefs);
             found.retain(|d| d.severity != Some(DiagnosticSeverity::HINT));
             found.sort_by_key(|d| d.severity.map_or(4, |s| if s == DiagnosticSeverity::ERROR { 0 } else { 1 }));
             found.truncate(MAX_PROBLEMS_PER_CLOSED_FILE);
             if !found.is_empty() {
-                reported.insert(uri.clone());
+                reported.insert(target.uri.clone());
             }
-            if !found.is_empty() || self.workspace_reported.contains(&uri) {
+            if !found.is_empty() || self.workspace_reported.contains(&target.uri) {
                 self.notify::<notif::PublishDiagnostics>(PublishDiagnosticsParams {
-                    uri,
+                    uri: target.uri.clone(),
                     diagnostics: found,
                     version: None,
                 });
             }
         }
         for (resource, usages) in locale_usage {
-            let Some(entry) = self.ws.index.resource(resource) else { continue };
-            // Encrypted scripts may use any key, so "unused" cannot be decided for such a resource.
-            if entry.escrowed {
+            let Some((uri, found)) = check::unused_locale_keys(&self.ws, resource, usages, &rule_settings) else {
                 continue;
-            }
-            let Some(locale) = qbx_lua_analysis::locale::LocaleFile::load(&entry.root) else { continue };
-            if diagnostics::is_silenced(&self.ws, &locale.path) {
-                continue;
-            }
-            let mut config = self.ws.lint_config.for_file(&locale.path);
-            rule_settings.apply(&mut config);
-            let Some(severity) = config.severity(qbx_lua_analysis::rules::UNUSED_LOCALE_KEY) else { continue };
-            let lines = qbx_lua_syntax::LineIndex::new(&locale.source);
-            let found: Vec<Diagnostic> = qbx_lua_analysis::lint::unused_locale_keys_from(&locale, usages.into_iter())
-                .into_iter()
-                .map(|d| Diagnostic {
-                    range: crate::indexer::span_to_range(&locale.source, &lines, d.span),
-                    severity: Some(match severity {
-                        qbx_lua_analysis::Severity::Error => DiagnosticSeverity::ERROR,
-                        qbx_lua_analysis::Severity::Warning => DiagnosticSeverity::WARNING,
-                        qbx_lua_analysis::Severity::Info => DiagnosticSeverity::INFORMATION,
-                        qbx_lua_analysis::Severity::Hint => DiagnosticSeverity::HINT,
-                    }),
-                    code: Some(NumberOrString::String(d.code.to_string())),
-                    source: Some(diagnostics::SOURCE.to_string()),
-                    message: d.message,
-                    tags: Some(vec![DiagnosticTag::UNNECESSARY]),
-                    ..Diagnostic::default()
-                })
-                .collect();
-            let uri = crate::workspace::path_to_uri(&locale.path);
+            };
             reported.remove(&uri);
             if !found.is_empty() {
                 reported.insert(uri.clone());

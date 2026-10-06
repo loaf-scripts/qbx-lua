@@ -72,6 +72,18 @@ impl RuleSettings {
     }
 }
 
+/// The level that a setting names: `off`, `hint`, `info`, `warning` or `warn`, or `error`.
+pub fn parse_level(text: &str) -> Option<Level> {
+    Some(match text {
+        "off" => Level::Off,
+        "hint" => Level::Hint,
+        "info" => Level::Info,
+        "warning" | "warn" => Level::Warning,
+        "error" => Level::Error,
+        _ => return None,
+    })
+}
+
 pub fn is_silenced(ws: &Workspace, path: &Path) -> bool {
     ws.lint_config.is_excluded(path) || ws.lint_config.ignores_diagnostics(path)
 }

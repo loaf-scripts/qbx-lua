@@ -1,4 +1,5 @@
 pub mod callback_wrappers;
+pub mod check;
 pub mod document;
 pub mod features;
 pub mod framework_callbacks;
