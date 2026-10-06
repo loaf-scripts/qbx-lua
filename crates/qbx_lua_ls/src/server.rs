@@ -619,6 +619,21 @@ impl Server {
                 let Ok(params) = serde_json::from_value::<DidOpenTextDocumentParams>(params) else { return };
                 let item = params.text_document;
                 let Some(path) = uri_to_path(&item.uri) else { return };
+                // The open document is reported under the client's spelling of its URI from here on,
+                // so what the files nobody has open reported under another, as the index spells it,
+                // is cleared: the workspace pass leaves an open file alone.
+                let opened = normalize_path(&path);
+                let spelled_otherwise: Vec<Url> = self
+                    .workspace_reported
+                    .iter()
+                    .filter(|uri| **uri != item.uri && uri_to_path(uri).is_some_and(|p| normalize_path(&p) == opened))
+                    .cloned()
+                    .collect();
+                for uri in spelled_otherwise {
+                    self.workspace_reported.remove(&uri);
+                    let cleared = PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None };
+                    self.notify::<notif::PublishDiagnostics>(cleared);
+                }
                 let mut doc = Document::new(item.uri.clone(), path, item.version, item.text);
                 if doc.is_manifest() {
                     self.ws.side_and_resource(&doc.path);

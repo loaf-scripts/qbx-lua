@@ -6604,6 +6604,12 @@ fn open_files_keep_their_hints_when_the_client_spells_uris_its_own_way() {
         "textDocument/didOpen",
         json!({ "textDocument": { "uri": spelled, "languageId": "lua", "version": 1, "text": text } }),
     );
+    client.diagnostics_for("main.lua");
+    assert_eq!(
+        codes(&client, &indexed).unwrap(),
+        Vec::<String>::new(),
+        "what the closed file showed under the index's spelling is cleared once it is open"
+    );
     // A save has the files nobody has open checked again.
     client.notify("textDocument/didSave", json!({ "textDocument": { "uri": spelled } }));
     client.diagnostics.clear();
