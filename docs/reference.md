@@ -1086,7 +1086,9 @@ local function list(data)
 end
 ```
 
-A `---@param` or `---@type` gives the name a type, `any` included. Without one, a parameter that
+A `---@param` or `---@type` gives the name a type, `any` and `unknown` included, as TypeScript takes
+an `unknown` that is written out, and so does a loop over a table whose type declares its keys and
+values, as `{ [unknown]: unknown }` does. Without one, a parameter that
 only takes `any` from the `...` of the `fun(...)` its function is passed as, like the handler of
 `RegisterNetEvent`, counts as untyped, and so does the `data` of a `RegisterNUICallback` handler,
 which only the resource's own UI decides. Its `---@param` goes above the statement that makes the
@@ -1111,7 +1113,9 @@ of `[rules]`.
 It also reports a value of unknown type where a type is declared for what takes it: a local or
 parameter with a `---@type` or `@param`, a field of a class or of a table built for a declared
 table type, an element of such a table, a parameter that each signature the call may use declares,
-and a value that `@return` declares:
+and a value that `@return` declares. The value of a statement that has its own `---@type` is not
+reported, as that annotation is how code gives a value of unknown type its type, as
+`---@type EsxSkinConfig` above `local config = ESX.GetConfig()` does:
 
 ```lua
 ---@param entities number[]

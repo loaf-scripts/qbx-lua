@@ -102,6 +102,11 @@ impl Finder<'_, '_> {
                 continue;
             }
             if let Some(pick) = self.unknowns {
+                // The `---@type` of the statement is how a value of no known type is given one, as
+                // `---@type Config` above `local config = ESX.GetConfig()` does.
+                if target.annotated {
+                    continue;
+                }
                 if given.is_unknown() && is_typed(expected) && value_at(exprs, index).is_some_and(pick) {
                     let name = target.name.text(self.infer.ctx.source);
                     self.out.push((

@@ -3664,7 +3664,6 @@ print(target, typed, name, box, call)
                 "entities = { entities }",
                 "The type of the value assigned to field `[1]` of type `number` is unknown"
             ),
-            finding("local typed", "The type of the value assigned to `typed` of type `number` is unknown"),
             finding(
                 "takesNumber(Undefined)",
                 "The type of the value passed to parameter `n` of type `number` is unknown"
@@ -3681,7 +3680,7 @@ print(target, typed, name, box, call)
             finding("return Undefined()", "The type of return value #1 of type `string` is unknown"),
         ],
         "a value of unknown type is reported where a declared type takes it, but not for `any`, nor when it is read \
-         from a local that is reported itself"
+         from a local that is reported itself, nor where the `---@type` of its own statement types it"
     );
 }
 
@@ -6044,6 +6043,54 @@ end)
     client.open_with("strict/main.lua", text);
     assert_eq!(findings(&mut client, "strict/main.lua", &["no-unknown"]), expected, "the same once it is open");
     assert!(findings(&mut client, "loose.lua", &["no-unknown"]).is_empty(), "the rule is off unless turned on");
+}
+
+#[test]
+fn no_unknown_takes_written_types_and_type_lines_at_their_word() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.SkinConfig
+---@field Locale string
+
+---@type Probe.SkinConfig
+local config = UnknownFramework.GetConfig()
+---@type Probe.SkinConfig
+SkinConfig = UnknownFramework.GetConfig()
+---@type Probe.SkinConfig
+local later
+later = UnknownFramework.GetConfig()
+
+---@param t { [unknown]: unknown }
+local function walk(t)
+    for key, value in pairs(t) do print(key, value) end
+end
+---@param x unknown
+local function take(x) print(x) end
+---@type unknown
+local held = nil
+---@param data table
+local function plain(data)
+    for name, entry in pairs(data) do print(name, entry) end
+end
+return config, later, walk, take, held, plain
+";
+    client.open_with(CLIENT, text);
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "no-unknown": "warning" } } } } }),
+    );
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("no-unknown".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["no-unknown"]),
+        [
+            finding("later = ", "The type of the value assigned to `later` of type `Probe.SkinConfig` is unknown"),
+            finding("for name, entry", "Loop variable `name` has no type; give the value the loop goes through one"),
+            finding("for name, entry", "Loop variable `entry` has no type; give the value the loop goes through one"),
+        ],
+        "the `---@type` of a statement types the value it gives, and `unknown` written out is a type, as in \
+         TypeScript, while a plain `table` says nothing about what it holds"
+    );
 }
 
 #[test]

@@ -12,8 +12,9 @@ use rustc_hash::FxHashSet;
 use super::arguments::unknown_arguments;
 use super::assignments::unknown_assignments;
 use super::callback_payloads::Payload;
+use super::comparisons::Declared;
 use super::returns::unknown_returns;
-use crate::infer::{Decl, Infer};
+use crate::infer::{iterated_table, Decl, Infer};
 use crate::types::Type;
 
 /// Each value of no known type that a variable, field, parameter or `@return` with a declared type
@@ -98,7 +99,7 @@ fn untyped_locals<'i>(infer: &'i Infer, ignored_prefix: &str) -> Vec<(LocalId, &
             return false;
         }
         match infer.local_type(*id) {
-            Type::Unknown => true,
+            Type::Unknown => !declared_unknown(infer, local),
             // The handler of `RegisterNetEvent(name, function(payload) end)` takes `any` from the
             // `...` of the `fun(...)` it is passed as, which says no more about `payload` than
             // nothing does. A parameter the function type names, like `value` of
@@ -108,6 +109,25 @@ fn untyped_locals<'i>(infer: &'i Infer, ignored_prefix: &str) -> Vec<(LocalId, &
         }
     });
     untyped.collect()
+}
+
+/// Whether an annotation gives the local its type, `unknown` written out included, as TypeScript
+/// takes an `unknown` it is given: the `---@type` of its `local`, its `@param` line, or for a loop
+/// variable the type of the table the loop goes through, when that declares its keys and values,
+/// as `{ [unknown]: unknown }` does and a plain `table` does not.
+fn declared_unknown(infer: &Infer, local: &Local) -> bool {
+    match infer.ctx.decl(local.decl.start) {
+        Some(Decl::Local { stmt, index }) => infer.ctx.doc_at(stmt.span.start).type_at(*index).is_some(),
+        Some(Decl::Param { .. }) => has_param_line(infer, local),
+        Some(Decl::GenericFor { stmt, .. }) => iterated_table(stmt).is_some_and(|(table, _)| {
+            let declared = Declared::annotations(infer).of(table);
+            matches!(
+                infer.expand_aliases(&declared, 0),
+                Type::Map(..) | Type::Array(_) | Type::Tuple(_) | Type::Shape(_)
+            )
+        }),
+        _ => false,
+    }
 }
 
 /// Whether a `@param` line documents the parameter: above its function, the call its function is
