@@ -2688,6 +2688,27 @@ impl<'a> Infer<'a> {
         })
     }
 
+    /// `values` of a call of `base`, or its `method`, where an `assert(v)` gives its `v`, of the type
+    /// `first` gives it, without the `nil` and `false` it raises an error for, as lua-language-server
+    /// reads it. A generic would widen the `false` of a `string|false` to a `boolean`.
+    fn asserted(
+        &self,
+        base: &Expr,
+        method: Option<&Name>,
+        mut values: Vec<Type>,
+        first: impl FnOnce() -> Option<Type>,
+    ) -> Vec<Type> {
+        let ExprKind::Name(name) = &base.unparen().kind else { return values };
+        let is_global = !matches!(self.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Local(_)));
+        if method.is_some() || name.text != "assert" || !is_global {
+            return values;
+        }
+        if let (Some(value), Some(first)) = (values.first_mut(), first()) {
+            *value = self.without_falsy(&first);
+        }
+        values
+    }
+
     /// Whether `call` runs a function that returns nothing, so what it gives is surely `nil`.
     pub fn returns_nothing(&self, call: &Expr) -> bool {
         self.guarded(|| match &call.unparen().kind {
@@ -2817,7 +2838,8 @@ impl<'a> Infer<'a> {
         let generics = self.bind_generics(&fun, &args, method.is_some(), true);
         let bound = |types: &Vec<Type>| types.iter().map(|ret| substitute(ret, &generics)).collect();
         Returned {
-            values: bound(&fun.returns),
+            values: self
+                .asserted(base, method, bound(&fun.returns), || args.exprs.first().map(|_| args.ty(self, 0).clone())),
             sets: fun.return_sets.iter().map(bound).collect(),
             declared: !fun.returns_inferred && fun.generics.is_empty(),
             nothing: false,

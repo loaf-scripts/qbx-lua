@@ -165,7 +165,8 @@ after them, to the code after an `if` whose other branches all end in `return`, 
 `break` or `goto`, to the body of a `while`, to the right side of `and` and `or`, and to the code
 after `assert(name)`. A guard narrows what a local holds there, also one that is
 [assigned again](#locals-that-are-assigned-again), and the [fields](#fields) of locals, while
-globals are not narrowed.
+globals are not narrowed. `assert(value)` also returns its value without `nil` and `false`, so
+`local chunk = assert(load(code))` is a `function`, as in lua-language-server.
 
 A comparison with a literal narrows the local to that literal: inside `if state == "busy" then`, a
 `"active"|"busy"|nil` and a `string` are both `"busy"`, and in the `else` branch the first is

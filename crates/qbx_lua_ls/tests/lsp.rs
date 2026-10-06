@@ -8444,6 +8444,28 @@ watch(Settings.Count, function(set) set(1) end)
 }
 
 #[test]
+fn assert_returns_its_value_without_nil_and_false() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type string?
+local maybe
+local sure = assert(maybe)
+local chunk = assert(load('return 1'))
+---@type string|false
+local named
+local text = assert(named, 'no name')
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in
+        [("sure = ", "sure: string\n"), ("chunk = ", "chunk: function\n"), ("text = assert", "text: string\n")]
+    {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn parameters_of_callbacks_have_the_types_their_callee_declares() {
     let mut client = Client::start(fixture_root());
     let text = "\
