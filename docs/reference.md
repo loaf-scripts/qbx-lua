@@ -575,6 +575,9 @@ checked against the class.
 Other keys need an index of their type. With only `---@field [string] number`, `abc[1]`,
 `abc[1] = x` and array entries such as `{ 'a' }` are reported, since the class has no `integer`
 keys. A key held in a string variable, as in `abc[key]`, may name a field and is not reported.
+A local without `---@type` that is never assigned again reads the fields that the literals it holds
+name, as lua-language-server reads them: with `local gender = isMale and "male" or "female"`,
+`byGender[gender]` has the type of the `male` and `female` fields, although `gender` is a `string`.
 
 Fields keyed by an integer or boolean literal, such as the entries of a tuple, are declared one by
 one:

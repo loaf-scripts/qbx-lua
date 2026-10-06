@@ -8583,6 +8583,49 @@ return maxDrawable, maxTexture, labelled, untyped
 }
 
 #[test]
+fn keys_read_the_fields_that_the_literals_they_may_hold_name() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Gendered
+---@field male number[]
+---@field female number[]
+
+---@type Probe.Gendered
+local byGender = { male = {}, female = {} }
+
+---@param isMale boolean
+local function get(isMale)
+    local gender = isMale and 'male' or 'female'
+    local one = 'male'
+    local other = isMale and 'male' or 'other'
+    local moved = 'male'
+    moved = 'female'
+    local byLocal = byGender[gender]
+    local byLiteral = byGender[one]
+    local written = byGender[isMale and 'male' or 'female']
+    local missing = byGender[other]
+    local assigned = byGender[moved]
+    return byLocal, byLiteral, written, missing, assigned
+end
+return get
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("gender = ", "gender: string\n"),
+        ("byLocal = ", "byLocal: number[]\n"),
+        ("byLiteral = ", "byLiteral: number[]\n"),
+        ("written = ", "written: number[]\n"),
+        // A literal that names no field, or a local that is assigned again, reads no field.
+        ("missing = ", "missing: unknown\n"),
+        ("assigned = ", "assigned: unknown\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn functions_given_by_or_and_and_take_what_the_statement_declares() {
     let mut client = Client::start(fixture_root());
     let text = "\

@@ -2177,8 +2177,13 @@ impl<'a> Infer<'a> {
 
     fn index_expr(&self, base: &Expr, index: &Expr) -> Type {
         let base_ty = self.expr(base);
-        // A `nil` key reads no value of the table.
-        let key_ty = self.expr(index).without_nil();
+        // `byGender[gender]` reads the fields that the literals `gender` may hold name, although
+        // the local is a `string`, as lua-language-server reads it. A `nil` key reads no value of
+        // the table.
+        let key_ty = match self.literal_values(index, 0) {
+            Some(values) => Type::union(values),
+            None => self.expr(index).without_nil(),
+        };
         let mut keys = Vec::new();
         if self.literal_keys(&key_ty, 0, &mut keys) && !keys.is_empty() {
             let fields: Option<Vec<Type>> = keys.iter().map(|key| self.member(&base_ty, key).map(|m| m.ty)).collect();
@@ -2187,6 +2192,45 @@ impl<'a> Infer<'a> {
             }
         }
         self.element_type(&base_ty.without_nil(), &key_ty, 0)
+    }
+
+    /// The literals that `expr` may give: `"male"` and `"female"` for `isMale and "male" or
+    /// "female"`, also through a local without `---@type` that is never assigned again and holds
+    /// one, as `local gender = isMale and "male" or "female"` does. `None` when it may give
+    /// another value.
+    fn literal_values(&self, expr: &Expr, depth: u32) -> Option<Vec<Type>> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        match &expr.unparen().kind {
+            ExprKind::String(_) | ExprKind::Number(_) | ExprKind::True => {
+                let ty = self.expr(expr);
+                ty.is_literal().then(|| vec![ty])
+            }
+            // `a and "x" or "y"` gives `"x"` when `a` holds, and `"y"` otherwise.
+            ExprKind::Binary { op: BinOp::Or, lhs, rhs, .. } => {
+                let mut values = match &lhs.unparen().kind {
+                    ExprKind::Binary { op: BinOp::And, rhs: value, .. } => self.literal_values(value, depth + 1)?,
+                    _ => self.literal_values(lhs, depth + 1)?,
+                };
+                values.extend(self.literal_values(rhs, depth + 1)?);
+                Some(values)
+            }
+            ExprKind::Name(name) => {
+                let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(name.span.start) else { return None };
+                let local = self.ctx.resolution.local(id);
+                if local.refs.iter().any(|r| r.write) {
+                    return None;
+                }
+                let Some(Decl::Local { stmt, index }) = self.ctx.decl(local.decl.start) else { return None };
+                let StmtKind::Local { exprs, in_unpack: false, .. } = &stmt.kind else { return None };
+                if local_annotation(&self.ctx.doc_at(stmt.span.start), *index).is_some() {
+                    return None;
+                }
+                self.literal_values(exprs.get(*index)?, depth + 1)
+            }
+            _ => None,
+        }
     }
 
     /// What `base[key]` holds for a key of type `key_ty` that is not a known field name.
