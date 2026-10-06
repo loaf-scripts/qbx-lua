@@ -3,7 +3,8 @@
 //! `---@type` or to a parameter documented with `@param`. As for `@return`, a value of a different
 //! kind, or a literal the type does not list, is a mismatch, for each type a union lists, `nil`
 //! included, though not the `nil` of a field read. `class_tables` checks the fields of class
-//! tables.
+//! tables. The `nil` that a `local` statement gives a name it leaves without a value is left alone,
+//! as a later assignment usually gives the value, unless nothing ever does.
 
 use qbx_lua_analysis::scope::{LocalId, Resolved};
 use qbx_lua_syntax::ast::*;
@@ -66,6 +67,24 @@ impl Finder<'_, '_> {
         }
     }
 
+    /// Reports the names of the `local` statement `stmt` that its `---@type` declares with a type
+    /// that does not take `nil`, though neither the statement nor any assignment gives them a value,
+    /// so they hold `nil` wherever they are read.
+    fn never_assigned(&mut self, stmt: &Stmt, names: &[AttribName], exprs: &[Expr]) {
+        let resolution = self.infer.ctx.resolution;
+        let given = |index: usize| index < exprs.len() || exprs.last().is_some_and(Expr::is_multi_value);
+        for (index, name) in names.iter().enumerate().filter(|(index, _)| !given(*index)) {
+            let Some(ty) = self.stmt_type(stmt, index) else { continue };
+            let Some(Resolved::Local(id)) = resolution.resolve_at(name.name.span.start) else { continue };
+            if resolution.local(id).refs.iter().any(|r| r.write) || self.classes.admits_nil(&ty, self.classes.file()) {
+                continue;
+            }
+            let message =
+                format!("Cannot assign `nil` to `{}` of type `{ty}`: nothing gives it a value", name.name.text);
+            self.out.push((name.name.span, message));
+        }
+    }
+
     /// Reports each of `exprs` that the declared type of the target it is stored in does not take.
     fn check(&mut self, targets: &[Target], exprs: &[Expr]) {
         if targets.iter().all(|target| target.ty.is_none()) {
@@ -120,6 +139,9 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
                 };
                 let targets: Vec<_> = names.iter().enumerate().map(declared).collect();
                 self.check(&targets, exprs);
+                if self.unknowns.is_none() {
+                    self.never_assigned(stmt, names, exprs);
+                }
             }
             StmtKind::Assign { targets, exprs } => {
                 // The `---@type` above the assignment, or else the type its target is declared with.

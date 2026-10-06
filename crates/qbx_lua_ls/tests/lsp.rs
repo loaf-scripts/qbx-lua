@@ -2448,6 +2448,50 @@ print(read, clear, waitReady, setReady)
 }
 
 #[test]
+fn typed_locals_that_nothing_gives_a_value_are_reported() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type number
+local never
+---@type number
+local later
+later = 1
+---@type number?
+local optional
+---@type number, string
+local first, second
+first = 1
+---@type number
+local given = 1
+---@type any
+local anything
+---@type number
+local inClosure
+local function fill() inClosure = 2 end
+return never, later, optional, first, second, given, anything, inClosure, fill
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        findings(&mut client, CLIENT, &["assign-type-mismatch"]),
+        [
+            (
+                "assign-type-mismatch".to_string(),
+                line("local never"),
+                "Cannot assign `nil` to `never` of type `number`: nothing gives it a value".to_string()
+            ),
+            (
+                "assign-type-mismatch".to_string(),
+                line("local first, second"),
+                "Cannot assign `nil` to `second` of type `string`: nothing gives it a value".to_string()
+            ),
+        ],
+        "a local that an assignment gives a value, also in another function, or whose type takes `nil`, is \
+         left alone, as lua-language-server leaves the declaration"
+    );
+}
+
+#[test]
 fn a_type_line_on_a_reassignment_types_the_value_it_assigns() {
     let mut client = Client::start(fixture_root());
     let text = "---@alias Test.Data { job: string }
