@@ -220,7 +220,7 @@ pub static RULES: &[Rule] = &[
     rule(AMBIGUITY_1, Suspicious, WARN, false, "An `or` gives or takes a literal next to arithmetic that binds tighter, as in `x + y or 0` or `x or 1 + y`, where the parentheses were likely meant around the `or`."),
     rule(COUNT_DOWN_LOOP, Suspicious, WARN, true, "A numeric for loop counts up from a start above its end, or from #list to 1, without a negative step."),
     rule(IMPOSSIBLE_COMPARISON, Suspicious, INFO, false, "Both sides of an == or ~= have types that share no value, so the comparison always gives the same answer (language server only)."),
-    rule(NEED_CHECK_NIL, Correctness, WARN, false, "A local whose declared type allows nil or false is indexed, called or used as a key without a check; with `strict`, also used in arithmetic, concatenation, # or an ordering comparison, or given as a for bound (language server only)."),
+    rule(NEED_CHECK_NIL, Correctness, WARN, false, "A local whose declared type allows nil or false is indexed, called or used as a key without a check; with `strict`, also used in arithmetic, concatenation, # or an ordering comparison, or given as a for bound, and so are fields, keys, call values and nil itself (language server only)."),
     rule(LOWERCASE_GLOBAL, Suspicious, WARN, false, "A global with a lowercase first letter is defined; this is usually a missing 'local'."),
     rule(IMPLICIT_GLOBAL, Suspicious, WARN, false, "A global is created from inside a function and never declared at file scope."),
     rule(BUILTIN_OVERWRITE, Suspicious, WARN, false, "A runtime global or native is overwritten."),

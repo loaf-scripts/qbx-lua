@@ -6041,9 +6041,11 @@ handle(1)
             finding("count > 0", "`count` may be nil: its type here is `number?`"),
             finding("1, limit", "`limit` may be nil: its type here is `number?`"),
             finding("'id:' .. suffix", "`suffix` may be nil: its type here is `string?`"),
+            finding("guarded.job:upper", "`guarded.job` may be nil: its type here is `string?`"),
+            finding("GetHolder().name", "`GetHolder()` may be nil: its type here is `Probe.Holder?`"),
         ],
-        "as in lua-language-server, only indexing, calls and keys are checked, while with `strict`, as in \
-         TypeScript, so are operators and `for` bounds"
+        "as in lua-language-server, only indexing, calls and keys of locals are checked, while with `strict`, \
+         as in TypeScript, so are operators and `for` bounds, and fields and the values of calls"
     );
     assert_eq!(
         strict,
@@ -6075,9 +6077,10 @@ handle(1)
             // A guard on `vehicle` tells nothing about `coords`, unless the function declares the sets
             // of values it returns, as `GetNearest` does.
             finding("coords.x", "`coords` may be nil: its type here is `vector3?`"),
+            finding("guarded.job:upper", "`guarded.job` may be nil: its type here is `string?`"),
+            finding("GetHolder().name", "`GetHolder()` may be nil: its type here is `Probe.Holder?`"),
         ],
-        "every read that no guard or cast covers is reported, while fields and the values of calls are left \
-         alone"
+        "every read that no guard or cast covers is reported, also of fields and the values of calls"
     );
     client.notify(
         "workspace/didChangeConfiguration",
@@ -7463,6 +7466,68 @@ end
             finding("stats.health", "`stats` may be nil: its type here is `{ health: integer }?`"),
         ],
         "with `strict`, as in TypeScript, they do"
+    );
+}
+
+#[test]
+fn fields_keys_and_calls_that_may_be_nil_are_checked_with_strict() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Blip
+---@field Category 'auto' | number?
+---@field Sprite number
+---@field label? string
+---@field items? string[]
+
+---@class Test.Blips
+---@field Shop Test.Blip
+---@field Garage Test.Blip
+
+---@return number?
+local function GetCategory() end
+
+---@type Test.Blips
+Blips = {}
+
+---@param blip Test.Blip
+local function show(blip)
+    print('BLIP_CAT_' .. blip.Category)
+    print(blip.label:upper())
+    print(blip.items[1])
+    print(blip.Sprite + 1)
+    if blip.label then print(blip.label:upper()) end
+    print(blip.label and blip.label:upper())
+    print(blip.items and #blip.items)
+    print(GetCategory() + 1)
+end
+
+for name, options in pairs(Blips) do
+    options.Category = GetCategory()
+    print('BLIP_CAT_' .. options.Category, name)
+    options.Category = 12
+    print('BLIP_CAT_' .. options.Category)
+end
+print('test' .. nil)
+return show
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("need-check-nil".to_string(), line(needle), message.to_string());
+    let relaxed = findings(&mut client, CLIENT, &["need-check-nil"]);
+    assert_eq!(relaxed, [], "as in lua-language-server, only locals are checked");
+    client.set_strict(true);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [
+            finding("' .. blip.Category", "`blip.Category` may be nil: its type here is `\"auto\"|number|nil`"),
+            finding("blip.label:upper())\n    print(blip.items", "`blip.label` may be nil: its type here is `string?`"),
+            finding("blip.items[1]", "`blip.items` may be nil: its type here is `string[]?`"),
+            finding("GetCategory() + 1", "`GetCategory()` may be nil: its type here is `number?`"),
+            finding("options.Category, name", "`options.Category` may be nil: its type here is `number?`"),
+            finding("'test' .. nil", "`nil` raises an error here"),
+        ],
+        "with `strict`, as in TypeScript, fields, keys and calls are checked like locals, through the guards \
+         and assignments before them, and so is a loop over a declared table"
     );
 }
 

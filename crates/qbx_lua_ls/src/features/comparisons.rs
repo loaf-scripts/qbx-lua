@@ -359,6 +359,15 @@ impl<'a, 'b> Declared<'a, 'b> {
                 Some((table, _)) if !self.declared(table, depth + 1).is_unknown() => self.infer.local_type(id),
                 _ => Type::Unknown,
             },
+            // With `strict`, as TypeScript types the values of a loop over a typed table, a loop over
+            // a table whose type declares its values gives them, which `pairs` and `ipairs` never
+            // give as `nil`.
+            Some(Decl::GenericFor { stmt, .. }) if self.infer.strict() => match iterated_table(stmt) {
+                Some((table, _)) if declares_values(&self.infer.expand_aliases(&self.infer.expr(table), 0)) => {
+                    self.infer.local_type(id).without_nil()
+                }
+                _ => Type::Unknown,
+            },
             _ => Type::Unknown,
         }
     }
@@ -672,4 +681,10 @@ impl<'c> Visitor<'c> for CastTargets<'_, '_> {
         }
         visit::walk_expr(self, expr);
     }
+}
+
+/// Whether a table of type `ty` declares the values it holds, as a class, an array, a map or a tuple
+/// that annotations write do, rather than one that a constructor builds and code fills.
+fn declares_values(ty: &Type) -> bool {
+    matches!(ty, Type::Named(..) | Type::Array(_) | Type::Map(..) | Type::Tuple(_))
 }

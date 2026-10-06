@@ -3,7 +3,8 @@
 //! lua-language-server checks them. `name:upper()` after `local name = GetName()`, for a function
 //! declared to return `string?`, is one. With `strict`, as TypeScript does, so is arithmetic,
 //! concatenation, `#` or a `<`, `<=`, `>` or `>=` comparison with it, which raise the error too,
-//! and a bound of a numeric `for` it gives. A local that may hold `nil` is also reported where a
+//! and a bound of a numeric `for` it gives, and fields, keys and the values of calls are checked
+//! where locals are, as is `nil` written out. A local that may hold `nil` is also reported where a
 //! call passes it for a parameter that does not take `nil` in any signature the call may use, as
 //! `param-type-mismatch` reads them; natives are left out, as their arguments are.
 //! lua-language-server reports those arguments as `param-type-mismatch`, so suppressing that rule
@@ -26,8 +27,8 @@
 //! of the same call tells nothing about it, unless the function declares the sets of values it
 //! returns, as `@return nil | (integer, vector3)` does. The rest is left alone:
 //!
-//! - Fields, as in lua-language-server, and the values of calls. A local that takes the value of a
-//!   field has the type that the guards on the field leave.
+//! - Without `strict`, fields, as in lua-language-server, and the values of calls. A local that
+//!   takes the value of a field has the type that the guards on the field leave.
 //! - A value whose type is not declared, as `name = name or 'none'` gives, and the missing value of
 //!   `local name` before something gives it one.
 //! - Without `strict`, as in lua-language-server, the `nil` that code running at other times, such
@@ -78,7 +79,13 @@ impl Finder<'_, '_> {
     /// Reports `operand` when it names a local that may hold `nil` or `false` there, or only `nil`
     /// when a call passes it for `param`, which does not take it.
     fn check_value(&mut self, operand: &Expr, param: Option<&Param>) {
-        let ExprKind::Name(name) = &operand.unparen().kind else { return };
+        let ExprKind::Name(name) = &operand.unparen().kind else {
+            // A call passes them to `param-type-mismatch`, which counts their `nil` with `strict`.
+            if param.is_none() && self.infer.strict() {
+                self.check_expression(operand.unparen());
+            }
+            return;
+        };
         let ctx = self.infer.ctx;
         let Some(Resolved::Local(id)) = ctx.resolution.resolve_at(name.span.start) else { return };
         // `self` is the value a method is called on.
@@ -102,6 +109,33 @@ impl Finder<'_, '_> {
             )),
             None => self.out.push((name.span, format!("`{}` may be {missing}: its type here is `{ty}`", name.text))),
         }
+    }
+
+    /// With `strict`, as TypeScript checks any expression, a field, key or call whose declared type
+    /// allows `nil` or `false` there, and `nil` written out. The fields read through a global, as
+    /// `Config.blips`, are left alone, as no guard narrows them.
+    fn check_expression(&mut self, operand: &Expr) {
+        let message = match &operand.kind {
+            ExprKind::Nil => "`nil` raises an error here".to_string(),
+            ExprKind::Field { .. } | ExprKind::Index { .. } if self.read_through_global(operand) => return,
+            ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
+                let ty = self.declared.of(operand);
+                let Some(missing) = missing_value(&self.infer.expand_aliases(&ty, 0), |_| true) else { return };
+                format!("`{}` may be {missing}: its type here is `{ty}`", shown(self.infer.ctx.source, operand))
+            }
+            _ => return,
+        };
+        self.out.push((operand.span, message));
+    }
+
+    /// Whether `expr`, a field or key, is read through a global, as `Config.Blips.Shop` is.
+    fn read_through_global(&self, expr: &Expr) -> bool {
+        let mut base = expr;
+        while let ExprKind::Field { base: inner, .. } | ExprKind::Index { base: inner, .. } = &base.unparen().kind {
+            base = inner;
+        }
+        let ExprKind::Name(name) = &base.unparen().kind else { return false };
+        !matches!(self.infer.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Local(_)))
     }
 
     /// Reports the locals among `args` that may hold `nil` where each signature the call may use
@@ -139,6 +173,21 @@ impl Finder<'_, '_> {
         matches!(self.infer.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Local(_)))
             && missing_value(&self.infer.expand_aliases(&self.declared.of(arg), 0), |_| true) == Some("nil")
     }
+}
+
+/// How a message shows `expr`: as written, or a call that does not fit on a short line by what it
+/// calls, as `GetPlayer(...)`.
+fn shown(source: &str, expr: &Expr) -> String {
+    let text = expr.span.text(source);
+    if text.len() <= 60 && !text.contains('\n') {
+        return text.to_string();
+    }
+    let callee = match &expr.kind {
+        ExprKind::Call { callee, .. } => callee.span,
+        ExprKind::MethodCall { base, method, .. } => base.span.to(method.span),
+        _ => return format!("{}...", text.lines().next().unwrap_or_default().trim_end()),
+    };
+    format!("{}(...)", callee.text(source))
 }
 
 /// What `ty` allows that raises the error and `reaches` the read: `nil`, or else `false`. `None` when

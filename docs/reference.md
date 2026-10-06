@@ -330,7 +330,12 @@ With `strict`:
   loop from 1 to the `#` of a table reads, as `rows[i]` in `for i = 1, #rows do`, has the type the
   table declares for it, `nil` included, and a function without `@return` also gives the `nil` of
   running past the end of its body, and that of a `return nil` when it is called through `exports`.
-  See [Nil checks](#nil-checks).
+  Fields, keys and the values of calls are checked as locals are, as `blip.label:upper()` is for a
+  `label? string`, and so is `nil` written out. See [Nil checks](#nil-checks).
+- A loop over a table whose type declares its values, a class, an array, a map or a tuple, as
+  `pairs(Config.Blips)` is for a `Config` typed with `---@type`, gives its variables those types, as
+  TypeScript does, for the checks that only count declared types. A table that a constructor builds
+  and code fills, as `local seen = {}`, declares nothing.
 - `fivem/native-wrong-side` reports the names of one side anywhere in a shared script that no guard
   keeps on that side, not only in the code that runs while it loads. See
   [Globals and client/server context](#globals-and-clientserver-context).
@@ -1178,10 +1183,12 @@ declared to return `xPlayer?` counts like any other call.
 
 Only clear cases count, and the rest is left alone:
 
-- Fields, which lua-language-server leaves alone too, and the values of calls. A local that takes
-  the value of a field has the type the guards around it leave of the field, so
+- Without `strict`, fields, which lua-language-server leaves alone too, and the values of calls.
+  A local that takes the value of a field has the type the guards around it leave of the field, so
   `local job = data.job` inside `if data.job then` holds a value; see
-  [fields](../crates/qbx_lua_ls/README.md#fields).
+  [fields](../crates/qbx_lua_ls/README.md#fields). With `strict`, they are checked as locals are,
+  through the guards and assignments before them, except fields read through a global, such as
+  `Config.blips`, as guards only narrow the fields of locals.
 - A local that one of the values that may reach the read leaves without a declared type, as
   `name = name or 'none'` does, unless a `---@cast name T` types it. A local that is assigned again
   is checked with the values that reach the read, as described for
