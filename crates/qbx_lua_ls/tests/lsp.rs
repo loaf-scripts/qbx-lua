@@ -8583,6 +8583,49 @@ return maxDrawable, maxTexture, labelled, untyped
 }
 
 #[test]
+fn functions_given_by_or_and_and_take_what_the_statement_declares() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Look
+---@field model string
+
+---@type fun(look: Probe.Look): Probe.Look
+Prepare = Prepare or function(look) return look end
+
+---@param look Probe.Look
+Other = Other or function(look) return look end
+
+---@class Probe.Shop
+---@field open fun(id: integer)
+Shop = Shop or {}
+Shop.open = Shop.open or function(id) print(id) end
+
+---@type fun(n: number): string
+local pick = math.random() > 0.5 and function(n) return tostring(n) end or tostring
+
+---@type Probe.Look
+Look = Look or {}
+return pick
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("look) return look end\n\n---@param", "look: Probe.Look"),
+        ("look) return look end\n\n---@class", "look: Probe.Look"),
+        ("id) print", "id: integer\n"),
+        ("n) return tostring", "n: number\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    assert_eq!(
+        findings(&mut client, CLIENT, &["missing-fields"]),
+        [],
+        "a table given by `or` keeps the type it is built with, as it is filled in later"
+    );
+}
+
+#[test]
 fn parameters_of_callbacks_have_the_types_their_callee_declares() {
     let mut client = Client::start(fixture_root());
     let text = "\

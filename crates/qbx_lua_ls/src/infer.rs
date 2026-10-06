@@ -507,7 +507,31 @@ impl<'a> DeclCollector<'a> {
                 self.tables.insert(expr.span.start, at);
                 self.expr(expr, None);
             }
+            // `X = X or function(appearance) end` gives the function what the statement declares, as
+            // TypeScript types both sides of `||` and the right side of `&&`.
+            ExprKind::Binary { op: BinOp::Or | BinOp::And, .. } if alternative_function(expr).is_some() => {
+                self.alternatives(expr, doc_anchor, at)
+            }
             _ => self.expr(expr, doc_anchor),
+        }
+    }
+
+    /// The sides of `a or b` and `a and b` that may be the value of the expression, with the
+    /// function among them taking what `at` declares. A table there keeps the type it is built with,
+    /// as `Config = Config or {}` is filled in later.
+    fn alternatives(&mut self, expr: &'a Expr, doc_anchor: Option<u32>, at: Expected<'a>) {
+        match &expr.kind {
+            ExprKind::Function(func) => self.func(func, doc_anchor, Some(at)),
+            ExprKind::Paren(inner) => self.alternatives(inner, doc_anchor, at),
+            ExprKind::Binary { op: BinOp::Or, lhs, rhs, .. } => {
+                self.alternatives(lhs, doc_anchor, at);
+                self.alternatives(rhs, doc_anchor, at);
+            }
+            ExprKind::Binary { op: BinOp::And, lhs, rhs, .. } => {
+                self.expr(lhs, None);
+                self.alternatives(rhs, doc_anchor, at);
+            }
+            _ => self.expr(expr, None),
         }
     }
 
@@ -1747,12 +1771,10 @@ impl<'a> Infer<'a> {
                 }
                 match &stmt.kind {
                     StmtKind::Local { .. } => local_annotation(&doc, index),
-                    StmtKind::Assign { exprs, .. } => {
-                        doc.type_at(index).cloned().or_else(|| match &exprs.get(index)?.kind {
-                            ExprKind::Function(func) => self.field_signature(stmt, func),
-                            _ => None,
-                        })
-                    }
+                    StmtKind::Assign { exprs, .. } => doc.type_at(index).cloned().or_else(|| {
+                        let func = alternative_function(exprs.get(index)?)?;
+                        self.field_signature(stmt, func)
+                    }),
                     _ => doc.type_at(index).cloned(),
                 }
             }
@@ -1792,7 +1814,7 @@ impl<'a> Infer<'a> {
                 (&name.method.as_ref().or(name.path.last())?.text, name.method.is_some())
             }
             StmtKind::Assign { targets, exprs } => {
-                let defines = |expr: &Expr| matches!(&expr.kind, ExprKind::Function(f) if std::ptr::eq(&**f, func));
+                let defines = |expr: &Expr| alternative_function(expr).is_some_and(|f| std::ptr::eq(f, func));
                 match &targets.get(exprs.iter().position(defines)?)?.kind {
                     ExprKind::Field { name, .. } => (&name.text, false),
                     ExprKind::Index { index, .. } => (index.as_string()?, false),
@@ -1898,7 +1920,7 @@ impl<'a> Infer<'a> {
                 },
             },
             StmtKind::Assign { targets, exprs } => {
-                let defines = |expr: &Expr| matches!(&expr.kind, ExprKind::Function(f) if std::ptr::eq(&**f, func));
+                let defines = |expr: &Expr| alternative_function(expr).is_some_and(|f| std::ptr::eq(f, func));
                 match exprs.iter().position(defines).and_then(|index| targets.get(index)).map(|target| &target.kind) {
                     Some(ExprKind::Field { base, .. } | ExprKind::Index { base, .. }) => self.expr(base),
                     _ => Type::Unknown,
@@ -4375,6 +4397,20 @@ fn field_start(source: &str, field: &TableField) -> u32 {
             before.strip_suffix('[').map_or(key.span.start, |rest| rest.len() as u32)
         }
         TableField::Positional(value) => value.span.start,
+    }
+}
+
+/// The function literal that `expr` gives when it is the value, as `function() end` itself,
+/// `X or function() end` and `cond and function() end` may.
+fn alternative_function(expr: &Expr) -> Option<&FuncBody> {
+    match &expr.kind {
+        ExprKind::Function(func) => Some(func),
+        ExprKind::Paren(inner) => alternative_function(inner),
+        ExprKind::Binary { op: BinOp::Or, lhs, rhs, .. } => {
+            alternative_function(rhs).or_else(|| alternative_function(lhs))
+        }
+        ExprKind::Binary { op: BinOp::And, rhs, .. } => alternative_function(rhs),
+        _ => None,
     }
 }
 

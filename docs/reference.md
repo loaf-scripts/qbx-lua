@@ -1090,6 +1090,9 @@ types of the field's `fun(...)` when the table has a declared type: the `---@typ
 `setmetatable`. A function defined for a `---@field name fun(...)` of a class, with
 `function Class:name()`, `function Class.name()` or `Class.name = function()`, takes the parameter
 types of that `fun(...)` when it has as many parameters, not counting the `self` of `:`. A function
+that a statement gives through `or` or `and`, as `Prepare = Prepare or function(look) end`, takes
+what the statement declares as one written alone would, as TypeScript types the sides of `||`;
+a table given that way, as `Config = Config or {}`, is not checked against it. A function
 that a `return` passes takes the `---@param` lines above the `return`, and the parameter types of
 the `fun(...)` that the `@return` of the function around it declares at that position, or the
 function type declared for that function, as `---@type fun(): fun(ped: number)`. A local
