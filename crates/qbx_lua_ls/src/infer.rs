@@ -131,6 +131,9 @@ pub enum Expected<'a> {
     /// The value of the field `key` of a table constructor, which has the type of that field of the
     /// table.
     Field { table: &'a Expr, key: FieldKey<'a> },
+    /// Value `index` of a `return` of the function `func`, whose doc comment is at `doc_anchor`,
+    /// typed by the `@return` there or by the function type something declares `func` has.
+    Return { func: &'a FuncBody, doc_anchor: Option<u32>, index: usize },
 }
 
 /// How a table constructor keys one of its fields.
@@ -177,6 +180,7 @@ impl<'a> FileContext<'a> {
             functions: FxHashMap::default(),
             index_writes: Vec::new(),
             set_metatables: Vec::new(),
+            enclosing: Vec::new(),
         };
         collector.block(&chunk.block);
         let mut set_metatables: FxHashMap<LocalId, Vec<(u32, &'a Expr)>> = FxHashMap::default();
@@ -314,6 +318,8 @@ struct DeclCollector<'a> {
     functions: FxHashMap<u32, Expected<'a>>,
     index_writes: Vec<(&'a Expr, &'a Expr)>,
     set_metatables: Vec<(&'a Name, u32, &'a Expr)>,
+    /// The functions whose bodies are being walked, innermost last, with their doc comments.
+    enclosing: Vec<(&'a FuncBody, Option<u32>)>,
 }
 
 impl<'a> DeclCollector<'a> {
@@ -330,7 +336,9 @@ impl<'a> DeclCollector<'a> {
         for (index, param) in func.params.iter().enumerate() {
             self.decls.insert(param.span.start, Decl::Param { func, index, doc_anchor, expected });
         }
+        self.enclosing.push((func, doc_anchor));
         self.block(&func.body);
+        self.enclosing.pop();
     }
 
     fn stmt(&mut self, stmt: &'a Stmt) {
@@ -417,7 +425,20 @@ impl<'a> DeclCollector<'a> {
                 exprs.iter().for_each(|e| self.expr(e, None));
                 self.block(body);
             }
-            StmtKind::Return(exprs) => exprs.iter().for_each(|e| self.expr(e, None)),
+            StmtKind::Return(exprs) => {
+                let enclosing = self.enclosing.last().copied();
+                for (index, expr) in exprs.iter().enumerate() {
+                    match (&expr.kind, enclosing) {
+                        // `return function(ped) end` is the `fun(ped: number)` that the `@return` of its
+                        // function declares, and takes the `@param` lines above the `return`.
+                        (ExprKind::Function(func), Some((outer, doc_anchor))) => {
+                            let at = Expected::Return { func: outer, doc_anchor, index };
+                            self.func(func, anchor, Some(at));
+                        }
+                        _ => self.expr(expr, None),
+                    }
+                }
+            }
             StmtKind::Break | StmtKind::Goto(_) | StmtKind::Label(_) | StmtKind::Error => {}
         }
     }
@@ -1743,6 +1764,21 @@ impl<'a> Infer<'a> {
                 let at = self.ctx.tables.get(&table.span.start)?;
                 let table = self.guarded(|| self.expected_type(at))?;
                 self.field_type(&table, key)
+            }
+            Expected::Return { func, doc_anchor, index } => {
+                // Only what is declared counts: the returns inferred from the body would read the
+                // function literal that is being typed.
+                let documented = doc_anchor.map(|anchor| (anchor, self.ctx.doc_at(anchor)));
+                match documented.filter(|(_, doc)| !doc.returns.is_empty()) {
+                    Some((anchor, doc)) => {
+                        let ty = &doc.returns.get(index)?.ty;
+                        Some(match ty.mentions_self() {
+                            true => ty.with_self(&self.doc_self_at(anchor, func)),
+                            false => ty.clone(),
+                        })
+                    }
+                    None => self.guarded(|| self.declared_fun_type(func))?.returns.get(index).cloned(),
+                }
             }
         }
     }

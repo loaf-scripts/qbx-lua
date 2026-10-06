@@ -8533,6 +8533,56 @@ assert(load('return 1'))()
 }
 
 #[test]
+fn returned_functions_have_the_types_their_function_declares() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param id number
+---@return fun(ped: number): number
+local function maxDrawable(id)
+    return function(ped) return ped + id end
+end
+
+---@return fun(ped: number): number
+local function maxTexture()
+    ---@param ped integer
+    return function(ped) return ped end
+end
+
+---@type fun(): number, fun(label: string): string
+local labelled = function()
+    return 1, function(label) return #label end
+end
+
+local function untyped()
+    return function(value) return value end
+end
+return maxDrawable, maxTexture, labelled, untyped
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("ped) return ped + id", "ped: number\n"),
+        ("ped) return ped end", "ped: integer\n"),
+        ("label) return", "label: string\n"),
+        ("value) return", "value: unknown\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        findings(&mut client, CLIENT, &["return-type-mismatch"]),
+        [(
+            "return-type-mismatch".to_string(),
+            line("return #label"),
+            "Cannot return `integer` as return value #1 of type `string`".to_string()
+        )],
+        "a function literal that a function returns is the `fun(...)` its `@return` or `---@type` declares, \
+         and a `---@param` above the `return` types it instead"
+    );
+}
+
+#[test]
 fn parameters_of_callbacks_have_the_types_their_callee_declares() {
     let mut client = Client::start(fixture_root());
     let text = "\

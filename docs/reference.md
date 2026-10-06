@@ -1089,7 +1089,10 @@ types of the field's `fun(...)` when the table has a declared type: the `---@typ
 `local`, the type of the parameter it is passed for, or `metatable` for the second argument of
 `setmetatable`. A function defined for a `---@field name fun(...)` of a class, with
 `function Class:name()`, `function Class.name()` or `Class.name = function()`, takes the parameter
-types of that `fun(...)` when it has as many parameters, not counting the `self` of `:`. A local
+types of that `fun(...)` when it has as many parameters, not counting the `self` of `:`. A function
+that a `return` passes takes the `---@param` lines above the `return`, and the parameter types of
+the `fun(...)` that the `@return` of the function around it declares at that position, or the
+function type declared for that function, as `---@type fun(): fun(ped: number)`. A local
 declared without a value needs a `---@type`, since
 later assignments are not followed. Names that start with `ignore_unused_prefix`, and `self`, are
 not reported. To check only your own resources, set the level in an `[[overrides]]` entry instead
