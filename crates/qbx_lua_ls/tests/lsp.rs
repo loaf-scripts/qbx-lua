@@ -6867,6 +6867,18 @@ local swapped = {
 print(tuple[3])
 tuple[1] = 'x'
 for i = 1, 2 do print(tuple[i]) end
+
+---@class Test.Names
+---@field [number] string
+
+---@type Test.Names
+local names = {}
+local slot = math.random(3)
+names[slot] = nil
+names[1] = nil
+map.b = nil
+abc.dynamic = nil
+tuple[1] = nil
 ";
     client.open_with(CLIENT, text);
     let line = |needle: &str| pos(text, needle, 0).0 as u64;
@@ -6905,8 +6917,9 @@ for i = 1, 2 do print(tuple[i]) end
         .collect();
     assert_eq!(
         strict,
-        [cleared("closed.name = nil"), cleared("abc.test = nil")],
-        "with `strict`, as in TypeScript, `= nil` only clears fields whose type allows `nil`"
+        [cleared("closed.name = nil"), cleared("abc.test = nil"), cleared("tuple[1] = nil")],
+        "with `strict`, as in TypeScript, `= nil` only clears fields whose type allows `nil`, while it removes \
+         any entry that only an index takes, as `names[slot]`, as from an array or a map"
     );
 }
 

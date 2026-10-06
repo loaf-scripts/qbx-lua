@@ -590,7 +590,14 @@ impl<'a, 'b> Classes<'a, 'b> {
     /// literal like `[1]`, or else the value of an index that takes the key. A key such as `integer`
     /// that may be several fields has no one type.
     pub fn field_type(&self, class: &str, args: &[Type], from: FileId, key: &Key) -> Option<(Type, FileId)> {
-        let field = match key {
+        self.declared_field_type(class, args, from, key)
+            .or_else(|| self.index_for(class, args, from, &key.ty(), &mut FxHashSet::default(), 0))
+    }
+
+    /// The type of the `@field` that `key` of a `class` table names, of a name or of a literal like
+    /// `[1]`, as `field_type` reads it, but not the value of an index that takes the key.
+    fn declared_field_type(&self, class: &str, args: &[Type], from: FileId, key: &Key) -> Option<(Type, FileId)> {
+        match key {
             Key::Name(name) => {
                 self.fields(class, args, from).into_iter().find(|field| field.name == *name).map(|f| (f.ty, f.file))
             }
@@ -599,8 +606,7 @@ impl<'a, 'b> Classes<'a, 'b> {
                 fields.find(|(key, ..)| key == ty).map(|(_, v, file)| (v, file))
             }
             Key::Typed(_) => None,
-        };
-        field.or_else(|| self.index_for(class, args, from, &key.ty(), &mut FxHashSet::default(), 0))
+        }
     }
 
     /// The value type of the first index of `class`, given the type arguments `args`, or of a parent
@@ -1144,6 +1150,8 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
     for access in accesses(infer, chunk, false) {
         // With `strict`, `value.field = nil` clears a field only when its type allows `nil`, as
         // `string?` does, as TypeScript reads it. lua-language-server lets any field be cleared.
+        // An entry that only an index takes, as `names[id] = nil` for `---@field [number] string`,
+        // is removed that way, as one of an array or a `table<K, V>` is.
         let clears = access.value.is_some_and(|value| matches!(value.kind, ExprKind::Nil));
         if clears && !infer.strict() {
             continue;
@@ -1151,6 +1159,9 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
         if let (Some(value), Some((class, args, view))) =
             (access.value, classes.class_of(&access.owner, classes.file()))
         {
+            if clears && classes.declared_field_type(&class, &args, view, &access.key).is_none() {
+                continue;
+            }
             check(classes.field_type(&class, &args, view, &access.key), &access.key, value);
         }
     }

@@ -837,7 +837,9 @@ the values that may reach the `return` leaves without a known type; see
 [locals that are assigned again](../crates/qbx_lua_ls/README.md#locals-that-are-assigned-again). The
 same applies to the values `assign-type-mismatch` checks. `abc.field = nil` clears any field, as in
 lua-language-server; with [`strict`](#strict-mode), as in TypeScript, only one whose type allows
-`nil`, such as `string?` or `string|nil`.
+`nil`, such as `string?` or `string|nil`. An entry that only an index of the class takes, as
+`names[id]` for `---@field [number] string`, is removed with `= nil` either way, as one of an array
+or a map is.
 
 `discard-returns` reports a call on a line of its own whose function is marked `@nodiscard`, as
 its values are what it is called for. The runtime stubs mark the functions that only compute a
