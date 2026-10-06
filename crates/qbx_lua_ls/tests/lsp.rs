@@ -6021,6 +6021,37 @@ end)
 }
 
 #[test]
+fn loops_over_a_generic_know_as_little_about_keys_as_about_values() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@generic T: table
+---@param t T
+local function keys(t)
+    for key, value in pairs(t) do print(key, value) end
+end
+
+---@class Probe.Empty
+
+---@param empty Probe.Empty
+local function walk(empty)
+    for name, field in pairs(empty) do print(name, field) end
+end
+return keys, walk
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("key, value in", "key: unknown\n"),
+        ("value in", "value: unknown\n"),
+        // The fields of a class are named with strings, also before it declares any.
+        ("name, field", "name: string\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn comparisons_of_types_that_share_no_value_are_reported() {
     let mut client = Client::start(fixture_root());
     let text = "\

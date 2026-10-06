@@ -2073,8 +2073,13 @@ impl<'a> Infer<'a> {
                     .filter(|m| !array_only && !matches!(m.kind, SymbolKind::Method | SymbolKind::Function))
                     .map(|m| (Type::String, m.ty));
                 let (keys, values): (Vec<Type>, Vec<Type>) = fields.chain(literal_fields).chain(index).unzip();
-                if keys.is_empty() {
-                    return (Type::String, Type::Unknown);
+                // A class without fields still names them with strings, while a name that is no
+                // class, as the `T` of `---@generic T: table` in its function, tells nothing about
+                // either, as a plain `table` does not.
+                match (keys.is_empty(), class) {
+                    (true, Some(_)) => return (Type::String, Type::Unknown),
+                    (true, None) => return (Type::Unknown, Type::Unknown),
+                    (false, _) => {}
                 }
                 (keys, values)
             }
