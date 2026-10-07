@@ -1001,13 +1001,16 @@ describes where a cast holds with its
 
 `cast-type-mismatch` reports a `---@cast name T` whose `T` the declared type of the local does not
 take. The check is that of `assign-type-mismatch`, for each type `T` lists: a different kind of
-value, or a literal the declared type does not list.
+value, or a literal the declared type does not list. A cast to a type that takes every value of the
+declared one widens it and passes, as TypeScript takes `x as A | B` for a `B`, although
+lua-language-server reports it: `integer?` for an `integer`, a parent class, or a union that lists
+the declared type, as `---@cast coords Cell | Coords` for a `Coords`.
 
 ```lua
 ---@type integer
 local count = 1
----@cast count string  -- Cannot convert `integer` to `string`
----@cast count integer? -- Cannot convert `integer` to `integer?`
+---@cast count string   -- Cannot convert `integer` to `string`
+---@cast count integer? -- passes
 ---@cast count number   -- passes
 ```
 
@@ -1019,8 +1022,8 @@ local whose type is only inferred is not checked, and neither is one declared as
 cast gives its type as in lua-language-server, nor the `+T` and `-T` entries, which change the type
 rather than replace it.
 As in lua-language-server, a class has to be one that the declared type names or extends: a
-`Test.Animal` can be cast to its subclass `Test.Dog`, but a `Test.Dog` not to `Test.Animal`, and
-neither to an unrelated class. Type arguments are not compared, a declared type that is no class,
+`Test.Animal` can be cast to its subclass `Test.Dog`, and a `Test.Dog` back to `Test.Animal`, which
+widens it, but neither to an unrelated class. Type arguments are not compared, a declared type that is no class,
 like `table` or `any`, takes any class, and so does a local declared with a table constructor.
 
 ## Impossible comparisons

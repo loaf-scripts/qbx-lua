@@ -7670,13 +7670,13 @@ use(value, decoded)
         findings(&mut client, CLIENT, &["cast-type-mismatch"]),
         [
             finding("@cast count string", "Cannot convert `integer` to `string`"),
-            finding("@cast count integer?", "Cannot convert `integer` to `integer?`"),
             finding("@cast mode 'c'", "Cannot convert `\"a\"|\"b\"` to `\"c\"`"),
             finding("@cast value boolean", "Cannot convert `string|integer` to `boolean`"),
             finding("@cast literal", "Cannot convert `integer` to `string`"),
         ],
         "types inferred from what a function returns, locals declared as `nil`, `+` and `-` entries, unknown names \
-         and suppressed lines are left alone"
+         and suppressed lines are left alone, and so is a cast to a type that takes every value of the declared \
+         one, as `integer?` for an `integer`, as TypeScript takes it"
     );
 }
 
@@ -7806,6 +7806,13 @@ local function back(dog)
     ---@cast dog Test.Animal
 end
 
+---@alias Test.Coords vector2|Test.Dog
+
+---@param coords Test.Coords
+local function widen(coords)
+    ---@cast coords Test.Car|Test.Coords
+end
+
 local returned = getAnimal()
 ---@cast returned Test.Car
 ---@type Test.Animal
@@ -7824,12 +7831,12 @@ use(back, returned, built)
             finding("@cast animal Test.Dog|", "Cannot convert `Test.Animal?` to `Test.Dog|Test.Car`"),
             finding("@cast animal Test.Pet", "Cannot convert `Test.Animal?` to `Test.Pet`"),
             finding("@cast named Test.Car", "Cannot convert `string|Test.Animal` to `Test.Car`"),
-            finding("@cast dog", "Cannot convert `Test.Dog` to `Test.Animal`"),
             finding("@cast returned", "Cannot convert `Test.Animal` to `Test.Car`"),
         ],
-        "a class needs one the declared type names or extends, as in lua-language-server: a subclass passes, a \
-         parent does not, type arguments are not compared, `table` takes any class, and so does a local declared \
-         with a table constructor"
+        "a class needs one the declared type names or extends, as in lua-language-server: a subclass passes, type \
+         arguments are not compared, `table` takes any class, and so does a local declared with a table \
+         constructor. A cast to a type that takes every value of the declared one passes too, as a parent or a \
+         union that lists the declared type does, as TypeScript takes it, though lua-language-server reports it"
     );
 }
 

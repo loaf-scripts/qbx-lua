@@ -43,6 +43,12 @@ pub fn mismatched_casts(infer: &Infer) -> Vec<(Span, String)> {
         let holds_table = declared_with_table(infer, local);
         for (entry, span) in &cast.entries {
             let CastEntry::Replace(ty) = entry else { continue };
+            // A cast that widens the type, as `---@cast coords Cell | Coords` for a `Coords`, takes
+            // every value the local may hold, as TypeScript takes `x as A | B` for a `B`, although
+            // lua-language-server reports it.
+            if classes.rejected_part(ty, classes.file(), &expected).is_none() && takes_class(&classes, ty, &expected) {
+                continue;
+            }
             let parts = match ty {
                 Type::Union(parts) => parts.as_slice(),
                 one => std::slice::from_ref(one),
