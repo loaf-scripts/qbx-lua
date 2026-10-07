@@ -4222,6 +4222,10 @@ print(get, hidden)
 ---@param kind WheelKind
 ---@param expected type
 local function check(kind, expected) end
+
+local cast = get --[[@as CastTarget]]
+local generic = get --[[@as K]]
+local known = get --[[@as Garage]]
 ";
     // An enum a module returns, as in `qbx_customs/client/enums/WheelType.lua`.
     client.open_with("myresource/shared/config.lua", "---@enum WheelKind\nreturn {\n    Sport = 0,\n}\n");
@@ -4246,8 +4250,9 @@ local function check(kind, expected) end
         let (line, column) = pos(text, name, 0);
         (line as u64, column as u64, format!("Undefined type or alias `{name}`"))
     };
-    // Handle types, stub classes, generics, `self`, `@see` and suppressed lines are not reported.
-    assert_eq!(found, [at("Spot"), at("Missing"), at("Unknown"), at("BoxKind")]);
+    // Handle types, stub classes, generics, `self`, `@see` and suppressed lines are not reported. An
+    // inline `--[[@as T]]` cast names a type too, as in LuaLS.
+    assert_eq!(found, [at("Spot"), at("Missing"), at("Unknown"), at("BoxKind"), at("CastTarget")]);
 }
 
 #[test]
