@@ -1827,12 +1827,19 @@ impl<'a> Infer<'a> {
                 let (callee, _) = self.callee_fun(base, method)?;
                 let args = CallArgs::new(args);
                 let signatures = self.signatures_at(&callee, call.span.start);
-                let mut fitting =
-                    signatures.iter().filter(|signature| self.fit(signature, &args, via_method) != Fit::No);
-                let (Some(signature), None) = (fitting.next(), fitting.next()) else { return None };
-                let (skip_params, skip_args) = signature.call_offsets(via_method);
-                let param = signature.params.get((arg_index + skip_params).checked_sub(skip_args)?)?;
-                (param.ty.clone(), signature.generics.clone())
+                let fitting = signatures.iter().filter(|signature| self.fit(signature, &args, via_method) != Fit::No);
+                // Several signatures that type the argument alike, as `handler: fun()` and
+                // `handler?: fun()` do, leave no doubt about it.
+                let mut typed = fitting.map(|signature| {
+                    let (skip_params, skip_args) = signature.call_offsets(via_method);
+                    let param = signature.params.get((arg_index + skip_params).checked_sub(skip_args)?)?;
+                    Some((param.ty.without_nil(), signature.generics.clone()))
+                });
+                let first = typed.next()??;
+                if typed.any(|other| other.as_ref() != Some(&first)) {
+                    return None;
+                }
+                first
             }
             _ => (self.expected_type(expected)?, Vec::new()),
         };

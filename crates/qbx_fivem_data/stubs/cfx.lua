@@ -192,9 +192,10 @@ function RemoveEventHandler(eventData) end
 
 ---Marks the event as safe to receive over the network. When `handler` is given it is also registered and its handle returned.
 ---@param eventName string
----@param handler? fun(...: any)
----@return EventHandlerData? eventData
----@overload fun(eventName: string)
+---@param handler fun(...: any)
+---@return EventHandlerData eventData
+---@overload fun(eventName: string): nil
+---@overload fun(eventName: string, handler?: fun(...: any)): EventHandlerData?
 function RegisterNetEvent(eventName, handler) end
 
 ---Old name of `RegisterNetEvent`.

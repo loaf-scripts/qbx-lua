@@ -15890,3 +15890,23 @@ local fromReassigned = reassigned(true)
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
 }
+
+#[test]
+fn register_net_event_returns_the_handle_of_its_handler() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type { [string]: EventHandlerData }
+local handlers = {}
+handlers.ready = RegisterNetEvent('res:ready', function() end)
+local handle = RegisterNetEvent('res:handle', function() end)
+local plain = RegisterNetEvent('res:plain')
+print(handlers, handle, plain)
+";
+    client.open_with(CLIENT, text);
+    let (l, c) = pos(text, "handle =", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("local handle: EventHandlerData") && !hover.contains("EventHandlerData?"), "{hover}");
+    let (l, c) = pos(text, "plain =", 0);
+    assert!(client.hover_text(CLIENT, l, c).contains("local plain: nil"));
+    assert_eq!(findings(&mut client, CLIENT, &["assign-type-mismatch", "missing-parameter"]), []);
+}
