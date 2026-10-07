@@ -7336,6 +7336,15 @@ rows[#rows + 1] = { kind = 'number', default = 5 }
 local missing
 list[4] = missing
 counts.d = missing
+
+---@type table<string, number[]>
+local lists = {}
+local filled = { 1 }
+lists.a = #filled > 0 and filled or nil
+
+---@type string?
+local maybeName
+shape.name = maybeName
 return add, built, rows
 ";
     client.open_with(CLIENT, text);
@@ -7356,20 +7365,27 @@ return add, built, rows
             finding("ids[#ids + 1]", "Cannot assign `string` to `[integer]` of type `integer`"),
             finding("maybe[1] = 'x'", "Cannot assign `string` to field `[1]` of type `number`"),
             finding("counts.d = missing", "Cannot assign `number?` to field `d` of type `number`"),
+            finding("lists.a", "Cannot assign `integer[]?` to field `a` of type `number[]`"),
+            finding("shape.name = maybeName", "Cannot assign `string?` to field `name` of type `string`"),
         ],
         "an entry stored in an array, map, tuple or shape that an annotation declares takes its type, as in \
          lua-language-server: `= nil` removes one, a value stored under a key in brackets may be `nil`, and a \
          table that a constructor builds declares nothing"
     );
     client.set_strict(true);
+    let strict = findings(&mut client, CLIENT, &["assign-type-mismatch"]);
     assert_eq!(
-        added(&relaxed, &findings(&mut client, CLIENT, &["assign-type-mismatch"])),
+        added(&relaxed, &strict),
+        [finding("shape.name = nil", "Cannot assign `nil` to field `name` of type `string`")],
+        "with `strict`, as TypeScript reads it, `= nil` only clears a field whose type allows `nil`"
+    );
+    assert_eq!(
+        added(&strict, &relaxed),
         [
-            finding("shape.name = nil", "Cannot assign `nil` to field `name` of type `string`"),
-            finding("list[4] = missing", "Cannot assign `number?` to field `[4]` of type `number`"),
+            finding("counts.d = missing", "Cannot assign `number?` to field `d` of type `number`"),
+            finding("lists.a", "Cannot assign `integer[]?` to field `a` of type `number[]`"),
         ],
-        "with `strict`, as TypeScript reads it, `= nil` only clears a field whose type allows `nil`, and a value \
-         stored under a key in brackets may not be `nil` either"
+        "with `strict`, a value that may be `nil` may be stored wherever `nil` may, as it sets or removes the entry"
     );
 }
 

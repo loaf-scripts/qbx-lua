@@ -859,7 +859,8 @@ same applies to the values `assign-type-mismatch` checks. `abc.field = nil` clea
 lua-language-server; with [`strict`](#strict-mode), as in TypeScript, only one whose type allows
 `nil`, such as `string?` or `string|nil`. An entry that only an index of the class takes, as
 `names[id]` for `---@field [number] string`, is removed with `= nil` either way, as one of an array
-or a map is.
+or a map is. With `strict`, such an entry also takes a value that may be `nil`, as
+`states[id] = isInside or nil` sets or removes it.
 
 `discard-returns` reports a call on a line of its own whose function is marked `@nodiscard`, as
 its values are what it is called for. The runtime stubs mark the functions that only compute a

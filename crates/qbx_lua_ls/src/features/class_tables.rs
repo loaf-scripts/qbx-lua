@@ -758,11 +758,25 @@ impl<'a, 'b> Classes<'a, 'b> {
 
     /// How a message shows `given`, of which `expected` rejects `part`: as it is written when `part`
     /// is a literal that `expected` does not list, like the `'c'` of `'a'|'c'`, and widened to its
-    /// kinds otherwise.
+    /// kinds otherwise. A list that a local holds reads as one, as `integer[]` for `{ 1, 2 }`, as a
+    /// hover shows it.
     pub fn shown(&self, expected: &Type, from: FileId, given: &Type, part: &Type) -> Type {
-        match self.literal_mismatch(expected, from, part) {
+        let shown = match self.literal_mismatch(expected, from, part) {
             true => given.clone(),
             false => given.widen(),
+        };
+        self.listed(&shown)
+    }
+
+    /// `ty` with each table a local holds with only integer keys written as the list it is.
+    fn listed(&self, ty: &Type) -> Type {
+        match ty {
+            Type::GlobalTable(owner) if owner.starts_with('%') => match self.infer.key_value_types(ty, false) {
+                (Type::Integer, value) if !value.is_unknown() => Type::Array(Box::new(value.widen())),
+                _ => ty.clone(),
+            },
+            Type::Union(types) => Type::union(types.iter().map(|part| self.listed(part))),
+            _ => ty.clone(),
         }
     }
 
@@ -1173,14 +1187,17 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
         let Some(value) = access.value else { continue };
         // As lua-language-server reads it, a value stored under a key in brackets, as
         // `list[i] = value` or `slots[1] = value`, may be `nil`, which removes the entry, while one
-        // stored in a named field, as `value.name`, may not. With `strict` it may not either, as
-        // TypeScript reads it.
-        let removes = matches!(access.key, Key::Typed(_)) && !infer.strict();
+        // stored in a named field, as `value.name`, may not. With `strict`, a value that may be `nil`
+        // may be stored wherever `nil` may, as `states[id] = isInside or nil` sets or removes the
+        // entry, and nowhere else, as TypeScript reads it.
+        let bracketed = matches!(access.key, Key::Typed(_));
+        let removes = |removable: bool| if infer.strict() { removable } else { bracketed };
         if let Some((class, args, view)) = classes.class_of(&access.owner, classes.file()) {
-            if clears && classes.declared_field_type(&class, &args, view, &access.key).is_none() {
+            let removable = classes.declared_field_type(&class, &args, view, &access.key).is_none();
+            if clears && removable {
                 continue;
             }
-            check(classes.field_type(&class, &args, view, &access.key), &access.key, value, removes);
+            check(classes.field_type(&class, &args, view, &access.key), &access.key, value, removes(removable));
             continue;
         }
         // `list[#list + 1] = value` stores an entry of the array, map, tuple or shape that an
@@ -1196,6 +1213,7 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
         if clears && !names_entry {
             continue;
         }
+        let removes = removes(!names_entry);
         check(classes.table_field_type(&table, classes.file(), &access.key), &access.key, value, removes);
     }
     out

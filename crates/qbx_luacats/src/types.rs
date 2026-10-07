@@ -792,12 +792,17 @@ impl fmt::Display for Type {
             }
             Type::Union(types) => {
                 let has_nil = types.iter().any(|t| matches!(t, Type::Nil));
-                let rest: Vec<String> = types
-                    .iter()
-                    .filter(|t| !matches!(t, Type::Nil))
-                    .filter(|t| !matches!(t, Type::GlobalTable(owner) if owner.starts_with('%')) || types.len() == 1)
-                    .map(|t| if matches!(t, Type::Fun(_)) { format!("({t})") } else { t.to_string() })
-                    .collect();
+                let local_table = |t: &Type| matches!(t, Type::GlobalTable(owner) if owner.starts_with('%'));
+                // The table a local holds beside a class it is an instance of reads as that class.
+                let named = types.iter().any(|t| !matches!(t, Type::Nil) && !local_table(t));
+                let mut rest: Vec<String> = Vec::new();
+                let parts = types.iter().filter(|t| !matches!(t, Type::Nil)).filter(|t| !named || !local_table(t));
+                for part in parts.map(|t| if matches!(t, Type::Fun(_)) { format!("({t})") } else { t.to_string() }) {
+                    // Parts that read alike, as the tables of several locals do, are written once.
+                    if !rest.contains(&part) {
+                        rest.push(part);
+                    }
+                }
                 match (has_nil, rest.len()) {
                     (true, 1) => write!(f, "{}?", rest[0]),
                     (true, _) => write!(f, "{}|nil", rest.join("|")),
@@ -1321,5 +1326,15 @@ mod tests {
     fn widening_and_nil_removal() {
         assert_eq!(parse_type("'a'|1|true").widen().to_string(), "string|integer|boolean");
         assert_eq!(parse_type("string?").without_nil().to_string(), "string");
+    }
+
+    #[test]
+    fn the_table_of_a_local_reads_as_the_class_beside_it() {
+        let own = Type::GlobalTable("%main.lua:12".into());
+        assert_eq!(Type::union([own.clone(), Type::named("Garage")]).to_string(), "Garage");
+        assert_eq!(Type::union([own.clone(), Type::Nil]).to_string(), "table?", "nothing else names it");
+        assert_eq!(Type::union([own.clone(), Type::named("Garage"), Type::Nil]).to_string(), "Garage?");
+        let other = Type::GlobalTable("%main.lua:40".into());
+        assert_eq!(Type::union([own, other, Type::Nil]).to_string(), "table?", "the tables of several locals");
     }
 }
