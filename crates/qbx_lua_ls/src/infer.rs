@@ -1032,18 +1032,33 @@ impl<'a> Infer<'a> {
             return Ok(ty.clone());
         }
         let declared = self.expand_aliases(ty, 0);
-        let mut narrowed = declared.clone();
-        while let Some(fact) = facts.next() {
-            match fact.assume(&narrowed) {
-                Some(left) => narrowed = left,
-                // The guards after it tell about what the code takes the value to be.
-                None => {
-                    let taken = fact.ruled_out(&narrowed);
-                    return Err(taken.and_then(|taken| facts.try_fold(taken, |ty, fact| fact.assume(&ty))));
-                }
-            }
+        // A name that is no class or alias, as the `T` of `---@generic T` in its function, may hold
+        // any value, so the guards leave it as it is, as TypeScript keeps a `T`, and narrow the rest.
+        let parts = match &declared {
+            Type::Union(parts) => parts.clone(),
+            one => vec![one.clone()],
+        };
+        let (opaque, known): (Vec<Type>, Vec<Type>) = parts.into_iter().partition(|part| self.names_no_type(part));
+        if opaque.is_empty() {
+            let narrowed = narrowed_by(&declared, facts)?;
+            return Ok(if narrowed != declared { narrowed } else { ty.clone() });
         }
-        Ok(if narrowed != declared { narrowed } else { ty.clone() })
+        if known.is_empty() {
+            return Ok(ty.clone());
+        }
+        let left = narrowed_by(&Type::union(known), facts).ok();
+        Ok(Type::union(left.into_iter().chain(opaque)))
+    }
+
+    /// Whether `ty` is a name that names no class or alias the file sees, as a generic does in the
+    /// function that declares it.
+    fn names_no_type(&self, ty: &Type) -> bool {
+        let Type::Named(name, args) = ty else { return false };
+        let vector = matches!(name.as_str(), "vector2" | "vector3" | "vector4" | "quat" | "matrix");
+        args.is_empty()
+            && !vector
+            && self.index.class(name, self.side).is_none()
+            && self.index.alias(name, self.side).is_none()
     }
 
     /// `fact`, or for a comparison with a local, what the type of that local where the comparison
@@ -4542,6 +4557,24 @@ fn field_start(source: &str, field: &TableField) -> u32 {
         }
         TableField::Positional(value) => value.span.start,
     }
+}
+
+/// `declared` without what `facts` rule out, as `Infer::facts_left` reads them: when they rule out
+/// every value of it, `Err` with the type that the code they guard takes the value to be then, as
+/// `Fact::ruled_out` reads it from the guard that rules out the last of them, if it gives one.
+fn narrowed_by<'f>(declared: &Type, mut facts: impl Iterator<Item = Cow<'f, Fact>>) -> Result<Type, Option<Type>> {
+    let mut narrowed = declared.clone();
+    while let Some(fact) = facts.next() {
+        match fact.assume(&narrowed) {
+            Some(left) => narrowed = left,
+            // The guards after it tell about what the code takes the value to be.
+            None => {
+                let taken = fact.ruled_out(&narrowed);
+                return Err(taken.and_then(|taken| facts.try_fold(taken, |ty, fact| fact.assume(&ty))));
+            }
+        }
+    }
+    Ok(narrowed)
 }
 
 /// The function literal that `expr` gives when it is the value, as `function() end` itself,

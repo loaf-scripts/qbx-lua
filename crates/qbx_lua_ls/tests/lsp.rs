@@ -6128,6 +6128,52 @@ return create
 }
 
 #[test]
+fn guards_keep_a_generic_as_it_is() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@generic T
+---@param value T
+---@return T
+local function raw(value)
+    if type(value) ~= 'table' then
+        return value -- not a table
+    end
+    if not value then return value end -- falsy
+    return value -- a table
+end
+
+---@param maybe string|table|nil
+local function concrete(maybe)
+    if type(maybe) ~= 'table' then
+        return maybe -- concrete
+    end
+    return maybe
+end
+return raw, concrete
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("value -- not a table", "value: T\n"),
+        ("value end -- falsy", "value: T\n"),
+        ("value -- a table", "value: T\n"),
+        ("maybe -- concrete", "maybe: string?\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "no-unknown": "warning" } } } } }),
+    );
+    assert_eq!(
+        findings(&mut client, CLIENT, &["no-unknown"]),
+        [],
+        "a generic may hold any value, which no guard rules out"
+    );
+}
+
+#[test]
 fn loops_over_a_generic_know_as_little_about_keys_as_about_values() {
     let mut client = Client::start(fixture_root());
     let text = "\
