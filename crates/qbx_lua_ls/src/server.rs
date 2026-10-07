@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::path::PathBuf;
 
+use crossbeam_channel::RecvTimeoutError;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{self as notif, Notification as _};
 use lsp_types::request::{self as req, Request as _};
@@ -25,6 +26,10 @@ pub type Documents = FxHashMap<Url, Document>;
 
 /// Opening the file shows everything; the workspace overview only needs to say "look here".
 const MAX_PROBLEMS_PER_CLOSED_FILE: usize = 100;
+
+/// How long the server waits for the first message after `initialized` before it reports the files
+/// nobody has open.
+const FIRST_MESSAGE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 type AnyResult<T> = Result<T, Box<dyn Error + Sync + Send>>;
 
@@ -305,9 +310,18 @@ impl Server {
 
     fn main_loop(&mut self) -> AnyResult<()> {
         // A client may send nothing after `initialized`, as one that registers no file watchers has
-        // no request of the server to answer, so the files nobody has open are reported right away.
-        self.publish_if_idle();
-        while let Ok(message) = self.connection.receiver.recv() {
+        // no request of the server to answer, so the files nobody has open are reported once nothing
+        // arrives for a moment. A client that sends requests right away has them answered first, as
+        // that pass takes seconds in a large workspace.
+        let mut first = match self.connection.receiver.recv_timeout(FIRST_MESSAGE_WAIT) {
+            Ok(message) => Some(message),
+            Err(RecvTimeoutError::Timeout) => {
+                self.publish_if_idle();
+                None
+            }
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        };
+        while let Some(message) = first.take().or_else(|| self.connection.receiver.recv().ok()) {
             match message {
                 Message::Request(request) => {
                     if self.connection.handle_shutdown(&request)? {
