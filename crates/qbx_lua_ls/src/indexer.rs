@@ -13,8 +13,8 @@ use rustc_hash::FxHashSet;
 
 use crate::callback_wrappers::Wrapper;
 use crate::index::{
-    AliasDef, ClassDef, Element, EnumTable, EventDef, EventFamily, EventKind, FileId, FileIndex, Index, Member,
-    Metatable, NuiCallbackDef, Read, Symbol, SymbolKind,
+    AliasDef, ClassDef, Element, EnumTable, EventDef, EventFamily, EventKind, Extension, FileId, FileIndex, Index,
+    Member, Metatable, NuiCallbackDef, Read, Symbol, SymbolKind,
 };
 use crate::infer::{metatable_args, table_elements, table_fields, Decl, FileContext, Infer};
 use crate::luacats::{own_type, parse_doc_lines, DocGroup};
@@ -302,6 +302,10 @@ impl<'a> Indexer<'a> {
                 values: alias.values,
                 table: None,
             });
+        }
+        for extend in doc.extends {
+            let range = self.range(group[extend.line.min(group.len() - 1)].span);
+            self.out.extensions.push(Extension { owner: extend.owner, name: extend.name, fun: extend.fun, range });
         }
     }
 

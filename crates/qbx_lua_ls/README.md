@@ -24,11 +24,12 @@ Available features depend on the editor's LSP client.
   argument starts: strings, integers, `true` and `false`, and `nil` beside them. Strings are also
   offered inside the argument's string, and a function literal with the matching parameters where
   an argument takes one. Call snippets stop in the quotes of listed strings, and end after a value
-  that picks an overload, so the handler written next matches it. Overloads come from
-  [every definition](#signatures-from-several-places) of a function. The `# description` of a
-  value on a `---|` line under an `@alias` or `@param` comes with it. Hovers of the alias, or of
-  the function for its `@param`s and `@return`s, list the described values. The members of an
-  `---@enum` come before its values, written as the code reaches its table, like `Colors.Red`.
+  that picks an overload, so the handler written next matches it. Overloads come from every
+  definition of a function and from [`---@extend` lines](#signatures-from-several-places). The
+  `# description` of a value on a `---|` line under an `@alias` or `@param` comes with it. Hovers
+  of the alias, or of the function for its `@param`s and `@return`s, list the described values. The
+  members of an `---@enum` come before its values, written as the code reaches its table, like
+  `Colors.Red`.
 - The same values where a value of such a type, like `"busy"|"ready"`, `1|2|3` or `boolean`, is
   assigned, set as a field of a class, returned or compared with `==` or `~=`, and the function
   literal where a function is assigned or returned. They open on the space typed after the `=`,
@@ -149,6 +150,26 @@ the other side declares is reported as `undefined-doc-name`.
 A function takes the signatures of every definition of it that the code sees, as in LuaLS, so a
 `---@meta` file that declares a function again with more `@overload`s adds them to those of the
 code. A signature that takes the same parameters as one the function has is not listed twice.
+
+An `---@extend` line adds a signature to a function from any file, without declaring it again,
+the way a library's users or its other modules type the actions, events or callbacks they add:
+
+```lua
+---@extend OnAction (server) fun(action: "jobUpdated", handler: fun(source: number, job: Job)): number
+---@extend Utils.notify fun(source: number, data: NotifyData)
+---@extend Player:on fun(name: "spawned", cb: fun(coords: vector3))
+```
+
+The target is a global function, a function field of a global table or a class, or a method
+written with `:`, whose signature does not list `self`. The signature counts like an `@overload`
+of the function: calls pick it when their arguments fit it best, the handlers they pass take its
+parameter types, and argument checks accept it. It reaches the code that would see a definition
+in its file, and a `(server)` or `(client)` attribute scopes it to calls on that side. The
+`@generic` names of its doc comment apply to it. A name that nothing defines gets no function
+from it, but a native takes it beside its own signature. A line whose signature no function takes,
+as the code of its own file sees the name, is reported as `undefined-doc-name`: a misspelled name,
+a field that holds no function, or a method that only a parent class defines, which the line has
+to name through that class. LuaLS reads the line as a comment.
 
 ## Type guards
 

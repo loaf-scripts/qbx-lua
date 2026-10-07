@@ -4,6 +4,7 @@ use std::sync::Arc;
 use qbx_fivem_data::{known_import, Side};
 use qbx_lua_syntax::ast::Chunk;
 use qbx_lua_syntax::{parse, SmolStr};
+use qbx_luacats::luacats::applies_on;
 use qbx_luacats::types::{FunType, Type};
 use rustc_hash::{FxHashMap, FxHashSet};
 use walkdir::{DirEntry, WalkDir};
@@ -189,6 +190,9 @@ pub struct UnresolvedImport {
 /// The side of the file that assigns a function, and its signature as in `FunctionDef`.
 type SidedSignature = (Option<Side>, Option<Arc<FunType>>);
 
+/// The side of the file of an `---@extend` line, and the signature it adds.
+type SidedExtension = (Option<Side>, Arc<FunType>);
+
 /// Where a global that a definition file outside any resource declares exists at runtime.
 #[derive(Clone, Debug)]
 pub struct Declaration {
@@ -213,6 +217,9 @@ pub struct ResourceEnv {
     imports: Vec<(SmolStr, Side)>,
     /// Every assignment to a global or global table field by dotted path, with the side of its file.
     functions: FxHashMap<SmolStr, Vec<SidedSignature>>,
+    /// The signatures `---@extend` lines add to the functions at a dotted path, with the side of
+    /// their file.
+    extensions: FxHashMap<SmolStr, Vec<SidedExtension>>,
     aliases: FxHashMap<SmolStr, Type>,
     /// Globals that definition files outside any resource describe, such as type libraries. They
     /// exist at runtime on the side of their file, and those of a provider only with its import.
@@ -259,6 +266,9 @@ impl ResourceEnv {
         for def in &summary.functions {
             self.functions.entry(def.path.clone()).or_default().push((side, def.signature.clone()));
         }
+        for (path, fun) in &summary.extensions {
+            self.extensions.entry(path.clone()).or_default().push((side, fun.clone()));
+        }
         for (name, ty) in &summary.aliases {
             let merged = match self.aliases.remove(name) {
                 Some(existing) => Type::union([existing, ty.clone()]),
@@ -277,6 +287,14 @@ impl ResourceEnv {
             .flatten()
             .filter(move |(def, _)| is_visible_on(*def, side))
             .map(|(_, sig)| sig.as_ref())
+    }
+
+    /// The signatures that `---@extend` lines add to the function at `path` for code on `side`:
+    /// those of files of that side, unless their attributes scope them to the other one.
+    pub fn extension_defs(&self, path: &str, side: Option<Side>) -> impl Iterator<Item = &Arc<FunType>> {
+        let extensions = self.extensions.get(path).into_iter().flatten();
+        let visible = extensions.filter(move |(def, fun)| is_visible_on(*def, side) && applies_on(fun.side, side));
+        visible.map(|(_, fun)| fun)
     }
 
     pub fn alias(&self, name: &str) -> Option<&Type> {
@@ -355,6 +373,9 @@ impl ResourceEnv {
             env.imports.extend(loader.imports.iter().cloned());
             for (path, defs) in &loader.functions {
                 env.functions.entry(path.clone()).or_default().extend(defs.iter().cloned());
+            }
+            for (path, extensions) in &loader.extensions {
+                env.extensions.entry(path.clone()).or_default().extend(extensions.iter().cloned());
             }
             for (name, ty) in &loader.aliases {
                 env.aliases.entry(name.clone()).or_insert_with(|| ty.clone());

@@ -15,7 +15,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::callback_wrappers::{self, Wrapper};
 use crate::index::{instance_class, instance_owner, ClassDef, Distance, FileId, Index, Symbol, SymbolKind};
 use crate::locate::statement_at;
-use crate::luacats::{applies_on, own_type, parse_doc_lines, CastEntry, DocGroup, DocOperator};
+use crate::luacats::{applies_on, own_type, parse_doc_lines, CastEntry, DocExtend, DocGroup, DocOperator};
 use crate::narrow::{Casts, Fact, Flow, Origin, Version, DECLARATION};
 use crate::types::{CallbackRole, FunType, Param, Shape, ShapeField, Type, TypeName, TypeParser};
 
@@ -1332,7 +1332,7 @@ impl<'a> Infer<'a> {
                     // definition file declares again with more `@overload`s does in lua-language-server.
                     let others = symbols.iter().filter(|(_, other)| !std::ptr::eq(*other, symbol));
                     let others = others.filter_map(|(_, other)| other.ty.as_fun());
-                    let fun = with_signatures(fun, others);
+                    let fun = with_signatures(fun, others.chain(self.index.global_extensions(name, self.ctx.file)));
                     self.with_fields(Type::Fun(fun), name)
                 }
                 _ => ty.clone(),
@@ -1342,9 +1342,46 @@ impl<'a> Infer<'a> {
             return Type::GlobalTable(SmolStr::new(name));
         }
         match native(name) {
-            Some(native) => Type::Fun(Arc::new(native_fun_type(&native.on(self.side)))),
+            Some(native) => {
+                let fun = Arc::new(native_fun_type(&native.on(self.side)));
+                Type::Fun(with_signatures(&fun, self.index.global_extensions(name, self.ctx.file)))
+            }
             None => Type::Unknown,
         }
+    }
+
+    /// Whether the function that the `---@extend` line `extend` names has the signature it adds, as
+    /// the code of the file sees the function. A name that holds no function, or a method that only a
+    /// parent class defines, takes none.
+    pub fn extends_function(&self, extend: &DocExtend) -> bool {
+        // The types of a generic class are bound where its members are read, so only the names of
+        // the parameters are compared.
+        let takes = |ty: &Type| {
+            let Some(fun) = ty.as_fun() else { return false };
+            let same = |known: &FunType| {
+                let names = |fun: &FunType| fun.params.iter().map(|param| param.name.clone()).collect::<Vec<_>>();
+                names(known) == names(&extend.fun)
+                    && known.side == extend.fun.side
+                    && known.is_method == extend.fun.is_method
+            };
+            same(fun) || fun.overloads.iter().any(|overload| same(overload))
+        };
+        match &extend.owner {
+            None => takes(&self.global_type(&extend.name)),
+            Some(owner) => {
+                let ty = match self.index.class(owner, self.side) {
+                    Some(_) => Type::named(owner),
+                    None => Type::GlobalTable(owner.clone()),
+                };
+                self.members_named(&ty, &extend.name).iter().any(|member| takes(&member.ty))
+            }
+        }
+    }
+
+    /// `fun`, a definition of the global function `name`, with the signatures that the `---@extend`
+    /// lines the file sees add to it.
+    pub fn with_global_extensions(&self, fun: &Arc<FunType>, name: &str) -> Arc<FunType> {
+        with_signatures(fun, self.index.global_extensions(name, self.ctx.file))
     }
 
     /// The declaration among `symbols`, those of one global, whose type the global takes: of the
@@ -3199,7 +3236,7 @@ impl<'a> Infer<'a> {
             self.fit(&signature, args, false) != Fit::No
         };
         Some(match left[..] {
-            [fun] if fits(fun) => Some(fun.clone()),
+            [fun] if fits(fun) => Some(self.with_global_extensions(fun, &name.text)),
             _ => None,
         })
     }
@@ -4063,7 +4100,7 @@ impl<'a> Infer<'a> {
                 out.push(member);
             }
         }
-        self.merge_definitions(&mut out[start..]);
+        self.merge_definitions(owner, &mut out[start..]);
         if let Some(name) = filter {
             let nested = format!("{owner}.{name}");
             if out.is_empty() && self.index.has_members(&nested) {
@@ -4081,22 +4118,31 @@ impl<'a> Infer<'a> {
         }
     }
 
-    /// Gives each function among `members` the signatures of the others of its name, as
-    /// lua-language-server reads a function defined more than once.
-    fn merge_definitions(&self, members: &mut [MemberInfo]) {
+    /// Gives each function among `members`, those of `owner`, the signatures of the others of its name,
+    /// as lua-language-server reads a function defined more than once, and those that `---@extend`
+    /// lines add to it.
+    fn merge_definitions(&self, owner: &str, members: &mut [MemberInfo]) {
+        let extended = self.index.has_member_extensions(owner);
         let funs = members.iter().enumerate().filter(|(_, member)| matches!(member.ty, Type::Fun(_)));
-        if funs.clone().nth(1).is_none() {
+        if !extended && funs.clone().nth(1).is_none() {
             return;
         }
         let mut named: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
         for (i, member) in funs {
             named.entry(member.name.clone()).or_default().push(i);
         }
-        for found in named.into_values().filter(|found| found.len() > 1) {
+        for (name, found) in named {
+            let extensions = match extended {
+                true => self.index.member_extensions(owner, &name, self.ctx.file),
+                false => Vec::new(),
+            };
+            if found.len() < 2 && extensions.is_empty() {
+                continue;
+            }
             let defined: Vec<Arc<FunType>> = found.iter().filter_map(|i| members[*i].ty.as_fun().cloned()).collect();
             for (at, i) in found.iter().enumerate() {
                 let others = defined.iter().enumerate().filter(|(other, _)| *other != at).map(|(_, fun)| fun);
-                members[*i].ty = Type::Fun(with_signatures(&defined[at], others));
+                members[*i].ty = Type::Fun(with_signatures(&defined[at], others.chain(extensions.iter().copied())));
             }
         }
     }
@@ -4187,7 +4233,7 @@ impl<'a> Infer<'a> {
         self.owner_members(name, filter, out);
         // The functions its fields declare take the signatures of the methods set on its table.
         if fields {
-            self.merge_definitions(&mut out[own..]);
+            self.merge_definitions(&name.text, &mut out[own..]);
         }
         let bindings = class_bindings(&defs, args);
         if !bindings.is_empty() {

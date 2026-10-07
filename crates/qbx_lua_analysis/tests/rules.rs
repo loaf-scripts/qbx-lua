@@ -1107,6 +1107,30 @@ fn the_definition_that_takes_the_most_arguments_decides() {
 }
 
 #[test]
+fn signatures_added_with_extend_count_beside_the_definitions() {
+    let defs = (None, "---@param action string\n---@param handler function\nfunction OnAction(action, handler) end");
+    let extend = (
+        None,
+        "---@extend OnAction fun(action: 'tick')\n\
+         ---@extend OnAction (server) fun(action: 'bulk', handler: function, extra: number)\n\
+         ---@extend GetPlayerName fun(player: number, more: number)",
+    );
+    let both = [defs, extend];
+    assert!(missing_parameters("OnAction('tick')", Some(Side::Client), &both).is_empty());
+    assert_eq!(missing_parameters("OnAction('tick')", Some(Side::Client), &[defs]).len(), 1);
+    assert_eq!(
+        redundant_parameters("OnAction('bulk', print, 1)", Some(Side::Client), &both),
+        ["'OnAction' is called with 3 arguments, but takes at most 2"],
+        "the signature for server code"
+    );
+    assert!(redundant_parameters("OnAction('bulk', print, 1)", Some(Side::Server), &both).is_empty());
+    assert!(
+        redundant_parameters("print(GetPlayerName(1, 2, 3))", Some(Side::Client), &both).is_empty(),
+        "a function nothing defines keeps the checks it has"
+    );
+}
+
+#[test]
 fn values_the_linter_cannot_follow_are_not_checked() {
     let missing = |source: &str| missing_parameters(source, Some(Side::Client), &[]);
     for source in [

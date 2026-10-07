@@ -6,7 +6,7 @@ use qbx_lua_syntax::{Comment, SmolStr, Span};
 use qbx_luacats::types::{FunType, Type};
 
 use crate::scope::{GlobalRefKind, Resolution, Resolved, MAIN_CHUNK};
-use crate::signature::{defined, doc_aliases, global_key, member_path, undocumented};
+use crate::signature::{defined, doc_aliases, doc_extensions, global_key, member_path, undocumented};
 
 #[derive(Clone, Debug)]
 pub struct GlobalDef {
@@ -39,6 +39,9 @@ pub struct FileSummary {
     pub functions: Vec<FunctionDef>,
     /// `@alias` declarations, which decide whether a parameter of that type may be left out.
     pub aliases: Vec<(SmolStr, Type)>,
+    /// The signatures `---@extend` lines add to the functions of the globals and global table fields
+    /// at their dotted paths. They count beside the definitions of a function, never instead of them.
+    pub extensions: Vec<(SmolStr, Arc<FunType>)>,
 }
 
 /// The `@resource/file.lua` import a `lib.load`/`require` module name refers to.
@@ -85,6 +88,7 @@ pub fn summarize(source: &str, chunk: &Chunk, resolution: &Resolution) -> FileSu
         module_imports: collector.module_imports,
         functions: collector.functions,
         aliases: doc_aliases(source, &chunk.comments),
+        extensions: doc_extensions(source, &chunk.comments),
     }
 }
 

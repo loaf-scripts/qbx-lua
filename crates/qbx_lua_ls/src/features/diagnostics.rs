@@ -28,7 +28,7 @@ use super::closes::unclosable_values;
 use super::comparisons::impossible_comparisons;
 use super::deprecated::deprecated_uses;
 use super::discards::discarded_returns;
-use super::doc_names::undefined_doc_names;
+use super::doc_names::{undefined_doc_names, unextended_functions};
 use super::injected_fields::injected_fields;
 use super::nil_checks::{unchecked_nils, UncheckedNils};
 use super::returns::{mismatched_returns, missing_returns, redundant_returns};
@@ -135,7 +135,9 @@ fn type_diagnostics<'a>(
     let checks: [(&'static str, Check); 22] = [
         (UNDEFINED_DOC_NAME, |input| {
             let side = input.ws.index.file(input.doc.file).and_then(|f| f.side);
-            undefined_doc_names(&input.ws.index, &input.doc.text, &input.doc.chunk, side)
+            let mut out = undefined_doc_names(&input.ws.index, &input.doc.text, &input.doc.chunk, side);
+            out.extend(unextended_functions(input.infer, &input.doc.text, &input.doc.chunk));
+            out
         }),
         (CIRCLE_DOC_CLASS, |input| circular_classes(input.infer, &input.doc.chunk)),
         (MISSING_FIELDS, |input| missing_fields(input.infer, &input.doc.chunk)),

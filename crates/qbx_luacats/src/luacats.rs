@@ -116,6 +116,20 @@ pub struct DocAlias {
     pub values: Vec<DescribedValue>,
 }
 
+/// An `@extend` line, which adds a signature to a function declared elsewhere, as
+/// `---@extend OnAction (server) fun(action: "jobUpdated", handler: fun(job: string))` does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocExtend {
+    /// The path of the table the function is a member of, as `lib.callback` of
+    /// `lib.callback.register` or `Player` of `Player:getJob`, or none for a global function.
+    pub owner: Option<SmolStr>,
+    pub name: SmolStr,
+    /// The signature, scoped to the side its attributes name. One added to `Player:getJob` is called
+    /// with `:` and does not list `self`, unless it names it first.
+    pub fun: Arc<FunType>,
+    pub line: usize,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DocGroup {
     pub description: String,
@@ -145,6 +159,8 @@ pub struct DocGroup {
     pub nodiscard: bool,
     pub is_meta: bool,
     pub callback: Option<CallbackTag>,
+    /// The signatures that `@extend` lines add to functions declared elsewhere.
+    pub extends: Vec<DocExtend>,
     /// `---@private`, `---@protected` or `---@package` above the function or assignment that sets a
     /// member. `---@public` changes nothing, as in LuaLS.
     pub visibility: Visibility,
@@ -375,6 +391,40 @@ fn overload(rest: &str) -> Option<Arc<FunType>> {
     }
 }
 
+/// An `@extend target fun(...)` line, where the target is a global function, as `OnAction`, or a
+/// member of a table or class, as `lib.callback.register` or `Player:getJob`. Attributes such as
+/// `(server)` may come between the two, as on an `@overload`.
+fn extend(rest: &str, line: usize) -> Option<DocExtend> {
+    let (target, rest) = extend_target(rest);
+    let (owner, name, method) = match target.rsplit_once(':') {
+        Some((owner, name)) => (Some(owner), name, true),
+        None => match target.rsplit_once('.') {
+            Some((owner, name)) => (Some(owner), name, false),
+            None => (None, target, false),
+        },
+    };
+    let is_name = |part: &str| {
+        part.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if !is_name(name) || owner.is_some_and(|owner| !owner.split('.').all(is_name)) {
+        return None;
+    }
+    let fun = overload(rest)?;
+    let is_method = method && fun.params.first().is_none_or(|param| param.name != "self");
+    let fun = Arc::new(FunType { is_method, lists_receiver: !is_method, ..(*fun).clone() });
+    Some(DocExtend { owner: owner.map(SmolStr::new), name: SmolStr::new(name), fun, line })
+}
+
+/// Splits the target off the front of an `@extend` line: the path of the function, and the text
+/// after it.
+fn extend_target(rest: &str) -> (&str, &str) {
+    let rest = rest.trim_start();
+    let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))).unwrap_or(rest.len());
+    let (target, after) = rest.split_at(end);
+    (target, after.trim_start())
+}
+
 /// An `@operator name(operand): result` or `@operator name: result` line.
 fn operator(rest: &str) -> Option<DocOperator> {
     let rest = rest.trim_start();
@@ -445,6 +495,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                 }
             }
             "overload" => group.overloads.extend(overload(rest)),
+            "extend" => group.extends.extend(extend(rest, index)),
             "operator" => {
                 if let (Some(operator), Some(class)) = (operator(rest), group.classes.last_mut()) {
                     let operator = DocOperator {
@@ -578,6 +629,12 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
     }
 
     group.description = description.join("\n").trim().to_string();
+    // An added signature shares the `@generic` names of its doc comment, as an overload does.
+    if !group.generics.is_empty() {
+        for extend in &mut group.extends {
+            Arc::make_mut(&mut extend.fun).generics = group.generics.clone();
+        }
+    }
     group
 }
 
@@ -765,6 +822,14 @@ impl<'a> TypeNames<'a> {
             next = after.trim_start().strip_prefix(',');
         }
     }
+}
+
+/// The target of an `@extend` doc line whose `---` prefix is removed, as `Player:on` of
+/// `@extend Player:on fun()`, with the byte it starts at.
+pub fn extend_target_at(line: &str) -> Option<(usize, &str)> {
+    let ("extend", rest) = split_tag(line)? else { return None };
+    let (target, _) = extend_target(rest);
+    (!target.is_empty()).then(|| (line.len() - rest.len(), target))
 }
 
 /// The class or alias name at byte `offset` of a doc line whose `---` prefix is removed, with the
@@ -968,6 +1033,7 @@ fn type_names(line: &str) -> Option<(&str, Vec<FoundName<'_>>)> {
             names.ty(rest);
         }
         "overload" => names.types(split_attributes(rest).1),
+        "extend" => names.types(split_attributes(extend_target(rest).1).1),
         "type" | "vararg" | "as" | "|" => names.types(rest),
         _ => {}
     }
@@ -1485,6 +1551,44 @@ mod tests {
         assert_eq!(names("@return string name, integer"), Vec::<&str>::new());
         assert_eq!(names("@see Garage.open"), Vec::<&str>::new(), "@see may name a function");
         assert_eq!(referenced_type_names("@type  Vec"), [(7, "Vec")]);
+        assert_eq!(names("@extend Player:on (server) fun(name: Event): Result"), ["Event", "Result"]);
+        assert_eq!(referenced_type_names("@extend Lib.on fun(cb: Cb)"), [(23, "Cb")]);
+    }
+
+    #[test]
+    fn reads_extend_lines() {
+        let doc = parse(
+            "---@generic T\n\
+             ---@extend OnAction (server) fun(action: \"jobUpdated\", handler: fun(job: T)): number\n\
+             ---@extend lib.callback.register fun(name: string)\n\
+             ---@extend Player:on fun(name: string)\n\
+             ---@extend Player:off fun(self: Player)\n\
+             ---@extend 1bad fun()\n\
+             ---@extend Player: fun()\n\
+             ---@extend .on fun()\n\
+             ---@extend Missing",
+        );
+        let targets: Vec<(Option<&str>, &str, bool, Option<Side>)> = doc
+            .extends
+            .iter()
+            .map(|extend| (extend.owner.as_deref(), extend.name.as_str(), extend.fun.is_method, extend.fun.side))
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                (None, "OnAction", false, Some(Side::Server)),
+                (Some("lib.callback"), "register", false, None),
+                (Some("Player"), "on", true, None),
+                (Some("Player"), "off", false, None),
+            ]
+        );
+        assert_eq!(doc.extends[0].line, 1);
+        assert_eq!(doc.extends[0].fun.generics, ["T"]);
+        assert_eq!(doc.extends[0].fun.params[0].ty.to_string(), "\"jobUpdated\"");
+        assert!(doc.extends[2].fun.call_offsets(true) == (0, 0) && doc.extends[3].fun.call_offsets(true) == (1, 0));
+        assert!(doc.overloads.is_empty() && !doc.has_function_tags(), "it types no function below it");
+        assert_eq!(extend_target_at(" @extend  Player:on fun()"), Some((10, "Player:on")));
+        assert_eq!(extend_target_at("@overload fun()"), None);
     }
 
     #[test]

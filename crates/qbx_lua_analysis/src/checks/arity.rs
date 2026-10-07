@@ -86,7 +86,13 @@ impl<'i, 'a> Callees<'i, 'a> {
             Resolved::Global(_) if self.env().opaque => return None,
             Resolved::Global(_) => {
                 let path = global_key(&root.text, fields)?;
-                self.env().function_defs(&path, side).map(|def| def.cloned()).collect()
+                let mut defs: Vec<_> = self.env().function_defs(&path, side).map(|def| def.cloned()).collect();
+                // What `---@extend` lines add counts beside the definitions, so a native or a
+                // function the resource does not define keeps the signatures it has.
+                if !defs.is_empty() {
+                    defs.extend(self.env().extension_defs(&path, side).map(|fun| Some(fun.clone())));
+                }
+                defs
             }
         };
         // A value other than a function literal may be any function.

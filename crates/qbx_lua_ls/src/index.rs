@@ -210,6 +210,16 @@ pub struct Metatable {
     pub metatable: Type,
 }
 
+/// A signature that an `---@extend` line adds to a function declared elsewhere: the global `name`,
+/// or the member `name` of the tables `owner` names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Extension {
+    pub owner: Option<SmolStr>,
+    pub name: SmolStr,
+    pub fun: Arc<FunType>,
+    pub range: Range,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassDef {
     pub name: SmolStr,
@@ -337,6 +347,8 @@ pub struct FileIndex {
     pub metatables: Vec<Metatable>,
     pub classes: Vec<ClassDef>,
     pub aliases: Vec<AliasDef>,
+    /// The signatures that `---@extend` lines add to functions.
+    pub extensions: Vec<Extension>,
     pub exports: Vec<Symbol>,
     pub events: Vec<EventDef>,
     /// NUI registrations are not network events and must not enter event completion.
@@ -421,6 +433,7 @@ impl FileIndex {
             }
         }
         self.events.iter_mut().filter_map(|event| event.handler.as_mut()).for_each(fun);
+        self.extensions.iter_mut().for_each(|extension| fun(&mut extension.fun));
         self.module_return.iter_mut().for_each(|ty| ty.set_origin(file));
     }
 }
@@ -508,6 +521,10 @@ pub struct Index {
     metatables: FxHashMap<SmolStr, Vec<Slot>>,
     classes: FxHashMap<SmolStr, Vec<Slot>>,
     aliases: FxHashMap<SmolStr, Vec<Slot>>,
+    /// The `---@extend` signatures of global functions, by name.
+    global_extensions: FxHashMap<SmolStr, Vec<Slot>>,
+    /// The `---@extend` signatures of members, by the owner of the tables they extend.
+    member_extensions: FxHashMap<SmolStr, Vec<Slot>>,
     /// The `members` on `exports` that declare the type of a resource's exports, by resource name.
     export_types: FxHashMap<SmolStr, Vec<Slot>>,
     /// The other resources that run a file at runtime through one of their imports, for each such
@@ -641,6 +658,12 @@ impl Index {
         for (i, alias) in entry.index.aliases.iter().enumerate() {
             insert_slot(&mut self.aliases, &alias.name, (id, i as u32));
         }
+        for (i, extension) in entry.index.extensions.iter().enumerate() {
+            match &extension.owner {
+                Some(owner) => insert_slot(&mut self.member_extensions, owner, (id, i as u32)),
+                None => insert_slot(&mut self.global_extensions, &extension.name, (id, i as u32)),
+            }
+        }
         for (i, member) in entry.index.members.iter().enumerate() {
             if member.owner == "exports" && entry.declares_export_type(i as u32) {
                 insert_slot(&mut self.export_types, &member.symbol.name, (id, i as u32));
@@ -666,6 +689,10 @@ impl Index {
         remove_file_slots(&mut self.metatables, old.index.metatables.iter().map(|m| &m.owner), id);
         remove_file_slots(&mut self.classes, old.index.classes.iter().map(|c| &c.name), id);
         remove_file_slots(&mut self.aliases, old.index.aliases.iter().map(|a| &a.name), id);
+        let (members, globals): (Vec<&Extension>, Vec<&Extension>) =
+            old.index.extensions.iter().partition(|extension| extension.owner.is_some());
+        remove_file_slots(&mut self.member_extensions, members.iter().filter_map(|e| e.owner.as_ref()), id);
+        remove_file_slots(&mut self.global_extensions, globals.iter().map(|e| &e.name), id);
         let exports = old.index.members.iter().filter(|m| m.owner == "exports");
         remove_file_slots(&mut self.export_types, exports.map(|m| &m.symbol.name), id);
         Some(old)
@@ -797,6 +824,18 @@ impl Index {
             aliases.filter_map(|alias| Some((Read::Table(alias.table.as_ref()?.owner.clone()), alias)))
         };
         changed_groups(out, enums(before), enums(after), |a, b| same_alias(a, b));
+        // A signature added to a member counts for whoever reads every member of its tables too.
+        let extensions = |entry: Option<&'a FileEntry>| {
+            entry.into_iter().flat_map(|entry| &entry.index.extensions).flat_map(|extension| {
+                let name = extension.name.clone();
+                let reads = match &extension.owner {
+                    Some(owner) => vec![Read::Members(owner.clone(), Some(name)), Read::Members(owner.clone(), None)],
+                    None => vec![Read::Global(name)],
+                };
+                reads.into_iter().map(|read| (read, &extension.fun))
+            })
+        };
+        changed_groups(out, extensions(before), extensions(after), |a, b| a == b && a.same_origins(b));
         let operators = |entry: Option<&'a FileEntry>| {
             let classes = entry.into_iter().flat_map(|entry| &entry.index.classes);
             classes.flat_map(|class| &class.operators).map(|operator| (Read::Operators, &operator.name))
@@ -998,6 +1037,32 @@ impl Index {
             found.sort_by_key(|(file, _)| self.distance(from, *file));
         }
         found
+    }
+
+    /// The signatures that the `---@extend` lines code in `from` sees add to the global function
+    /// `name`, which reach it as the declarations of the global do.
+    pub fn global_extensions(&self, name: &str, from: FileId) -> Vec<&Arc<FunType>> {
+        self.note(|| Read::Global(SmolStr::new(name)));
+        let found =
+            self.visible_first(self.global_extensions.get(name), from, |f, i| f.index.extensions.get(i as usize));
+        found.into_iter().map(|(_, extension)| &extension.fun).collect()
+    }
+
+    /// Whether some `---@extend` line adds a signature to a member of the tables `owner` names.
+    pub fn has_member_extensions(&self, owner: &str) -> bool {
+        self.member_extensions.contains_key(owner)
+    }
+
+    /// The signatures that `---@extend` lines add to the member `name` of the tables `owner` names,
+    /// which reach code in `from` as the members of those tables do.
+    pub fn member_extensions(&self, owner: &str, name: &str, from: FileId) -> Vec<&Arc<FunType>> {
+        self.note(|| Read::Members(SmolStr::new(owner), Some(SmolStr::new(name))));
+        self.owner_slots(self.member_extensions.get(owner), owner, from)
+            .into_iter()
+            .filter_map(|(file, i)| self.file(file)?.index.extensions.get(i as usize))
+            .filter(|extension| extension.name == name)
+            .map(|extension| &extension.fun)
+            .collect()
     }
 
     /// Members are looked up per resource rather than per file: libraries such as ox_lib load the
@@ -1361,5 +1426,41 @@ mod tests {
         assert!(index.changes(Some(&entry(1)), Some(&entry(1))).is_empty());
         let changed = index.changes(Some(&entry(1)), Some(&entry(2)));
         assert_eq!(changed, FxHashSet::from_iter([Read::Global("Mid".into())]));
+    }
+
+    #[test]
+    fn signatures_added_with_extend_are_read_as_their_functions() {
+        let extension = |owner: Option<&str>, name: &str, returns: Type| Extension {
+            owner: owner.map(SmolStr::new),
+            name: name.into(),
+            fun: Arc::new(FunType { returns: vec![returns], ..FunType::default() }),
+            range: Range::default(),
+        };
+        let entry = |extensions: Vec<Extension>| FileEntry {
+            path: PathBuf::from("extend.lua"),
+            uri: Url::parse("file:///extend.lua").unwrap(),
+            origin: FileOrigin::Workspace,
+            resource: None,
+            side: None,
+            index: FileIndex { extensions, ..FileIndex::default() },
+        };
+        let both = |returns: Type| {
+            entry(vec![extension(None, "OnAction", returns), extension(Some("Lib"), "on", Type::Number)])
+        };
+        let index = Index::default();
+        assert!(index.changes(Some(&both(Type::Number)), Some(&both(Type::Number))).is_empty());
+        let changed = index.changes(Some(&both(Type::Number)), Some(&both(Type::String)));
+        assert_eq!(changed, FxHashSet::from_iter([Read::Global("OnAction".into())]));
+        // Whoever reads every member of `Lib` reads the one that goes too.
+        let gone = entry(vec![extension(None, "OnAction", Type::Number)]);
+        let changed = index.changes(Some(&both(Type::Number)), Some(&gone));
+        let members = [Read::Members("Lib".into(), Some("on".into())), Read::Members("Lib".into(), None)];
+        assert_eq!(changed, FxHashSet::from_iter(members));
+
+        let ((), reads) = index.reads_while(|| {
+            index.global_extensions("OnAction", 0);
+            index.member_extensions("Lib", "on", 0);
+        });
+        assert_eq!(reads, [Read::Global("OnAction".into()), Read::Members("Lib".into(), Some("on".into()))]);
     }
 }

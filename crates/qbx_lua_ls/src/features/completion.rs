@@ -80,6 +80,7 @@ const DOC_TAGS: &[(&str, &str)] = &[
     ("enum", "enum ${1:Name}"),
     ("generic", "generic ${1:T}"),
     ("overload", "overload fun(${1}): ${2:any}"),
+    ("extend", "extend ${1:name} fun(${2}): ${3:any}"),
     ("deprecated", "deprecated"),
     ("async", "async"),
     ("nodiscard", "nodiscard"),

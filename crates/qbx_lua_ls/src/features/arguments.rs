@@ -513,7 +513,8 @@ pub fn definitions(infer: &Infer, base: &Expr, method: Option<&Name>) -> Vec<Arc
                 if !globals.iter().all(|(file, _)| known(Some(*file))) {
                     return Vec::new();
                 }
-                globals.into_iter().filter_map(|(_, symbol)| symbol.ty.as_fun().cloned()).collect()
+                let funs = globals.into_iter().filter_map(|(_, symbol)| symbol.ty.as_fun());
+                funs.map(|fun| infer.with_global_extensions(fun, &name.text)).collect()
             }
             // A parameter whose function the callee of its own function gives takes what the callee
             // declares, with the generics that the other arguments of that call declare, and is not

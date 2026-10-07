@@ -74,13 +74,42 @@ pub fn global_key(root: &str, fields: &[&str]) -> Option<SmolStr> {
 /// other comments inside a block are passed over; a blank line or code ends it.
 pub fn doc_aliases(source: &str, comments: &[Comment]) -> Vec<(SmolStr, Type)> {
     let mut aliases = Vec::new();
-    if !source.contains("@alias") {
-        return aliases;
+    doc_blocks_with(source, comments, "@alias", |doc| {
+        aliases.extend(doc.aliases.into_iter().map(|alias| (alias.name, alias.ty)));
+    });
+    aliases
+}
+
+/// The signatures that the `@extend` lines of a file add, by the dotted path of the function they
+/// add them to, as `summary` keys its definitions: `Player.on` for `---@extend Player:on fun()`.
+pub fn doc_extensions(source: &str, comments: &[Comment]) -> Vec<(SmolStr, Arc<FunType>)> {
+    let mut extensions = Vec::new();
+    doc_blocks_with(source, comments, "@extend", |doc| {
+        for extend in doc.extends {
+            let path = match &extend.owner {
+                Some(owner) => {
+                    let mut parts = owner.split('.');
+                    let root = parts.next().unwrap_or_default();
+                    global_key(root, &parts.chain([extend.name.as_str()]).collect::<Vec<_>>())
+                }
+                None => Some(extend.name.clone()),
+            };
+            extensions.extend(path.map(|path| (path, extend.fun)));
+        }
+    });
+    extensions
+}
+
+/// Runs `found` on each `---` comment block of a file that has a line holding `needle`, parsed. Like
+/// LuaLS, other comments inside a block are passed over; a blank line or code ends it.
+fn doc_blocks_with(source: &str, comments: &[Comment], needle: &str, mut found: impl FnMut(DocGroup)) {
+    if !source.contains(needle) {
+        return;
     }
     let mut block: Vec<&str> = Vec::new();
     let mut flush = |block: &mut Vec<&str>| {
-        if block.iter().any(|line| line.contains("@alias")) {
-            aliases.extend(parse_doc_lines(block).aliases.into_iter().map(|alias| (alias.name, alias.ty)));
+        if block.iter().any(|line| line.contains(needle)) {
+            found(parse_doc_lines(block));
         }
         block.clear();
     };
@@ -99,7 +128,6 @@ pub fn doc_aliases(source: &str, comments: &[Comment]) -> Vec<(SmolStr, Type)> {
         previous_end = Some(comment.span.end);
     }
     flush(&mut block);
-    aliases
 }
 
 /// Whether a parameter of this type may be left out: `nil`, `any` and `unknown` allow it, and so

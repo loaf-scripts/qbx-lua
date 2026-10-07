@@ -1,6 +1,7 @@
 //! `undefined-doc-name`: a LuaCATS annotation names a type that no `@class`, `@alias` or `@enum`
-//! declares, or that only `(server)` or `(client)` declarations of the other side declare. Only the
-//! language server indexes the declarations, so qbx-lint registers the rule and this module reports it.
+//! declares, or that only `(server)` or `(client)` declarations of the other side declare, or an
+//! `---@extend` line names no function that takes its signature. Only the language server indexes
+//! the declarations, so qbx-lint registers the rule and this module reports it.
 
 use qbx_fivem_data::Side;
 use qbx_lua_analysis::env::doc_blocks;
@@ -8,8 +9,8 @@ use qbx_lua_syntax::ast::Chunk;
 use qbx_lua_syntax::{Comment, Span};
 
 use crate::index::Index;
-use crate::infer::NATIVE_HANDLE_TYPES;
-use crate::luacats::{declared_generics, referenced_type_names};
+use crate::infer::{Infer, NATIVE_HANDLE_TYPES};
+use crate::luacats::{declared_generics, extend_target_at, parse_doc_lines, referenced_type_names};
 
 /// Each type name in the doc comments of `chunk` that nothing declares for code on `side`, with its
 /// message.
@@ -56,6 +57,25 @@ pub fn undefined_doc_names(index: &Index, source: &str, chunk: &Chunk, side: Opt
                 };
                 out.push((Span::new(from, from + name.len() as u32), message));
             }
+        }
+    }
+    out
+}
+
+/// Each `---@extend` line of `chunk` whose signature no function takes, as one that names a global
+/// nothing defines, a misspelled method or a field that holds no function, with its message.
+pub fn unextended_functions(infer: &Infer, source: &str, chunk: &Chunk) -> Vec<(Span, String)> {
+    if !source.contains("@extend") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for comment in &chunk.comments {
+        let Some(line) = comment.span.text(source).strip_prefix("---") else { continue };
+        let Some((start, target)) = extend_target_at(line) else { continue };
+        let Some(extend) = parse_doc_lines(&[line]).extends.pop() else { continue };
+        if !infer.extends_function(&extend) {
+            let from = comment.span.start + 3 + start as u32;
+            out.push((Span::new(from, from + target.len() as u32), format!("No function `{target}` to extend")));
         }
     }
     out

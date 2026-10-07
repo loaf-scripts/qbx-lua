@@ -15714,3 +15714,134 @@ Lib.on(\"closed\", function(reason) end)
         ]
     );
 }
+
+#[test]
+fn extend_adds_signatures_to_functions_declared_elsewhere() {
+    let actions = "\
+---@param action \"playerLoaded\"
+---@param handler function
+---@return number id
+function OnAction(action, handler) return 0 end
+
+Lib = {}
+
+---@param name \"ready\"
+---@param cb function
+function Lib.on(name, cb) end
+
+---@class Player
+Player = {}
+
+---@param name \"spawned\"
+---@param cb function
+function Player:on(name, cb) end
+";
+    let extend = "\
+---@extend OnAction (client) fun(action: \"keyPressed\", handler: fun(key: string)): number
+---@extend Lib.on fun(name: \"closed\", cb: fun(reason: string))
+---@extend Player:on fun(name: \"died\", cb: fun(cause: integer))
+";
+    let jobs = "\
+---@extend OnAction (server) fun(action: \"jobUpdated\", handler: fun(source: number, job: string)): number
+";
+    let client_main = "\
+---@extend Lib.on fun(name: \"other\", cb: fun(data: MissingData))
+OnAction(\"keyPressed\", function(key) end)
+OnAction(\"jobUpdated\", function(source, job) end)
+Lib.on(\"closed\", function(reason) end)
+Player:on(\"died\", function(cause) end)
+---@extend OnActoin fun(action: \"typo\")
+---@extend Lib.onn fun(name: \"typo\")
+---@extend Player:spawn fun()
+---@extend Player.on fun(name: \"dot\")
+";
+    let server_main = "\
+OnAction(\"jobUpdated\", function(source, job) end)
+OnAction(\"keyPressed\", function(key) end)
+";
+    let workspace = TempWorkspace::new(
+        "extend",
+        &[
+            ("res/fxmanifest.lua", SIDED_MANIFEST),
+            ("res/shared/actions.lua", actions),
+            ("res/shared/extend.lua", extend),
+            ("res/server/jobs.lua", jobs),
+            ("res/client/main.lua", client_main),
+            ("res/server/main.lua", server_main),
+        ],
+    );
+    let mut client = Client::start(workspace.0.clone());
+    let (client_file, server_file) = ("res/client/main.lua", "res/server/main.lua");
+    client.open(client_file);
+    client.open(server_file);
+
+    let hovers = [
+        (client_file, client_main, "key)", "key: string"),
+        (client_file, client_main, "reason)", "reason: string"),
+        (client_file, client_main, "cause)", "cause: integer"),
+        (server_file, server_main, "job)", "job: string"),
+        (
+            client_file,
+            client_main,
+            "OnAction(\"keyPressed\"",
+            "function OnAction(action: \"keyPressed\", handler: fun(key: string)): number",
+        ),
+    ];
+    for (file, text, needle, expected) in hovers {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(file, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    // Each side takes the signatures added for it, and those in files of its own side.
+    let (l, c) = pos(client_main, "job)", 0);
+    assert!(!client.hover_text(client_file, l, c).contains("job: string"), "the server adds `jobUpdated` for itself");
+    let mismatches = |client: &mut Client, file: &str| -> Vec<u64> {
+        let found = findings(client, file, &["param-type-mismatch"]);
+        found.into_iter().map(|(_, line, _)| line).collect()
+    };
+    assert_eq!(mismatches(&mut client, client_file), [2]);
+    assert_eq!(mismatches(&mut client, server_file), [1]);
+    // A line whose signature no function takes is reported at its target.
+    let undefined = findings(&mut client, client_file, &["undefined-doc-name"]);
+    let reported: Vec<(u64, &str)> = undefined.iter().map(|(_, line, message)| (*line, message.as_str())).collect();
+    assert_eq!(
+        reported,
+        [
+            (0, "Undefined type or alias `MissingData`"),
+            (5, "No function `OnActoin` to extend"),
+            (6, "No function `Lib.onn` to extend"),
+            (7, "No function `Player:spawn` to extend"),
+        ]
+    );
+    let uri = client.uri(client_file).to_string();
+    let typo = client.diagnostics[&uri]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["message"].as_str().is_some_and(|message| message.contains("OnActoin")));
+    let (l, c) = pos(client_main, "OnActoin", 0);
+    assert_eq!(
+        typo.unwrap()["range"],
+        json!({ "start": { "line": l, "character": c }, "end": { "line": l, "character": c + 8 } })
+    );
+
+    let (l, c) = pos(server_main, "OnAction(\"jobUpdated\", f", 23);
+    let result = client.request("textDocument/signatureHelp", client.position_params(server_file, l, c));
+    let labels: Vec<&str> =
+        result["signatures"].as_array().unwrap().iter().filter_map(|s| s["label"].as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "OnAction(action: \"playerLoaded\", handler: function): number",
+            "OnAction(action: \"jobUpdated\", handler: fun(source: number, job: string)): number",
+        ]
+    );
+    assert_eq!(result["activeSignature"], 1);
+
+    // Open code that uses an added signature is checked again when it goes.
+    let extend_file = "res/shared/extend.lua";
+    client.open(extend_file);
+    let without_lib = extend.lines().filter(|line| !line.contains("Lib.on")).collect::<Vec<_>>().join("\n");
+    client.change(extend_file, 2, &format!("{without_lib}\n"));
+    assert_eq!(mismatches(&mut client, client_file), [2, 3]);
+}

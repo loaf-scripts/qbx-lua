@@ -396,6 +396,12 @@ the descriptions of both. Repeated with `(server)` or `(client)`, the signature 
 that side. Fields that are themselves scoped to a side stay apart, and repeated fields that are not
 functions are kept as they are.
 
+An `---@extend` line adds a signature to a function from another file, as
+[the language server's annotations](../crates/qbx_lua_ls/README.md#signatures-from-several-places)
+describe. Both rules count it beside the definitions of a global function or a field of a global
+table, for calls on the side of its file and of its `(server)` or `(client)` attribute. It adds
+nothing to a name the resource does not define, such as a native, which keeps the checks it has.
+
 Calls are checked when the function is:
 
 - a local function, or a local that is only ever assigned functions;
@@ -455,7 +461,7 @@ A parameter typed `any` or `unknown` takes any value, also beside other types, a
 
 It checks every call to a function whose parameters have types, also runtime functions, exports,
 methods of classes and fields typed `fun(...)`. A call is compared with each definition the side
-of the call reaches and with their `@overload`s, and passes when a signature that takes as many
+of the call reaches, with their `@overload`s and the signatures `---@extend` lines add, and passes when a signature that takes as many
 arguments as it passes takes each of them; when none takes that many, any of them may. A `:` call
 passes its receiver as the first argument, as in Lua, except through `exports`, whose proxy drops
 it. The payload of a `---@callback` wrapper call is compared with the handlers registered under its
