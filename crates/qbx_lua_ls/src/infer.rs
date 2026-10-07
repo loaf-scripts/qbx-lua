@@ -1319,14 +1319,22 @@ impl<'a> Infer<'a> {
             return Type::Exports(None);
         }
         let symbols = self.index.globals_named(name, self.ctx.file);
-        let known = self.preferred_global(&symbols).map(|(_, s)| &s.ty).filter(|ty| tells_global_value(ty));
-        if let Some(ty) = known.filter(|ty| !(matches!(ty, Type::Table) && self.index.has_members(name))) {
+        let known = self.preferred_global(&symbols).map(|(_, s)| *s).filter(|s| tells_global_value(&s.ty));
+        if let Some(symbol) = known.filter(|s| !(matches!(s.ty, Type::Table) && self.index.has_members(name))) {
+            let ty = &symbol.ty;
             // `local lib = {}` published with `_ENV.lib = lib` and then extended as `function lib.x()`
             // elsewhere keeps its members under two owners.
             let aliased = matches!(ty, Type::GlobalTable(owner) if owner != name) && self.index.has_members(name);
             return match ty {
                 _ if aliased => Type::union([ty.clone(), Type::GlobalTable(SmolStr::new(name))]),
-                Type::Fun(_) => self.with_fields(ty.clone(), name),
+                Type::Fun(fun) => {
+                    // A function takes the signatures of its other definitions too, as one that a
+                    // definition file declares again with more `@overload`s does in lua-language-server.
+                    let others = symbols.iter().filter(|(_, other)| !std::ptr::eq(*other, symbol));
+                    let others = others.filter_map(|(_, other)| other.ty.as_fun());
+                    let fun = with_signatures(fun, others);
+                    self.with_fields(Type::Fun(fun), name)
+                }
                 _ => ty.clone(),
             };
         }
@@ -4037,6 +4045,7 @@ impl<'a> Infer<'a> {
 
     /// The members set on the tables `owner` names themselves.
     fn own_members(&self, owner: &str, filter: Option<&str>, out: &mut Vec<MemberInfo>) {
+        let start = out.len();
         for (file, entry) in self.index.member_entries(owner, filter, self.ctx.file) {
             let symbol = &entry.symbol;
             if filter.is_none_or(|f| f == symbol.name) && applies_on(entry.side, self.side) {
@@ -4054,6 +4063,7 @@ impl<'a> Infer<'a> {
                 out.push(member);
             }
         }
+        self.merge_definitions(&mut out[start..]);
         if let Some(name) = filter {
             let nested = format!("{owner}.{name}");
             if out.is_empty() && self.index.has_members(&nested) {
@@ -4067,6 +4077,26 @@ impl<'a> Infer<'a> {
                     location: None,
                     inferred: false,
                 });
+            }
+        }
+    }
+
+    /// Gives each function among `members` the signatures of the others of its name, as
+    /// lua-language-server reads a function defined more than once.
+    fn merge_definitions(&self, members: &mut [MemberInfo]) {
+        let funs = members.iter().enumerate().filter(|(_, member)| matches!(member.ty, Type::Fun(_)));
+        if funs.clone().nth(1).is_none() {
+            return;
+        }
+        let mut named: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
+        for (i, member) in funs {
+            named.entry(member.name.clone()).or_default().push(i);
+        }
+        for found in named.into_values().filter(|found| found.len() > 1) {
+            let defined: Vec<Arc<FunType>> = found.iter().filter_map(|i| members[*i].ty.as_fun().cloned()).collect();
+            for (at, i) in found.iter().enumerate() {
+                let others = defined.iter().enumerate().filter(|(other, _)| *other != at).map(|(_, fun)| fun);
+                members[*i].ty = Type::Fun(with_signatures(&defined[at], others));
             }
         }
     }
@@ -4153,7 +4183,12 @@ impl<'a> Infer<'a> {
                 }
             }
         }
+        let fields = out.len() > own;
         self.owner_members(name, filter, out);
+        // The functions its fields declare take the signatures of the methods set on its table.
+        if fields {
+            self.merge_definitions(&mut out[own..]);
+        }
         let bindings = class_bindings(&defs, args);
         if !bindings.is_empty() {
             for member in &mut out[own..] {
@@ -4198,11 +4233,27 @@ fn holds_exports(ty: &Type) -> bool {
 }
 
 /// Adds `next` and its overloads to the signatures of `fun`, as a method that a definition file
-/// declares twice, like `Search` of `ox_inventory` for `'count'` and for `'slots'`, has both.
+/// declares twice, like `Search` of `ox_inventory` for `'count'` and for `'slots'`, has both. One
+/// that takes the same parameters on the same side as a signature `fun` has adds no call it takes.
 fn add_signature(fun: &mut Arc<FunType>, next: &Arc<FunType>) {
-    let fun = Arc::make_mut(fun);
-    fun.overloads.push(Arc::new(FunType { overloads: Vec::new(), ..(**next).clone() }));
-    fun.overloads.extend(next.overloads.iter().cloned());
+    for signature in std::iter::once(next).chain(&next.overloads) {
+        let same = |known: &FunType| {
+            known.params == signature.params && known.side == signature.side && known.is_method == signature.is_method
+        };
+        if same(fun) || fun.overloads.iter().any(|known| same(known)) {
+            continue;
+        }
+        Arc::make_mut(fun).overloads.push(Arc::new(FunType { overloads: Vec::new(), ..(**signature).clone() }));
+    }
+}
+
+/// `fun` with the signatures of each of `more` added, as `add_signature` adds them.
+fn with_signatures<'f>(fun: &Arc<FunType>, more: impl IntoIterator<Item = &'f Arc<FunType>>) -> Arc<FunType> {
+    let mut fun = fun.clone();
+    for next in more {
+        add_signature(&mut fun, next);
+    }
+    fun
 }
 
 /// A field that several assignments without a `---@type` set, as `T.state = 0` and

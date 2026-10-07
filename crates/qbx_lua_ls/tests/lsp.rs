@@ -15635,3 +15635,82 @@ fn framework_callbacks_do_not_choose_between_conflicting_handler_payloads() {
     let detail = item["detail"].as_str().unwrap_or_default();
     assert!(!detail.contains("qbItem") && detail.contains("Multiple handlers"), "{item}");
 }
+
+const SIDED_MANIFEST: &str = "fx_version 'cerulean'\ngame 'gta5'\nshared_scripts { 'shared/*.lua' }\n\
+client_scripts { 'client/*.lua' }\nserver_scripts { 'server/*.lua' }\n";
+
+#[test]
+fn functions_take_the_signatures_of_every_definition() {
+    let actions = "\
+---@param action string
+---@param handler fun(...)
+---@return number id
+---@overload fun(action: \"jobUpdated\", handler: fun(job: string)): number
+function OnAction(action, handler) return 0 end
+
+Lib = {}
+
+---@param name string
+---@param cb fun(...)
+---@overload fun(name: \"ready\", cb: fun(ok: boolean))
+function Lib.on(name, cb) end
+";
+    // A definition file declares both again with more overloads, which lua-language-server adds to
+    // those of the code.
+    let meta = "\
+---@meta
+
+---@param action string
+---@param handler fun(...)
+---@return number id
+---@overload fun(action: \"keyPressed\", handler: fun(key: integer)): number
+function OnAction(action, handler) end
+
+---@param name string
+---@param cb fun(...)
+---@overload fun(name: \"closed\", cb: fun(reason: string))
+function Lib.on(name, cb) end
+";
+    let main = "\
+OnAction(\"jobUpdated\", function(job) end)
+OnAction(\"keyPressed\", function(key) end)
+Lib.on(\"ready\", function(ok) end)
+Lib.on(\"closed\", function(reason) end)
+";
+    let workspace = TempWorkspace::new(
+        "definitions",
+        &[
+            ("res/fxmanifest.lua", SIDED_MANIFEST),
+            ("res/shared/actions.lua", actions),
+            ("res/types/actions.lua", meta),
+            ("res/client/main.lua", main),
+        ],
+    );
+    let mut client = Client::start(workspace.0.clone());
+    let file = "res/client/main.lua";
+    client.open(file);
+    for (needle, expected) in
+        [("job)", "job: string"), ("key)", "key: integer"), ("ok)", "ok: boolean"), ("reason)", "reason: string")]
+    {
+        let (l, c) = pos(main, needle, 0);
+        let hover = client.hover_text(file, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+
+    // The declared signature both definitions share is listed once.
+    let (l, c) = pos(main, "OnAction(\"keyPressed\", f", 23);
+    let result = client.request("textDocument/signatureHelp", client.position_params(file, l, c));
+    let mut labels: Vec<&str> =
+        result["signatures"].as_array().unwrap().iter().filter_map(|s| s["label"].as_str()).collect();
+    let active = labels[result["activeSignature"].as_u64().unwrap() as usize];
+    assert_eq!(active, "OnAction(action: \"keyPressed\", handler: fun(key: integer)): number");
+    labels.sort_unstable();
+    assert_eq!(
+        labels,
+        [
+            "OnAction(action: \"jobUpdated\", handler: fun(job: string)): number",
+            "OnAction(action: \"keyPressed\", handler: fun(key: integer)): number",
+            "OnAction(action: string, handler: fun(...: any)): number",
+        ]
+    );
+}

@@ -24,9 +24,10 @@ Available features depend on the editor's LSP client.
   argument starts: strings, integers, `true` and `false`, and `nil` beside them. Strings are also
   offered inside the argument's string, and a function literal with the matching parameters where
   an argument takes one. Call snippets stop in the quotes of listed strings, and end after a value
-  that picks an overload, so the handler written next matches it. The `# description` of a value
-  on a `---|` line under an `@alias` or `@param` comes with it. Hovers of the alias, or of the
-  function for its `@param`s and `@return`s, list the described values. The members of an
+  that picks an overload, so the handler written next matches it. Overloads come from
+  [every definition](#signatures-from-several-places) of a function. The `# description` of a
+  value on a `---|` line under an `@alias` or `@param` comes with it. Hovers of the alias, or of
+  the function for its `@param`s and `@return`s, list the described values. The members of an
   `---@enum` come before its values, written as the code reaches its table, like `Colors.Red`.
 - The same values where a value of such a type, like `"busy"|"ready"`, `1|2|3` or `boolean`, is
   assigned, set as a field of a class, returned or compared with `==` or `~=`, and the function
@@ -142,6 +143,12 @@ only. Classes, fields, aliases and enums follow the manifest side of the file. S
 files of an unknown side see both sides. A `side` in a `qbxlint.toml` override gives a side
 to files a loader runs without a manifest entry. Naming a type in a script of a side that only
 the other side declares is reported as `undefined-doc-name`.
+
+## Signatures from several places
+
+A function takes the signatures of every definition of it that the code sees, as in LuaLS, so a
+`---@meta` file that declares a function again with more `@overload`s adds them to those of the
+code. A signature that takes the same parameters as one the function has is not listed twice.
 
 ## Type guards
 
