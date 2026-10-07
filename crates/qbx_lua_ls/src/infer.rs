@@ -778,6 +778,17 @@ impl<'a> Infer<'a> {
         value_at(self.expr_multi(expr), 0).unwrap_or_default()
     }
 
+    /// The type of `expr` when it is a function written as a value of the statement at `anchor`,
+    /// which takes the doc comment of the statement, as its parameters do: the `@generic` of
+    /// `local wrap = function(value) end` or of `return function(value) end` is bound where it is
+    /// called.
+    fn statement_function(&self, expr: &Expr, anchor: u32) -> Option<Type> {
+        match &expr.unparen().kind {
+            ExprKind::Function(func) => Some(Type::Fun(Arc::new(self.fun_type(func, Some(anchor), false)))),
+            _ => None,
+        }
+    }
+
     pub fn expr_multi(&self, expr: &Expr) -> Vec<Type> {
         let mut values = self.guarded(|| match &expr.kind {
             ExprKind::Call { callee, args, .. } => self.call(callee, None, args),
@@ -1510,7 +1521,9 @@ impl<'a> Infer<'a> {
                         return declared;
                     }
                 }
-                let value = assigned_value(exprs, index, |expr| self.expr(expr), |expr| self.expr_multi(expr));
+                let single =
+                    |expr: &Expr| self.statement_function(expr, stmt.span.start).unwrap_or_else(|| self.expr(expr));
+                let value = assigned_value(exprs, index, single, |expr| self.expr_multi(expr));
                 match self.annotation(id) {
                     Some(declared) => self.bounded(&declared, &value),
                     // A value of no known type keeps the type the local is declared with, as one of an
@@ -1681,7 +1694,7 @@ impl<'a> Infer<'a> {
                 }
                 return own;
             }
-            let mut ty = self.first_value(expr);
+            let mut ty = self.statement_function(expr, stmt.span.start).unwrap_or_else(|| self.first_value(expr));
             // A local inside a function owns the table its constructor builds, as one at the top of
             // the file does, so what code sets through it is a field of the table. With `strict`, as
             // TypeScript reads it, the table has the fields of its constructor alone.
@@ -3750,7 +3763,7 @@ impl<'a> Infer<'a> {
     /// values, as `(false)` and `(string, string)` do, and what they pass as they are written, as
     /// `FunType::explicit_returns` reads them.
     fn inferred_returns(&self, body: &Block) -> (Vec<Type>, Vec<Vec<Type>>, Option<Vec<Type>>) {
-        let exits: Vec<&[Expr]> = return_stmts(body).into_iter().map(|(_, exprs)| exprs).collect();
+        let exits = return_stmts(body);
         if exits.is_empty() {
             return Default::default();
         }
@@ -3760,7 +3773,7 @@ impl<'a> Infer<'a> {
             (0..width).map(|i| merge_values(at(i)).widen_returned()).collect::<Vec<Type>>()
         };
         let (mut lists, written): (Vec<Vec<Type>>, Vec<Vec<Type>>) =
-            exits.iter().map(|exprs| self.return_values(exprs)).unzip();
+            exits.iter().map(|(stmt, exprs)| self.return_values(stmt.span.start, exprs)).unzip();
         if !always_exits(body) {
             lists.push(Vec::new());
         }
@@ -3775,12 +3788,12 @@ impl<'a> Infer<'a> {
         (returns, if linked { sets } else { Vec::new() }, Some(merged(&written)))
     }
 
-    /// The values one `return` passes, the last of them spread when it is a call or `...`, and the
-    /// same values as it writes them: the `nil` and `false` it writes out, and what a call at its end
-    /// declares or returns as written, while the `nil` or `false` that other values may hold, as
-    /// `t[k]` or a local may, is left out. A plain `true` or `false` stays, so that the sets of values
-    /// tell `return false` from `return name`.
-    fn return_values(&self, exprs: &[Expr]) -> (Vec<Type>, Vec<Type>) {
+    /// The values one `return`, at `anchor`, passes, the last of them spread when it is a call or
+    /// `...`, and the same values as it writes them: the `nil` and `false` it writes out, and what a
+    /// call at its end declares or returns as written, while the `nil` or `false` that other values
+    /// may hold, as `t[k]` or a local may, is left out. A plain `true` or `false` stays, so that the
+    /// sets of values tell `return false` from `return name`.
+    fn return_values(&self, anchor: u32, exprs: &[Expr]) -> (Vec<Type>, Vec<Type>) {
         let returned = |ty: Type| match ty {
             Type::BooleanLit(_) => ty,
             other => other.widen_returned(),
@@ -3790,6 +3803,10 @@ impl<'a> Infer<'a> {
             let (given, as_written) = match &expr.unparen().kind {
                 ExprKind::Nil => (vec![Type::Nil], vec![Type::Nil]),
                 ExprKind::False => (vec![Type::BooleanLit(false)], vec![Type::BooleanLit(false)]),
+                ExprKind::Function(_) => {
+                    let ty = self.statement_function(expr, anchor).unwrap_or_default();
+                    (vec![ty.clone()], vec![ty])
+                }
                 _ if i + 1 == exprs.len() => self.spread_values(expr),
                 _ => {
                     let ty = self.expr(expr);

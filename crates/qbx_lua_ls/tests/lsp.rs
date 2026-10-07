@@ -15845,3 +15845,48 @@ OnAction(\"keyPressed\", function(key) end)
     client.change(extend_file, 2, &format!("{without_lib}\n"));
     assert_eq!(mismatches(&mut client, client_file), [2, 3]);
 }
+
+#[test]
+fn generic_functions_written_as_values_bind_their_generics() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@generic T
+---@param value T
+---@return T
+local assigned = function(value)
+    return value
+end
+
+---@param label string
+local function makeHandler(label)
+    ---@generic T
+    ---@param message T
+    ---@return T
+    return function(message)
+        print(label)
+        return message
+    end
+end
+
+local reassigned
+---@generic T
+---@param value T
+---@return T
+reassigned = function(value) return value end
+
+local fromAssigned = assigned('x')
+local fromReturned = makeHandler('label')(1)
+local fromReassigned = reassigned(true)
+";
+    client.open_with(CLIENT, text);
+    let hovers = [
+        ("fromAssigned", "local fromAssigned: string"),
+        ("fromReturned", "local fromReturned: integer"),
+        ("fromReassigned", "local fromReassigned: boolean"),
+    ];
+    for (needle, expected) in hovers {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
