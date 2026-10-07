@@ -1125,9 +1125,12 @@ impl<'a> Infer<'a> {
         if !self.storing.borrow_mut().insert(origin) {
             return Type::Unknown;
         }
-        let ty = assigned_value(exprs, index, |expr| self.expr(expr), |expr| self.expr_multi(expr));
+        let (ty, complete) =
+            self.complete(|| assigned_value(exprs, index, |expr| self.expr(expr), |expr| self.expr_multi(expr)));
         self.storing.borrow_mut().remove(&origin);
-        self.stored.borrow_mut().insert(origin, ty.clone());
+        if complete {
+            self.stored.borrow_mut().insert(origin, ty.clone());
+        }
         ty
     }
 
@@ -1241,13 +1244,19 @@ impl<'a> Infer<'a> {
             return sets.clone();
         }
         let StmtKind::Local { exprs, .. } = &stmt.kind else { return None };
-        let sets = self.guarded(|| match exprs.last().map(|call| &call.kind) {
-            Some(ExprKind::Call { callee, args, .. }) => self.call_values(callee, None, args).sets,
-            Some(ExprKind::MethodCall { base, method, args, .. }) => self.call_values(base, Some(method), args).sets,
-            _ => Vec::new(),
+        let (sets, complete) = self.complete(|| {
+            self.guarded(|| match exprs.last().map(|call| &call.kind) {
+                Some(ExprKind::Call { callee, args, .. }) => self.call_values(callee, None, args).sets,
+                Some(ExprKind::MethodCall { base, method, args, .. }) => {
+                    self.call_values(base, Some(method), args).sets
+                }
+                _ => Vec::new(),
+            })
         });
         let sets = (sets.len() > 1).then(|| Rc::new(sets));
-        self.linked_sets.borrow_mut().insert(stmt.span.start, sets.clone());
+        if complete {
+            self.linked_sets.borrow_mut().insert(stmt.span.start, sets.clone());
+        }
         sets
     }
 
@@ -1302,9 +1311,14 @@ impl<'a> Infer<'a> {
         if !self.in_progress.borrow_mut().insert(id) {
             return Type::Unknown;
         }
-        let ty = self.guarded(|| self.compute_local(id));
+        // A type that `MAX_DEPTH` cut short may be found whole from a shallower point, as the local
+        // at the end of a long chain of locals read from each other is, so it is not cached: which
+        // local the cut fell on would depend on which was read first.
+        let (ty, complete) = self.complete(|| self.guarded(|| self.compute_local(id)));
         self.in_progress.borrow_mut().remove(&id);
-        self.locals.borrow_mut().insert(id, ty.clone());
+        if complete {
+            self.locals.borrow_mut().insert(id, ty.clone());
+        }
         ty
     }
 
@@ -1372,9 +1386,11 @@ impl<'a> Infer<'a> {
         for earlier in self.ctx.flow().chained(id).iter().take_while(|earlier| **earlier < origin) {
             self.origin_type(id, *earlier);
         }
-        let ty = self.guarded(|| self.compute_origin(id, origin));
+        let (ty, complete) = self.complete(|| self.guarded(|| self.compute_origin(id, origin)));
         self.origins_in_progress.borrow_mut().remove(&key);
-        self.origins.borrow_mut().insert(key, ty.clone());
+        if complete {
+            self.origins.borrow_mut().insert(key, ty.clone());
+        }
         Some(ty)
     }
 
@@ -1443,8 +1459,8 @@ impl<'a> Infer<'a> {
             return Some(Bases::Set(types.clone()));
         }
         let given = flow.others(set).iter().map(|origin| self.other_origin_type(id, *origin));
-        let (types, complete) = distinct_bases(given);
-        if complete {
+        let ((types, found), whole) = self.complete(|| distinct_bases(given));
+        if found && whole {
             self.others.borrow_mut().insert((id, origin), types.clone());
         }
         (!types.is_empty()).then_some(Bases::Set(types))

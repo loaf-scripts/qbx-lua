@@ -6094,6 +6094,40 @@ return config, later, walk, take, held, plain
 }
 
 #[test]
+fn locals_at_the_end_of_long_chains_keep_their_types() {
+    let mut client = Client::start(fixture_root());
+    // Typing `Solve` reads `t`, `err`, `ax`, `bx` and `cx` in turn, deeper than inference follows,
+    // which left the local where it stopped, `p2x`, unknown for good.
+    let text = "\
+---@param p1 vector2
+---@param p2 vector2
+---@return fun(x: number): number
+local function create(p1, p2)
+    local p1x, p2x = p1.x, p2.x
+    local cx = 3 * p1x
+    local bx = 3 * (p2x - p1x) - cx
+    local ax = 1 - cx - bx
+    ---@param x number
+    ---@return number
+    local function solve(x)
+        local t = x
+        local err = ((ax * t + bx) * t + cx) * t - x
+        t = t - err
+        return t
+    end
+    return solve
+end
+return create
+";
+    client.open_with(CLIENT, text);
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "no-unknown": "warning" } } } } }),
+    );
+    assert_eq!(findings(&mut client, CLIENT, &["no-unknown"]), [], "each local has the type that hovers show");
+}
+
+#[test]
 fn loops_over_a_generic_know_as_little_about_keys_as_about_values() {
     let mut client = Client::start(fixture_root());
     let text = "\
