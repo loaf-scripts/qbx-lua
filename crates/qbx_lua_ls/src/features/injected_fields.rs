@@ -3,22 +3,22 @@
 //! type does not declare. The type is a class, or a table type that an annotation declares, such as
 //! the `{ label: string }` of a `---@type`. What is set through the names that own their tables
 //! declares the field instead, so it is never reported: a global and the paths from it, the table a
-//! `---@class` annotation declares, `self` in a method, a local declared with a table at the top of
-//! the file, and the instance a constructor makes in a local. An empty table such as
-//! `local result = {}` takes any field, and so do values of unknown type, `table` and `any`. Only
-//! names are checked, not keys held in variables, and strict classes are left to
+//! `---@class` annotation declares, `self` in a method, a local declared with a table, at the top of
+//! the file or inside a function, and the instance a constructor makes in a local. An empty table
+//! such as `local result = {}` takes any field, and so do values of unknown type, `table` and `any`.
+//! Only names are checked, not keys held in variables, and strict classes are left to
 //! `undeclared-field`.
 //!
 //! As in lua-language-server, a table whose type no annotation declares takes any field: one a
 //! table constructor builds, what a function without `@return` returns, a loop variable over such
 //! tables, and a global or local table read through another name. With `strict`, as in TypeScript,
-//! such a table has the fields its constructor and the names that own it give it, so a table built
-//! inside a function is closed, and a field set through a loop variable over another file's tables
-//! is reported.
+//! a table that a constructor with fields builds has those alone, at the top of the file as inside a
+//! function, so what code sets through its local later is reported, and so is a field set through
+//! a loop variable over another file's tables.
 
 use qbx_lua_analysis::scope::Resolved;
 use qbx_lua_syntax::ast::*;
-use qbx_lua_syntax::Span;
+use qbx_lua_syntax::{SmolStr, Span};
 
 use super::class_tables::{accesses, Classes, Key};
 use super::comparisons::Declared;
@@ -125,8 +125,23 @@ fn has(
             None
         }
         Some(table) => Some(classes.table_field_type(&table, file, key).is_some()),
-        None => matches!(ty, Type::GlobalTable(_)).then(|| infer.member(ty, name).is_some()),
+        None => match ty {
+            Type::GlobalTable(owner) => Some(match constructor_fields(infer, owner) {
+                Some(fields) => fields.iter().any(|field| field == name),
+                None => infer.member(ty, name).is_some(),
+            }),
+            _ => None,
+        },
     }
+}
+
+/// With `strict`, as TypeScript reads it, the fields of the table `owner` that a local declares
+/// with a constructor that sets any entry: those of the constructor, inside a function as at the top
+/// of the file, while what code sets through the local later is no field of it. `None` without
+/// `strict`, where the local owns the table and what is set through it is one of its fields, and
+/// for other tables.
+pub(super) fn constructor_fields(infer: &Infer, owner: &str) -> Option<Vec<SmolStr>> {
+    infer.strict().then(|| infer.constructor_fields(owner)).flatten()
 }
 
 /// The message for the field `name` set through the value of type `owner` written at `holder`.

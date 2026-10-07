@@ -305,7 +305,7 @@ impl<'a> FileContext<'a> {
     }
 
     /// The declaration behind a `local_owner_key` of this file.
-    fn local_owner_decl(&self, owner: &str) -> Option<u32> {
+    pub fn local_owner_decl(&self, owner: &str) -> Option<u32> {
         let (file, decl_start) = owner.strip_prefix("%f")?.split_once(':')?;
         (file.parse::<FileId>().ok()? == self.file).then(|| decl_start.parse().ok()).flatten()
     }
@@ -1061,6 +1061,45 @@ impl<'a> Infer<'a> {
             && self.index.alias(name, self.side).is_none()
     }
 
+    /// `ty`, the shape that the constructor of the table `owner` gives it, with the fields that code
+    /// sets through the local inside a function that owns the table, as the indexer records them.
+    fn with_owned_fields(&self, ty: Type, owner: &str) -> Type {
+        let Type::Shape(shape) = &ty else { return ty };
+        let owned = self.members(&Type::GlobalTable(SmolStr::new(owner)));
+        let added: Vec<ShapeField> = owned
+            .into_iter()
+            .filter(|member| !shape.fields.iter().any(|field| field.name == member.name))
+            .map(|member| ShapeField { name: member.name, ty: member.ty.widen(), optional: false })
+            .collect();
+        if added.is_empty() {
+            return ty;
+        }
+        let mut shape = (**shape).clone();
+        shape.fields.extend(added);
+        Type::Shape(Arc::new(shape))
+    }
+
+    /// The names of the fields that the constructor of the table `owner` gives it, as `a` of
+    /// `local t = { a = 1 }`, when a local of this file declares the table with a constructor that
+    /// sets any entry and no metatable is given to it. `None` for another table, as one that `{}`
+    /// builds, which takes any field.
+    pub fn constructor_fields(&self, owner: &str) -> Option<Vec<SmolStr>> {
+        let decl = self.ctx.local_owner_decl(owner)?;
+        let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(decl) else { return None };
+        let Some(Decl::Local { stmt, index }) = self.ctx.decl(decl) else { return None };
+        let StmtKind::Local { exprs, .. } = &stmt.kind else { return None };
+        let ExprKind::Table(fields) = &exprs.get(*index)?.kind else { return None };
+        if fields.is_empty() || self.ctx.sets_metatable(id) {
+            return None;
+        }
+        let names = fields.iter().filter_map(|field| match field {
+            TableField::Named { name, .. } | TableField::SetMember(name) => Some(name.text.clone()),
+            TableField::Keyed { key, .. } => key.as_string().cloned(),
+            TableField::Positional(_) => None,
+        });
+        Some(names.collect())
+    }
+
     /// `fact`, or for a comparison with a local, what the type of that local where the comparison
     /// reads it tells, as TypeScript narrows by equality: `cam == activeCam` for an `activeCam` that
     /// is never `nil` or `false` rules those out of `cam`, and one with a local that holds a single
@@ -1597,7 +1636,13 @@ impl<'a> Infer<'a> {
                 }
                 return own;
             }
-            let ty = self.first_value(expr);
+            let mut ty = self.first_value(expr);
+            // A local inside a function owns the table its constructor builds, as one at the top of
+            // the file does, so what code sets through it is a field of the table. With `strict`, as
+            // TypeScript reads it, the table has the fields of its constructor alone.
+            if !self.strict && matches!(expr.kind, ExprKind::Table(_)) {
+                ty = self.with_owned_fields(ty, &self.ctx.local_owner_key(names[index].name.span.start));
+            }
             let is_literal = matches!(
                 expr.unparen().kind,
                 ExprKind::True | ExprKind::False | ExprKind::Number(_) | ExprKind::String(_)

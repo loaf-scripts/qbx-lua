@@ -9,6 +9,7 @@ use qbx_lua_analysis::side_guard::SideRegions;
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
+use rustc_hash::FxHashSet;
 
 use crate::callback_wrappers::Wrapper;
 use crate::index::{
@@ -108,6 +109,8 @@ pub fn index_file(
             nui_globals: crate::nui_callbacks::NuiGlobals::of(&ctx),
             out: FileIndex::default(),
             depth: 0,
+            nested_owners: FxHashSet::default(),
+            nested_members: 0,
         };
         indexer.doc_comments(&chunk.comments);
         indexer.block(&chunk.block);
@@ -163,6 +166,10 @@ struct Indexer<'a> {
     nui_globals: crate::nui_callbacks::NuiGlobals,
     out: FileIndex,
     depth: u32,
+    /// The tables that locals inside functions declare, which have a budget of members of their
+    /// own, so that many of them cannot crowd out the members of the tables code elsewhere reads.
+    nested_owners: FxHashSet<SmolStr>,
+    nested_members: usize,
 }
 
 pub const CONVAR_CALLS: &[&str] = &[
@@ -371,7 +378,13 @@ impl<'a> Indexer<'a> {
     /// Records a member set by the statement or table field whose doc comment starts at `doc_anchor`,
     /// which may declare it `---@private` or give its type.
     fn push_member(&mut self, owner: SmolStr, symbol: Symbol, injected: bool, doc_anchor: Option<u32>) {
-        if self.out.members.len() < MAX_MEMBERS_PER_FILE {
+        let nested = self.nested_owners.contains(owner.split('.').next().unwrap_or_default());
+        let used = match nested {
+            true => self.nested_members,
+            false => self.out.members.len() - self.nested_members,
+        };
+        if used < MAX_MEMBERS_PER_FILE {
+            self.nested_members += usize::from(nested);
             let doc = doc_anchor.map(|anchor| self.ctx.doc_at(anchor));
             let visibility = doc.as_ref().map(|doc| doc.visibility).unwrap_or_default();
             let typed = doc.is_some_and(|doc| doc.ty.is_some() || !doc.classes.is_empty());
@@ -792,7 +805,10 @@ impl<'a> Indexer<'a> {
                 let ty = self.own_self_type(base).unwrap_or_else(|| self.infer.expr(base));
                 match self.owner_of(&ty) {
                     Some(owner) => (owner, matches!(ty.without_nil(), Type::Named(..))),
-                    None => return,
+                    None => match self.function_table_owner(base) {
+                        Some(owner) => (owner, false),
+                        None => return,
+                    },
                 }
             }
         };
@@ -813,6 +829,29 @@ impl<'a> Indexer<'a> {
             }
         }
         self.push_member(owner, symbol, injected, Some(stmt.span.start));
+    }
+
+    /// The table that `base`, a local inside a function, owns: one that a table constructor without
+    /// an annotation or metatable declares, which is never assigned again. What code sets through
+    /// it is a field of that table, as for one at the top of the file, which `Infer` adds to the
+    /// shape its constructor gives it.
+    fn function_table_owner(&mut self, base: &Expr) -> Option<SmolStr> {
+        let ExprKind::Name(root) = &base.kind else { return None };
+        let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(root.span.start) else { return None };
+        let local = self.ctx.resolution.local(id);
+        if local.func == 0 || local.refs.iter().any(|r| r.write) || self.ctx.sets_metatable(id) {
+            return None;
+        }
+        let Some(Decl::Local { stmt, index }) = self.ctx.decl(local.decl.start) else { return None };
+        let StmtKind::Local { exprs, .. } = &stmt.kind else { return None };
+        let doc = self.ctx.doc_at(stmt.span.start);
+        let built = matches!(exprs.get(*index).map(|value| &value.kind), Some(ExprKind::Table(_)));
+        if !built || doc.declared_class().is_some() || doc.type_at(*index).is_some() {
+            return None;
+        }
+        let owner = self.ctx.local_owner_key(local.decl.start);
+        self.nested_owners.insert(owner.clone());
+        Some(owner)
     }
 
     /// Whether a field set through a path from the local `root` is one of `owner`, the table the

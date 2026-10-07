@@ -4,19 +4,19 @@
 //! the values whose type the language server knows. A type has the fields that `inject-field` lets
 //! code set: those of a class or table type, and those set through the names that own its table,
 //! such as a global path, the table a `---@class` annotation declares, `self` in a method or a
-//! local declared with a table at the top of a file. Reads such as `value.name`, `value['name']`
-//! and `value:name()` are checked, also in conditions like `if value.name then`, and a union lacks
-//! a field when none of its parts has it. A local that is assigned again has the types of all the
-//! values that may reach the read. A value that is surely `nil`, as what a call of a function that
-//! returns nothing gives, has no fields at all, as in LuaLS.
+//! local declared with a table, at the top of a file or inside a function. Reads such as
+//! `value.name`, `value['name']` and `value:name()` are checked, also in conditions like
+//! `if value.name then`, and a union lacks a field when none of its parts has it. A local that is
+//! assigned again has the types of all the values that may reach the read. A value that is surely
+//! `nil`, as what a call of a function that returns nothing gives, has no fields at all, as in LuaLS.
 //!
 //! As in lua-language-server, a table whose type no annotation declares may have any field, as
 //! `inject-field` reads it, and so may a local without an annotation that may hold a value of
 //! unknown type. A field that the code sets through a local is one that the local has, also where
-//! `inject-field` reports setting it. With `strict`, as in TypeScript, the table that a constructor
-//! builds has the fields it and the names that own it give it, such as the `{ label: string }` of
-//! `{ label = 'x' }`, a local keeps the type it is declared with when it is given a value of unknown
-//! type, and a field set through a local is still missing from its type.
+//! `inject-field` reports setting it. With `strict`, as in TypeScript, a table that a constructor
+//! with fields builds has those alone, such as the `{ label: string }` of `{ label = 'x' }`, at the
+//! top of a file as inside a function, a local keeps the type it is declared with when it is given a
+//! value of unknown type, and a field set through a local is still missing from its type.
 //!
 //! Some values may have any field, so reads from them are left alone:
 //!
@@ -39,7 +39,7 @@ use rustc_hash::FxHashSet;
 
 use super::class_tables::{accesses, Classes, Key};
 use super::comparisons::Declared;
-use super::injected_fields::{message, takes_any_field, through_self};
+use super::injected_fields::{constructor_fields, message, takes_any_field, through_self};
 use crate::index::{instance_class, is_local_table, FileId};
 use crate::infer::{Decl, Infer};
 use crate::narrow::Origin;
@@ -151,6 +151,9 @@ fn lacks(
     }
     match infer.resolve_alias(ty) {
         Type::GlobalTable(owner) => {
+            if let Some(fields) = constructor_fields(infer, &owner) {
+                return !fields.iter().any(|field| field == name);
+            }
             let instance = instance_class(&owner);
             // Other files and resources set the fields of global tables, and so of their instances.
             if !is_local_table(instance.unwrap_or(&owner)) || infer.indexes_at_runtime(&owner) {

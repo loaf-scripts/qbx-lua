@@ -361,8 +361,8 @@ With `strict`:
   them, and of classes given type arguments, such as `List<string>`. See
   [Typed variables](#typed-variables).
 - `inject-field` and `undefined-field` check tables whose type no annotation declares. A table that
-  a constructor builds has the fields that it and the names that own it give it, so one built
-  inside a function is closed, a field set through a loop variable over such tables is an
+  a constructor with fields builds has those alone, at the top of a file as inside a function, so
+  a field set through its local later, or through a loop variable over such tables, is an
   `inject-field`, and a field set through a local is still missing from the local's type where it
   is read. A local without an annotation that is given a value of unknown type keeps the type it is
   declared with, so `Player.PlayerData` after `local Player = ''` and `Player = GetPlayer()` reads
@@ -630,7 +630,8 @@ keeps it loose.
 
 A field belongs to a table when the code that owns the table sets it: through a global or a path
 from one, like `Config.debug = true`, on the table a `---@class` annotation declares, through
-`self` in a method, through a local declared with a table at the top of the file, and through the
+`self` in a method, through a local declared with a table, at the top of the file or inside a
+function, and through the
 instance a constructor makes in a local, as `local self = setmetatable({}, Base)` does for a table
 without a `---@class`. As in TypeScript, what is set through other values adds no field: a
 parameter or local typed as a class, a loop variable over another file's tables, or another local
@@ -643,8 +644,9 @@ declares, such as `---@type { label: string }`, as lua-language-server and TypeS
 lua-language-server, a table whose type no annotation declares takes any field: one a table
 constructor builds, what a function without `@return` returns, a loop variable over such tables,
 and a global or local table read through another name, as `local cfg = Config`. With
-[`strict`](#strict-mode), as in TypeScript, such a table has the fields that its constructor and the
-names that own it give it, so a table built inside a function is closed. To turn it off:
+[`strict`](#strict-mode), as in TypeScript, a table that a constructor with fields builds has those
+alone, at the top of the file as inside a function, so what code sets through its local later is
+reported, while an empty table such as `local result = {}` still takes any field. To turn it off:
 
 ```toml
 [rules]
@@ -685,9 +687,9 @@ language server it covers the standard library tables, such as `string.nope`. In
 covers values whose type the language server knows, with the fields that `inject-field` lets code
 set: those a class or table type declares and those set through the names that own a table, and,
 as in lua-language-server, a field that the code sets through a local is one that local has, also
-where `inject-field` reports setting it. With [`strict`](#strict-mode), as in TypeScript, the table
-that a constructor builds has the fields it and its owners give it, such as the `{ label: string }`
-of `{ label = 'a' }`, and a field set through a local is still missing from its type. Reads with
+where `inject-field` reports setting it. With [`strict`](#strict-mode), as in TypeScript, a table
+that a constructor with fields builds has those alone, such as the `{ label: string }` of
+`{ label = 'a' }`, and a field set through a local is still missing from its type. Reads with
 `.`, `['name']` and `:` count, also in conditions such as `if point.z then`. A union lacks a field
 when none of its parts has it, and a local that is assigned again has the types of all the values
 that may reach the read. A value that is surely `nil` has no fields at all: what a call of a

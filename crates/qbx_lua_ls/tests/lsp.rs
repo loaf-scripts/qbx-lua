@@ -5234,15 +5234,16 @@ print(tag, build)
         [
             found("self.made", "Field `made` is not declared in `Test.Gadget`"),
             found("gadget.extra", "Field `extra` is not declared in `Test.Gadget`"),
+            found("Config.verbose", "Field `verbose` is not declared in the table `Config` holds"),
             found("alias.copied", "Field `copied` is not declared in the table `alias` holds"),
             found("row.count", "Field `count` is not declared in `{ label: string }`"),
             found("options.color", "Field `color` is not declared in `{ size: integer }`"),
             found("options.reset", "Field `reset` is not declared in `{ size: integer }`"),
         ],
-        "with `strict`, as in TypeScript, a table that a constructor builds has the fields it and its \
-         owners give it: fields set through `self` in a method, also of a global declared empty, the class \
-         table, a global or a table's own local are declared, and an empty table, keys in variables and \
-         strict classes are left alone"
+        "with `strict`, as in TypeScript, a table that a constructor with fields builds has those, also \
+         at the top of the file: fields set through `self` in a method, also of a global declared empty, \
+         the class table or a global are declared, and an empty table, keys in variables and strict classes \
+         are left alone"
     );
     client.notify(
         "workspace/didChangeConfiguration",
@@ -5350,12 +5351,14 @@ print(read, build, show)
     assert_eq!(
         added(&relaxed, &strict),
         [
+            found("Settings.verbose,", "Field `verbose` is not declared in the table `Settings` holds"),
             found("Settings.missing", "Field `missing` is not declared in the table `Settings` holds"),
             found("row.count", "Field `count` is not declared in `{ label: string }`"),
             found("options.color", "Field `color` is not declared in `{ size: integer }`"),
         ],
         "as in lua-language-server, a table whose type no annotation declares may have any field, while \
-         with `strict`, as in TypeScript, it has those its constructor and its owners give it"
+         with `strict`, as in TypeScript, one that a constructor with fields builds has those, also at the top \
+         of the file"
     );
     assert_eq!(
         strict,
@@ -5368,6 +5371,7 @@ print(read, build, show)
             found("maybe.y", "Field `y` is not declared in `Test.Point`"),
             found("count.x", "Field `x` is not declared in `number`"),
             found("count.x", "Field `nope` is not declared in `string`"),
+            found("Settings.verbose,", "Field `verbose` is not declared in the table `Settings` holds"),
             found("Settings.missing", "Field `missing` is not declared in the table `Settings` holds"),
             found("row.count", "Field `count` is not declared in `{ label: string }`"),
             found("options.color", "Field `color` is not declared in `{ size: integer }`"),
@@ -6170,6 +6174,55 @@ return raw, concrete
         findings(&mut client, CLIENT, &["no-unknown"]),
         [],
         "a generic may hold any value, which no guard rules out"
+    );
+}
+
+#[test]
+fn locals_own_the_tables_they_build_inside_functions_too() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local function build(silent)
+    local options = { title = 'a' }
+    if silent then
+        options.sound = false
+    end
+    print(options.sound)
+    return options
+end
+local top = { title = 'a' }
+top.sound = false
+print(top.sound)
+return build, top
+";
+    client.open_with(CLIENT, text);
+    let (l, c) = pos(text, "sound)\n    return", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(
+        hover.contains("sound: boolean"),
+        "a field set through the local that built the table is one of it: {hover}"
+    );
+    let codes = ["inject-field", "undefined-field"];
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "inject-field": "warning" } } } } }),
+    );
+    assert_eq!(findings(&mut client, CLIENT, &codes), [], "as at the top of a file, the local owns its table");
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "strict": true, "rules": { "inject-field": "warning" } } } } }),
+    );
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let found = |code: &str, needle: &str, message: &str| (code.to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &codes),
+        [
+            found("inject-field", "options.sound =", "Field `sound` is not declared in `{ title: string }`"),
+            found("undefined-field", "options.sound)", "Field `sound` is not declared in `{ title: string }`"),
+            found("inject-field", "top.sound =", "Field `sound` is not declared in the table `top` holds"),
+            found("undefined-field", "top.sound)", "Field `sound` is not declared in the table `top` holds"),
+        ],
+        "with `strict`, as in TypeScript, a table that a constructor with fields builds has those, inside a \
+         function as at the top of the file"
     );
 }
 
