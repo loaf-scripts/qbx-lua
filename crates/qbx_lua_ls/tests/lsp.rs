@@ -7146,6 +7146,96 @@ tuple[1] = nil
 }
 
 #[test]
+fn entries_stored_in_declared_tables_take_their_types() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Box
+---@field items string[]
+
+---@type number[]
+local list = {}
+list[#list + 1] = 'text'
+list[1] = 'text'
+list[2] = 7
+list[3] = nil
+
+---@type table<string, number>
+local counts = {}
+counts.a = 'x'
+counts['b'] = 'y'
+counts.c = 3
+
+---@type { name: string }[]
+local people = {}
+people[#people + 1] = { name = 5 }
+
+---@type { name: string }
+local shape = { name = 'a' }
+shape.name = 5
+shape.name = nil
+
+---@type [number, string]
+local pair = { 1, 'a' }
+pair[2] = 5
+
+---@type Probe.Box
+local box = { items = {} }
+box.items[#box.items + 1] = 3
+
+---@param ids integer[]
+---@param maybe number[]?
+local function add(ids, maybe)
+    ids[#ids + 1] = 'x'
+    if maybe then maybe[1] = 'x' end
+end
+
+local built = { 1, 2 }
+built[3] = 'x'
+local rows = { { kind = 'input', default = 'a' } }
+rows[#rows + 1] = { kind = 'number', default = 5 }
+
+---@type number?
+local missing
+list[4] = missing
+counts.d = missing
+return add, built, rows
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |needle: &str, message: &str| ("assign-type-mismatch".to_string(), line(needle), message.to_string());
+    let relaxed = findings(&mut client, CLIENT, &["assign-type-mismatch"]);
+    assert_eq!(
+        relaxed,
+        [
+            finding("list[#list + 1]", "Cannot assign `string` to `[integer]` of type `number`"),
+            finding("list[1] = 'text'", "Cannot assign `string` to field `[1]` of type `number`"),
+            finding("counts.a", "Cannot assign `string` to field `a` of type `number`"),
+            finding("counts['b']", "Cannot assign `string` to field `b` of type `number`"),
+            finding("name = 5 }", "Cannot assign `integer` to field `name` of type `string`"),
+            finding("shape.name = 5", "Cannot assign `integer` to field `name` of type `string`"),
+            finding("pair[2] = 5", "Cannot assign `integer` to field `[2]` of type `string`"),
+            finding("box.items[#box.items + 1]", "Cannot assign `integer` to `[integer]` of type `string`"),
+            finding("ids[#ids + 1]", "Cannot assign `string` to `[integer]` of type `integer`"),
+            finding("maybe[1] = 'x'", "Cannot assign `string` to field `[1]` of type `number`"),
+            finding("counts.d = missing", "Cannot assign `number?` to field `d` of type `number`"),
+        ],
+        "an entry stored in an array, map, tuple or shape that an annotation declares takes its type, as in \
+         lua-language-server: `= nil` removes one, a value stored under a key in brackets may be `nil`, and a \
+         table that a constructor builds declares nothing"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        added(&relaxed, &findings(&mut client, CLIENT, &["assign-type-mismatch"])),
+        [
+            finding("shape.name = nil", "Cannot assign `nil` to field `name` of type `string`"),
+            finding("list[4] = missing", "Cannot assign `number?` to field `[4]` of type `number`"),
+        ],
+        "with `strict`, as TypeScript reads it, `= nil` only clears a field whose type allows `nil`, and a value \
+         stored under a key in brackets may not be `nil` either"
+    );
+}
+
+#[test]
 fn strict_classes_take_only_the_keys_a_literal_index_lists() {
     let mut client = Client::start(fixture_root());
     let text = "\

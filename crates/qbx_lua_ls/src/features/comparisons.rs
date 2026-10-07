@@ -442,19 +442,34 @@ impl<'a, 'b> Declared<'a, 'b> {
     }
 
     /// The type that an assignment to `target` has to store: what its local is declared with,
-    /// whatever it holds before, or the declared type of the field it sets, which no guard narrows.
+    /// whatever it holds before, or the declared type of the field or entry it sets, which no guard
+    /// narrows, as the `{ name: string }` that `list[#list + 1]` of a `{ name: string }[]` takes.
     pub fn target(&self, target: &Expr) -> Type {
         match &target.kind {
             ExprKind::Name(name) => match self.infer.ctx.resolution.resolve_at(name.span.start) {
                 Some(Resolved::Local(id)) => self.declaration(id),
                 _ => self.of(target),
             },
-            ExprKind::Field { base, name, .. } => self.field(base, &Key::Name(&name.text), false, 0),
+            ExprKind::Field { base, name, .. } => self.entry(base, &Key::Name(&name.text)),
             ExprKind::Index { base, index, .. } => match index.as_string() {
-                Some(name) => self.field(base, &Key::Name(name), false, 0),
-                None => Type::Unknown,
+                Some(name) => self.entry(base, &Key::Name(name)),
+                None => self.entry(base, &Key::Typed(self.key(index, 0))),
             },
             _ => self.of(target),
+        }
+    }
+
+    /// The declared type of the field or entry `key` of `base` that an assignment sets: the
+    /// `@field` or index of a class, or the entry of a table type an annotation declares. A table
+    /// that a constructor builds declares nothing about what code adds to it, as
+    /// `rows[#rows + 1] = {...}` after `local rows = { {...} }`.
+    fn entry(&self, base: &Expr, key: &Key) -> Type {
+        match self.field(base, key, false, 0) {
+            ty if ty.is_unknown() && !self.annotations_only => {
+                Declared::annotations(self.infer).field(base, key, true, 0)
+            }
+            ty if ty.is_unknown() => self.field(base, key, true, 0),
+            ty => ty,
         }
     }
 

@@ -269,6 +269,16 @@ impl<'a, 'b> Classes<'a, 'b> {
         }
     }
 
+    /// The table type a value of type `ty` must be, as `table_type_of` finds it, or a tuple like
+    /// `[number, string]`: the types whose entries an assignment such as `list[#list + 1] = value`
+    /// stores.
+    pub fn entries_type_of(&self, ty: &Type, from: FileId) -> Option<Type> {
+        match self.resolve(&ty.without_nil(), from, 0).without_nil() {
+            ty @ (Type::Shape(_) | Type::Array(_) | Type::Map(..) | Type::Tuple(_)) => Some(ty),
+            _ => None,
+        }
+    }
+
     /// The type that `key` of a table of the table type `ty`, as `from` sees it, holds: the field
     /// of a shape that a name names, the item of a tuple at the position a literal names, or else
     /// the value of its array part or of an index that takes the key. Any other integer key of a
@@ -1095,9 +1105,10 @@ pub fn missing_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
 
 /// Each value that a typed table constructor or an assignment stores in a field that does not take
 /// it, such as `test = 1` for `---@field test string` or `other = true` for `---@field [string]
-/// number`, with the message naming both types. Tables typed as a shape, an array or a
-/// `table<K, V>` are checked the same way, but only classes are checked in assignments. Only clear
-/// cases count: a different kind of value, or a literal the field does not list.
+/// number`, with the message naming both types. Tables typed as a shape, an array, a tuple or a
+/// `table<K, V>` are checked the same way, also where an assignment stores an entry, as
+/// `list[#list + 1] = value`, when an annotation declares the table. Only clear cases count: a
+/// different kind of value, or a literal the field does not list.
 pub fn mismatched_fields(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
     checked_fields(infer, chunk, None)
 }
@@ -1111,7 +1122,8 @@ pub fn unknown_fields(infer: &Infer, chunk: &Chunk, pick: &dyn Fn(&Expr) -> bool
 fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) -> bool>) -> Vec<(Span, String)> {
     let classes = Classes::new(infer);
     let mut out = Vec::new();
-    let mut check = |field: Option<(Type, FileId)>, key: &Key, value: &Expr| {
+    // `removes`: the `nil` the value may hold removes the entry, which is no value to check.
+    let mut check = |field: Option<(Type, FileId)>, key: &Key, value: &Expr, removes: bool| {
         let Some((ty, file)) = field else { return };
         let given = classes.value_type(value);
         let target = match key.field() {
@@ -1125,6 +1137,7 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
             return;
         }
         let given = checked_value(infer, Some(value), given);
+        let given = if removes { given.without_nil() } else { given };
         if let Some(part) = classes.rejected_part(&ty, file, &given) {
             let shown = classes.shown(&ty, file, &given, &part);
             out.push((value.span, format!("Cannot assign `{shown}` to {target} of type `{ty}`")));
@@ -1135,7 +1148,7 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
         let ExprKind::Table(fields) = &found.table.kind else { continue };
         for (key, _, value) in entries(infer, fields) {
             if let Some(value) = value {
-                check(classes.field_type(&found.class, &found.args, found.from, &key), &key, value);
+                check(classes.field_type(&found.class, &found.args, found.from, &key), &key, value, false);
             }
         }
     }
@@ -1143,10 +1156,11 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
         let ExprKind::Table(fields) = &found.table.kind else { continue };
         for (key, _, value) in entries(infer, fields) {
             if let Some(value) = value {
-                check(classes.table_field_type(&found.ty, found.from, &key), &key, value);
+                check(classes.table_field_type(&found.ty, found.from, &key), &key, value, false);
             }
         }
     }
+    let annotated = Declared::annotations(infer);
     for access in accesses(infer, chunk, false) {
         // With `strict`, `value.field = nil` clears a field only when its type allows `nil`, as
         // `string?` does, as TypeScript reads it. lua-language-server lets any field be cleared.
@@ -1156,14 +1170,33 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
         if clears && !infer.strict() {
             continue;
         }
-        if let (Some(value), Some((class, args, view))) =
-            (access.value, classes.class_of(&access.owner, classes.file()))
-        {
+        let Some(value) = access.value else { continue };
+        // As lua-language-server reads it, a value stored under a key in brackets, as
+        // `list[i] = value` or `slots[1] = value`, may be `nil`, which removes the entry, while one
+        // stored in a named field, as `value.name`, may not. With `strict` it may not either, as
+        // TypeScript reads it.
+        let removes = matches!(access.key, Key::Typed(_)) && !infer.strict();
+        if let Some((class, args, view)) = classes.class_of(&access.owner, classes.file()) {
             if clears && classes.declared_field_type(&class, &args, view, &access.key).is_none() {
                 continue;
             }
-            check(classes.field_type(&class, &args, view, &access.key), &access.key, value);
+            check(classes.field_type(&class, &args, view, &access.key), &access.key, value, removes);
+            continue;
         }
+        // `list[#list + 1] = value` stores an entry of the array, map, tuple or shape that an
+        // annotation declares the table to be, as lua-language-server checks it. A table that a
+        // constructor builds without one declares nothing about what it holds.
+        let declared = access.base.map(|base| annotated.of(base)).unwrap_or_default();
+        let Some(table) = classes.entries_type_of(&declared, classes.file()) else { continue };
+        let names_entry = match (&table, &access.key) {
+            (Type::Shape(shape), Key::Name(name)) => shape.fields.iter().any(|field| field.name == *name),
+            (Type::Tuple(_), Key::Typed(Type::IntLit(_))) => true,
+            _ => false,
+        };
+        if clears && !names_entry {
+            continue;
+        }
+        check(classes.table_field_type(&table, classes.file(), &access.key), &access.key, value, removes);
     }
     out
 }
