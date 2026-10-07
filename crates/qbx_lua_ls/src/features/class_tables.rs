@@ -26,7 +26,7 @@ use super::unknown_types::is_typed;
 use crate::index::{AliasDef, ClassDef, FileId, ResourceId};
 use crate::infer::{bound_parents, class_bindings, expanded_bindings, substitute, Infer};
 use crate::luacats::applies_on;
-use crate::types::{DescribedValue, Shape, Type};
+use crate::types::{DescribedValue, FunType, Param, Shape, Type};
 
 const MAX_DEPTH: u32 = 8;
 
@@ -1302,6 +1302,33 @@ impl<'a, 'b, 'c> Finder<'a, 'b, 'c> {
         self.table(expected, expr, self.classes.file(), 0);
     }
 
+    /// The type of `param`, typed by a generic of `fun` alone, as the `value: T` of `table.insert`,
+    /// with the type that the other arguments of the call declare for that generic, as the
+    /// `{ name: string }` of a `{ name: string }[]` list, when tables of other types than classes
+    /// are looked for. Only what annotations declare decides it, as a list that a constructor builds
+    /// declares nothing about the entries code adds to it, and the table passed at `index` decides
+    /// nothing about itself. `None` for another parameter, or when no other argument decides the
+    /// generic.
+    fn bound_generic(
+        &self,
+        fun: &FunType,
+        param: &Param,
+        args: &[Expr],
+        index: usize,
+        via_method: bool,
+    ) -> Option<Type> {
+        self.declared.as_ref()?;
+        let Type::Named(name, params) = param.ty.without_nil() else { return None };
+        if !params.is_empty() || !fun.generics.iter().any(|generic| *generic == name.as_str()) {
+            return None;
+        }
+        let annotated = Declared::annotations(self.classes.infer);
+        let given = |(i, arg): (usize, &Expr)| if i == index { Type::Unknown } else { annotated.of(arg) };
+        let types: Vec<Type> = args.iter().enumerate().map(given).collect();
+        let ty = substitute(&param.ty, &self.classes.infer.generics_bound_by(fun, args, via_method, &types));
+        (!ty.is_unknown()).then_some(ty)
+    }
+
     /// The type that an assignment to `target` without a `---@type` gives a table: that of a
     /// class the target holds, or else, when tables of other types are looked for, the type it is
     /// declared with, as its own `---@type` or `@param` declares it. What the target was assigned
@@ -1377,8 +1404,12 @@ impl<'c> Visitor<'c> for Finder<'_, '_, 'c> {
             if let Some((fun, _)) = self.classes.infer.callee_fun(base, method) {
                 let fun = self.classes.infer.call_signature(&fun, args, method.is_some(), base.span.start);
                 let (skip_params, skip_args) = fun.call_offsets(method.is_some());
-                for (param, arg) in fun.params.iter().skip(skip_params).zip(args.iter().skip(skip_args)) {
-                    self.top_table(&param.ty, arg);
+                let params = fun.params.iter().skip(skip_params).zip(args.iter().skip(skip_args));
+                for (index, (param, arg)) in params.enumerate() {
+                    match self.bound_generic(&fun, param, args, skip_args + index, method.is_some()) {
+                        Some(ty) => self.top_table(&ty, arg),
+                        None => self.top_table(&param.ty, arg),
+                    }
                 }
             }
         }

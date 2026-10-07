@@ -7236,6 +7236,60 @@ return add, built, rows
 }
 
 #[test]
+fn table_insert_takes_values_of_the_type_the_list_holds() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Person
+---@field name string
+
+---@type number[]
+local numbers = {}
+table.insert(numbers, 'text')
+table.insert(numbers, 1, 'text')
+table.insert(numbers, 5)
+
+---@type Probe.Person[]
+local persons = {}
+table.insert(persons, { name = 5 })
+table.insert(persons, { age = 2 })
+
+---@class Probe.Queue
+---@field [integer] string
+
+---@param queue Probe.Queue
+---@param unknownList table
+local function fill(queue, unknownList)
+    table.insert(queue, 5)
+    table.insert(unknownList, 'anything')
+    local built = {}
+    table.insert(built, { any = true })
+    local seeded = { 1, 2 }
+    table.insert(seeded, 'x')
+    local entries = { { kind = 'a' } }
+    table.insert(entries, { other = true })
+end
+return fill
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |code: &str, needle: &str, message: &str| (code.to_string(), line(needle), message.to_string());
+    let (mismatch, assigned, missing) = ("param-type-mismatch", "assign-type-mismatch", "missing-fields");
+    assert_eq!(
+        findings(&mut client, CLIENT, &[mismatch, assigned, missing]),
+        [
+            finding(mismatch, "numbers, 'text')", "Cannot assign `string` to parameter `value` of type `number`"),
+            finding(mismatch, "numbers, 1, 'text'", "Cannot assign `string` to parameter `value` of type `number`"),
+            finding(assigned, "name = 5 }", "Cannot assign `integer` to field `name` of type `string`"),
+            finding(missing, "{ age = 2 }", "Missing required fields in type `Probe.Person`: `name`"),
+            finding(mismatch, "queue, 5)", "Cannot assign `integer` to parameter `value` of type `string`"),
+        ],
+        "`table.insert` takes a value of the type that the list it is given declares for its entries, as \
+         TypeScript checks the `T` of `push<T>(list: T[], value: T)`, while a list of no declared entries takes \
+         any value"
+    );
+}
+
+#[test]
 fn strict_classes_take_only_the_keys_a_literal_index_lists() {
     let mut client = Client::start(fixture_root());
     let text = "\

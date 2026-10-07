@@ -29,7 +29,10 @@
 //! player's server id, which only the native data calls a string.
 //!
 //! Parameters typed with a generic of the function called are left out, as the arguments of the
-//! call bind them. The function a callee passes to a callback, such as `resolve` of
+//! call bind them, unless the parameter is typed with the generic alone and another argument
+//! declares it: `table.insert(list, value)` takes for `value` the type of the entries of a `list`
+//! declared as `number[]`, as TypeScript checks `push<T>(list: T[], value: T)`. The function a
+//! callee passes to a callback, such as `resolve` of
 //! `fun(resolve: fun(value: T))`, takes and returns what the other arguments of that call declare
 //! for its generics, as the `boolean` of `Promise:New('boolean', function(resolve) end)` for a
 //! `` `T` ``; a generic they leave unbound takes any value.
@@ -47,7 +50,7 @@ use super::class_tables::Classes;
 use super::comparisons::Declared;
 use super::unknown_types::is_typed;
 use crate::index::{FileId, FileOrigin};
-use crate::infer::{Infer, NATIVE_HANDLE_TYPES};
+use crate::infer::{substitute, Infer, NATIVE_HANDLE_TYPES};
 use crate::types::{FunType, Param, Type};
 
 /// Each argument whose parameter does not take it, with the message naming both types, also among
@@ -73,8 +76,14 @@ fn checked_arguments(
     payloads: &[Payload],
     unknowns: Option<&dyn Fn(&Expr) -> bool>,
 ) -> Vec<(Span, String)> {
-    let mut calls =
-        Calls { infer, declared: Declared::new(infer), classes: Classes::new(infer), unknowns, out: Vec::new() };
+    let mut calls = Calls {
+        infer,
+        declared: Declared::new(infer),
+        annotated: Declared::annotations(infer),
+        classes: Classes::new(infer),
+        unknowns,
+        out: Vec::new(),
+    };
     calls.visit_block(&chunk.block);
     for payload in payloads {
         let handlers: Vec<&FunType> = payload.handlers.iter().collect();
@@ -86,6 +95,9 @@ fn checked_arguments(
 struct Calls<'a, 'b> {
     infer: &'a Infer<'b>,
     declared: Declared<'a, 'b>,
+    /// What only annotations declare, which decides the generics an argument is checked against: a
+    /// list that a constructor builds declares nothing about the entries code adds to it.
+    annotated: Declared<'a, 'b>,
     classes: Classes<'a, 'b>,
     /// When the arguments of no known type are looked for instead of mismatches, which of them
     /// count.
@@ -203,6 +215,15 @@ impl Calls<'_, '_> {
         values: &[Type],
     ) -> Vec<(Span, String)> {
         let mut out = Vec::new();
+        // The generics of `fun` that the annotated types of the arguments decide, as the `number` of
+        // `table.insert(list, value)` for a list declared as `number[]`.
+        let bound = match native || fun.generics.is_empty() {
+            true => Vec::new(),
+            false => {
+                let annotated: Vec<Type> = args.iter().map(|arg| self.annotated.of(arg)).collect();
+                self.infer.generics_bound_by(fun, args, via_colon, &annotated)
+            }
+        };
         // The parameters that the vectors passed before take beyond their first.
         let mut spread = 0;
         for (i, (arg, given)) in args.iter().zip(values).enumerate() {
@@ -219,9 +240,10 @@ impl Calls<'_, '_> {
                     None => {}
                 }
             }
-            let message = match native {
-                true => native_mismatch(&self.classes, param, arg, given, self.infer.strict()),
-                false => mismatch(&self.classes, fun, param, given),
+            let message = match (native, bound_param(fun, param, &bound)) {
+                (true, _) => native_mismatch(&self.classes, param, arg, given, self.infer.strict()),
+                (false, Some(param)) => mismatch(&self.classes, fun, &param, given),
+                (false, None) => mismatch(&self.classes, fun, param, given),
             };
             out.extend(message.map(|message| (arg.span, message)));
         }
@@ -335,6 +357,22 @@ pub fn expected(param: &Param) -> &Type {
         Type::Variadic(inner) => inner,
         ty => ty,
     }
+}
+
+/// `param`, typed by a generic of `fun` alone, as the `value: T` of `table.insert`, with the type
+/// that `bound` gives that generic, as the arguments of the call decide it: TypeScript checks an
+/// argument against what the first argument that decides the generic gives it. A parameter that
+/// only mentions a generic, as `list: T[]`, is what decides it, and stays unchecked. `None` when
+/// `param` is no such parameter, or no argument decides the generic.
+fn bound_param(fun: &FunType, param: &Param, bound: &[(SmolStr, Type)]) -> Option<Param> {
+    let is_generic = |name: &str| fun.generics.iter().any(|generic| generic == name);
+    let Type::Named(name, args) = expected(param).without_nil() else { return None };
+    if !args.is_empty() || !is_generic(name.as_str()) {
+        return None;
+    }
+    let ty = substitute(&param.ty, bound);
+    let decided = !matches!(expected(&Param { ty: ty.clone(), ..Param::default() }), Type::Unknown | Type::Any);
+    (decided && !mentions(&ty, &is_generic)).then(|| Param { ty, ..param.clone() })
 }
 
 /// The message for a value of type `given` that `param` of `fun` does not take.

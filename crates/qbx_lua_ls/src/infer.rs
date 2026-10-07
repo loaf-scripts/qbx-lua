@@ -2847,6 +2847,24 @@ impl<'a> Infer<'a> {
         })
     }
 
+    /// The types the generics of `fun` take from `types`, those of the arguments `args` of a call,
+    /// as a call binds them: the first argument that decides a generic decides it, a function
+    /// literal decides none, and a generic that no argument decides is unknown. `table.insert(list,
+    /// value)` binds the `T` of `fun(list: T[], value: T)` to the `number` of a `number[]` list.
+    pub fn generics_bound_by(
+        &self,
+        fun: &FunType,
+        args: &[Expr],
+        via_method: bool,
+        types: &[Type],
+    ) -> Vec<(SmolStr, Type)> {
+        let typed = |arg: &Expr| {
+            let index = args.iter().position(|other| std::ptr::eq(other, arg));
+            index.and_then(|index| types.get(index)).cloned().unwrap_or_default()
+        };
+        self.bind_generics(fun, &CallArgs::typed(args, typed), via_method, false)
+    }
+
     /// What `call` returns when its function is a generic that declares its values with `@return`,
     /// with the generics bound from the types `declared` gives the arguments, as TypeScript binds
     /// them: `first(names)` gives a `string?` for `fun(list: V[]): V?` and a `names` declared as

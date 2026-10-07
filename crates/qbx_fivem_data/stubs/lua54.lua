@@ -848,7 +848,7 @@ function table.concat(list, sep, i, j) end
 ---@param list T[]
 ---@param pos integer
 ---@param value T
----@overload fun(list: table, value: any)
+---@overload fun(list: T[], value: T)
 function table.insert(list, pos, value) end
 
 ---Copies elements `a1[f]` through `a1[e]` into `a2` (default `a1`) starting at index `t`, and returns the destination table.

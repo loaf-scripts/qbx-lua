@@ -526,11 +526,14 @@ reported. Only clear cases count, and the rest is left alone:
 
 - Types inferred from assigned values, such as that of `Config.Value = ''`.
 - Parameters typed with a generic of the function called: the arguments of the call bind it, which
-  declares nothing. A function that a callee passes to a callback, such as `resolve` of
-  `fun(resolve: fun(value: T))`, takes and returns what the other arguments of that call declare
-  for the generic, as the `boolean` of `Promise:New('boolean', function(resolve) end)` for a
-  `` `T` ``, and any value for a generic they leave unbound. What a generic function returns is
-  declared as far as the declared types of the arguments bind its generics, as the `string?` of
+  declares nothing, unless the parameter is typed with the generic alone and another argument
+  declares it. `table.insert(list, value)` takes for `value` the type of the entries of a `list`
+  declared as `number[]`, as TypeScript checks `push<T>(list: T[], value: T)`, while `list: T[]`,
+  which decides the generic, is left out. A function that a callee passes to a callback, such as
+  `resolve` of `fun(resolve: fun(value: T))`, takes and returns what the other arguments of that
+  call declare for the generic, as the `boolean` of `Promise:New('boolean', function(resolve) end)`
+  for a `` `T` ``, and any value for a generic they leave unbound. What a generic function returns
+  is declared as far as the declared types of the arguments bind its generics, as the `string?` of
   `first(names)` for `fun(list: V[]): V?` and a `names` declared as `string[]`.
 - Parameters typed with the name of a native handle such as `Vehicle`, which resources also declare
   as classes.
@@ -1126,8 +1129,8 @@ local function target(entities)
 end
 ```
 
-A target declared `any` takes any value, and the parameters that `param-type-mismatch` leaves out,
-those of natives and those typed with a generic of the function called, are left out here too. A
+A target declared `any` takes any value, and the parameters of natives and those typed with a
+generic of the function called are left out. A
 value read from a local that is itself reported, as `data.id` for an untyped parameter `data`, is
 not reported again: typing the local types the value.
 
