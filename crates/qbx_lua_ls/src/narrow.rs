@@ -4,7 +4,7 @@
 //! block, `if name then ... end` for the branch, and `name = name or 'none'` gives it a new one.
 //! `---@cast` lines change the type of a local from their line on.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use qbx_lua_analysis::scope::{FuncId, LocalId, Resolution, Resolved, MAIN_CHUNK};
@@ -199,12 +199,33 @@ fn type_name(ty: &Type) -> Option<&str> {
 
 type Facts = Vec<(LocalId, Fact)>;
 
+/// Whether `expr` is a value that is never true, `nil` or `false`.
+fn never_true(expr: &Expr) -> bool {
+    matches!(expr.unparen().kind, ExprKind::Nil | ExprKind::False)
+}
+
+/// Whether `expr` is a value that is never false: `true`, a number, a string, a table or a function.
+fn never_false(expr: &Expr) -> bool {
+    matches!(
+        expr.unparen().kind,
+        ExprKind::True
+            | ExprKind::Number(_)
+            | ExprKind::String(_)
+            | ExprKind::JenkinsHash(_)
+            | ExprKind::Table(_)
+            | ExprKind::Function(_)
+    )
+}
+
 /// The index of the declaration of a local among the origins of the values it holds.
 pub const DECLARATION: u32 = 0;
 /// How many times a loop is walked at most to find what its locals hold at its start.
 const MAX_ROUNDS: usize = 4;
 /// How many keys a field that guards narrow is read through at most, as the two of `data.job.name`.
 const MAX_KEYS: usize = 4;
+/// How many locals that hold a condition a guard is followed through at most, as TypeScript follows
+/// aliased conditions.
+const MAX_ALIAS_DEPTH: u8 = 5;
 
 /// Where a value of a local comes from.
 #[derive(Clone, Copy, Debug)]
@@ -666,6 +687,11 @@ struct Walker<'a, 'r> {
     kinds: FxHashMap<LocalId, (LocalId, bool, Option<Vec<u32>>)>,
     /// The locals that hold `type`, or with `true` `math.type`, as after `local type = type`.
     type_functions: FxHashMap<LocalId, bool>,
+    /// The value each local that is never assigned again is declared with, which a guard on the local
+    /// tells about, as `local playerName = playerSource and GetPlayerName(playerSource)` does.
+    conditions: FxHashMap<LocalId, &'a Expr>,
+    /// How many of those locals the guard being read is followed through.
+    alias_depth: Cell<u8>,
     /// The fields that guards test, each as the local or global it is read from and the keys after
     /// it, tracked under `first_path` and the numbers after it.
     paths: RefCell<Vec<(Root, Keys)>>,
@@ -783,6 +809,8 @@ impl<'a, 'r> Walker<'a, 'r> {
             gotos: FxHashMap::default(),
             kinds: FxHashMap::default(),
             type_functions: FxHashMap::default(),
+            conditions: FxHashMap::default(),
+            alias_depth: Cell::new(0),
             paths: RefCell::default(),
             path_ids: RefCell::default(),
             first_path: resolution.locals.len() as LocalId,
@@ -1230,6 +1258,9 @@ impl<'a, 'r> Walker<'a, 'r> {
                         self.forget_fields(stmt.span.end, |root, _| *root == Root::Local(id));
                         if let Some(value) = exprs.get(index) {
                             self.note_alias(id, value);
+                            if !in_unpack && self.is_constant(id) {
+                                self.conditions.insert(id, value);
+                            }
                         }
                     }
                 }
@@ -1836,6 +1867,7 @@ impl<'a, 'r> Walker<'a, 'r> {
             ExprKind::Name(_) => {
                 if let Some(local) = self.local(cond) {
                     out.push((local, if holds { Fact::Truthy } else { Fact::Falsy }));
+                    self.aliased(local, holds, out);
                 }
             }
             ExprKind::Field { .. } | ExprKind::Index { .. } if field_path(self.resolution, cond).is_some() => {
@@ -1854,8 +1886,16 @@ impl<'a, 'r> Walker<'a, 'r> {
                 self.facts(lhs, false, out);
                 self.facts(rhs, false, out);
             }
-            // One side of a true `or` is true, and one side of a false `and` is false.
-            ExprKind::Binary { op: BinOp::Or | BinOp::And, lhs, rhs, .. } => self.either(lhs, rhs, holds, out),
+            // One side of a true `or` is true, and one side of a false `and` is false: the other one
+            // when a side never is, as the `nil` of `name and value or nil` never is true.
+            ExprKind::Binary { op: BinOp::Or | BinOp::And, lhs, rhs, .. } => {
+                let never = |side: &Expr| if holds { never_true(side) } else { never_false(side) };
+                match (never(lhs), never(rhs)) {
+                    (true, false) => self.facts(rhs, holds, out),
+                    (false, true) => self.facts(lhs, holds, out),
+                    _ => self.either(lhs, rhs, holds, out),
+                }
+            }
             ExprKind::Binary { op: op @ (BinOp::Eq | BinOp::Ne), lhs, rhs, .. } => {
                 let equal = (*op == BinOp::Eq) == holds;
                 let compared = match (literal(rhs), literal(lhs)) {
@@ -1895,6 +1935,41 @@ impl<'a, 'r> Walker<'a, 'r> {
             // value: `?.` gives `nil` for a `nil` one, and the others raise an error.
             _ if holds => self.reads(cond, out),
             _ => {}
+        }
+    }
+
+    /// Adds what `local` being true, or false without `holds`, tells about the locals of the value it
+    /// is declared with, when it is never assigned again: after
+    /// `local playerName = playerSource and GetPlayerName(playerSource)`, `if playerName then` tells
+    /// that `playerSource` holds a value, as TypeScript reads an aliased condition. Only what it tells
+    /// about locals that are never assigned again counts, as those hold there what they held where
+    /// `local` was declared.
+    fn aliased(&self, local: LocalId, holds: bool, out: &mut Facts) {
+        let Some(value) = self.conditions.get(&local) else { return };
+        let depth = self.alias_depth.get();
+        if depth >= MAX_ALIAS_DEPTH {
+            return;
+        }
+        self.alias_depth.set(depth + 1);
+        let mut facts = Facts::new();
+        self.facts(value, holds, &mut facts);
+        self.alias_depth.set(depth);
+        out.extend(facts.into_iter().filter(|(of, fact)| self.is_constant(*of) && self.stands_alone(fact)));
+    }
+
+    /// Whether `id` is a local that is never assigned again after its declaration, which a field is
+    /// not.
+    fn is_constant(&self, id: LocalId) -> bool {
+        !self.is_path(id) && self.resolution.local(id).refs.iter().all(|reference| !reference.write)
+    }
+
+    /// Whether `fact` tells the same wherever it is read: one that compares with another local, as
+    /// `cam == activeCam` does, only when that local is never assigned again either.
+    fn stands_alone(&self, fact: &Fact) -> bool {
+        match fact {
+            Fact::SameAs { other, .. } | Fact::NotSameAs { other, .. } => self.is_constant(*other),
+            Fact::AnyOf(lists) => lists.iter().flatten().all(|fact| self.stands_alone(fact)),
+            _ => true,
         }
     }
 

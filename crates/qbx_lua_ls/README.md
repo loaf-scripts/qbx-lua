@@ -224,6 +224,25 @@ after `local type = type`, and not `table.type` of ox_lib. Where one of
 several checks held, as inside `if type(value) == "string" or type(value) == "number" then`, the
 local is of the kinds they let through.
 
+A guard on a local that is never assigned again also tells what the value it is declared with does,
+as TypeScript reads an aliased condition, about the locals in that value that are never assigned
+again either:
+
+```lua
+---@type number?
+local playerSource = source
+local playerName = playerSource and GetPlayerName(playerSource)
+if playerName then
+    print(playerName .. " | " .. playerSource) -- playerSource is a number
+end
+```
+
+So `if isText then` after `local isText = type(value) == "string"` narrows `value` to a string. A
+side of `or` that is never true, as the `nil` of `src and GetPlayerName(src) or nil`, leaves what the
+other side tells, and so does a side of `and` that is never false. A guard is followed through at
+most five such locals, and fields read in the value are not narrowed through them, since other code
+may set them in between.
+
 Guards that rule out every value a local is declared to hold guard code for values the annotations
 leave out, or code that never runs. There the local is what lua-language-server reads it as:
 

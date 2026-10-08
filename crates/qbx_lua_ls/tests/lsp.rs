@@ -15931,3 +15931,86 @@ print(handlers, handle, plain)
     assert!(client.hover_text(CLIENT, l, c).contains("local plain: nil"));
     assert_eq!(findings(&mut client, CLIENT, &["assign-type-mismatch", "missing-parameter"]), []);
 }
+
+#[test]
+fn guards_on_a_local_that_holds_a_condition_narrow_what_it_tests() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type number?
+local playerSource = GetPlayerServerId(PlayerId())
+local playerName = playerSource and GetPlayerName(playerSource)
+local message = playerName and (playerName .. ' | ' .. playerSource)
+
+---@param src? number
+local function reassignedTarget(src)
+    local name = src and 'x'
+    if src == 2 then src = nil end
+    return name and (name .. src)
+end
+
+---@param src? number
+local function reassignedAlias(src)
+    local name = src and 'x'
+    if src == 1 then name = 'one' end
+    return name and (src .. name)
+end
+
+---@param src? number
+local function failed(src)
+    local name = src and src > 0 and 'x' or nil
+    if not name then return end
+    return src + 1
+end
+
+---@param value string|number
+---@param a? number
+---@param b? string
+local function kinds(value, a, b)
+    local isText = type(value) == 'string'
+    local both = a and b
+    local ready = both
+    local missing = not a or not b
+    if isText and ready and not missing then
+        return value, a, b
+    end
+end
+
+---@class Test.Holder
+---@field value? number
+
+---@param holder Test.Holder
+local function field(holder)
+    local has = holder.value and true
+    if has then
+        return holder.value
+    end
+end
+print(message, reassignedTarget, reassignedAlias, failed, kinds, field)
+";
+    client.open_with(CLIENT, text);
+    let hover = |client: &mut Client, needle: &str, delta: u32| {
+        let (l, c) = pos(text, needle, delta);
+        client.hover_text(CLIENT, l, c)
+    };
+    let hovers = [
+        ("playerSource)\n\n", 0, "local playerSource: number"),
+        ("src + 1", 0, "(parameter) src: number"),
+        ("value, a, b", 0, "(parameter) value: string"),
+        ("value, a, b", 7, "(parameter) a: number"),
+        ("value, a, b", 10, "(parameter) b: string"),
+        ("holder.value\n", 7, "value: number?"),
+    ];
+    for (needle, delta, expected) in hovers {
+        let found = hover(&mut client, needle, delta);
+        assert!(found.contains(expected), "{needle}+{delta}: expected {expected:?} in {found}");
+    }
+    client.set_strict(true);
+    let lines: Vec<u64> =
+        findings(&mut client, CLIENT, &["need-check-nil"]).into_iter().map(|(_, line, _)| line).collect();
+    assert_eq!(
+        lines,
+        [pos(text, "(name .. src)", 0).0 as u64, pos(text, "(src .. name)", 0).0 as u64],
+        "a guard on a local that holds a condition narrows what the condition tests, as TypeScript reads an \
+         aliased condition, unless one of them is assigned again"
+    );
+}
