@@ -28,7 +28,7 @@ function io.flush() end
 ---Returns an iterator that yields nothing: FiveM does not read files here. Open the file with `io.open` and use `file:lines` instead.
 ---@param filename? string
 ---@param ... read_format
----@return fun(): any, ...any iterator
+---@return fun(): nil iterator
 function io.lines(filename, ...) end
 
 ---Opens a file in the given mode (default "r"). Returns the handle, or nil plus an error message and code.

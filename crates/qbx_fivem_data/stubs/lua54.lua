@@ -31,11 +31,17 @@ _VERSION = "Lua 5.4"
 ---@return any ...
 function assert(v, message, ...) end
 
----Controls the garbage collector. The meaning of the extra arguments and of the result depends on `opt` (default "collect").
----@param opt? gc_option
----@param ... any
----@return any result
-function collectgarbage(opt, ...) end
+---Controls the garbage collector. The meaning of the extra arguments and of the result depends on `opt` (default "collect"):
+---"collect", "stop" and "restart" return 0, "count" the memory in use in kilobytes, "step" whether a cycle finished,
+---"isrunning" whether the collector runs, and "incremental" and "generational" the mode before the call.
+---@param opt? "collect"|"stop"|"restart"
+---@return integer result
+---@overload fun(opt: "count"): number
+---@overload fun(opt: "step", stepsize?: integer): boolean
+---@overload fun(opt: "isrunning"): boolean
+---@overload fun(opt: "incremental", pause?: integer, stepmul?: integer, stepsize?: integer): "incremental"|"generational"
+---@overload fun(opt: "generational", minormul?: integer, majormul?: integer): "incremental"|"generational"
+function collectgarbage(opt) end
 
 ---Throws `message` as an error and never returns. `level` selects which call frame gets blamed (1 = caller, 0 = no position info).
 ---@param message any
@@ -332,17 +338,22 @@ function file:close() end
 ---@return string? err
 function file:flush() end
 
----Returns an iterator that reads the file using the given formats on every step (default: one line). The file is not closed when iteration ends.
+---Returns an iterator over the lines of the file, without their line endings. FiveM reads lines whatever formats are
+---given and passes over empty lines. The file is not closed when iteration ends.
 ---@param ... read_format
----@return fun(): any, ...any iterator
+---@return fun(): string? iterator
 function file:lines(...) end
 
----Reads from the file according to the given formats and returns one value per format, or nil on failure/end of file.
----@param ... read_format
----@return any value
----@return any ...
+---Reads from the file according to the given formats and returns one value per format, or nil on failure/end of file:
+---a line without its end for "l" (the default), with it for "L", a number for "n", the rest of the file for "a", and
+---up to that many bytes for an integer.
+---@param format? "l"|"L"|"*l"|"*L"|integer
+---@return string? value
+---@overload fun(format: "n"|"*n"): number?
+---@overload fun(format: "a"|"*a"): string
+---@overload fun(...: read_format): ...any
 ---@nodiscard
-function file:read(...) end
+function file:read(format) end
 
 ---Moves and reports the file position, measured in bytes from `whence` (default "cur") plus `offset` (default 0).
 ---@param whence? seek_whence
@@ -491,9 +502,11 @@ function math.rad(x) end
 ---@nodiscard
 function math.random(m, n) end
 
----Seeds the pseudo-random generator. With no arguments a reasonably random seed is chosen.
+---Seeds the pseudo-random generator, with a reasonably random seed when called without arguments, and returns the two parts of the seed.
 ---@param x? integer
 ---@param y? integer
+---@return integer x
+---@return integer y
 function math.randomseed(x, y) end
 
 ---Returns the sine of `x` (radians).

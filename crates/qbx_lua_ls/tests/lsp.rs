@@ -17290,3 +17290,40 @@ end
     let codes = ["param-type-mismatch", "need-check-nil"];
     assert_eq!(findings(&mut client, CLIENT, &codes), [], "as lua-language-server reads them");
 }
+
+#[test]
+fn library_functions_return_what_their_arguments_ask_for() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local file = io.open('data.txt')
+if not file then return end
+local line = file:read()
+local number = file:read('n')
+local everything = file:read('a')
+for each in file:lines() do print(each:upper()) end
+for none in io.lines('data.txt') do print(none) end
+local kilobytes = collectgarbage('count')
+local finished = collectgarbage('step')
+local previous = collectgarbage('incremental')
+local zero = collectgarbage()
+local seed = math.randomseed(1)
+print(line, number, everything, kilobytes, finished, previous, zero, seed)
+";
+    client.open_with(SERVER, text);
+    for (needle, expected) in [
+        ("line =", "line: string?"),
+        ("number =", "number: number?"),
+        ("everything =", "everything: string\n"),
+        ("each in", "each: string\n"),
+        ("none in", "none: nil"),
+        ("kilobytes =", "kilobytes: number\n"),
+        ("finished =", "finished: boolean"),
+        ("previous =", "previous: \"incremental\"|\"generational\""),
+        ("zero =", "zero: integer"),
+        ("seed =", "seed: integer"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(SERVER, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
