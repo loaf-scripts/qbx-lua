@@ -3244,6 +3244,12 @@ impl<'a> Infer<'a> {
                         if path == "glm" {
                             return only(self.global_type("glm"), false);
                         }
+                        // A module that no file of the workspace provides, such as LuaJIT's `table.new`
+                        // that `pcall(require, 'table.new')` tries, is unknown, as lua-language-server
+                        // reads it. The lookup is noted, so a file added later re-indexes the call.
+                        if self.index.resolve_require(path, self.ctx.file).is_none() {
+                            return only(Type::Unknown, false);
+                        }
                         return only(Type::Require(path.clone()), false);
                     }
                 }

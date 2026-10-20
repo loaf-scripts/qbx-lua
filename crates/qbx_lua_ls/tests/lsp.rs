@@ -17356,3 +17356,16 @@ print(ok, text, fine, count, name, handled, first, failed, problem, found, modul
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
 }
+
+#[test]
+fn modules_that_no_file_provides_are_unknown() {
+    let mut client = Client::start(fixture_root());
+    let text = "local newTable = require('table.new')
+newTable = function() return {} end
+print(newTable)
+";
+    client.open_with(CLIENT, text);
+    let hover = client.hover_text(CLIENT, 0, 7);
+    assert!(hover.contains("newTable: unknown"), "{hover}");
+    assert_eq!(findings(&mut client, CLIENT, &["cast-local-type"]), [], "as lua-language-server reads it");
+}
