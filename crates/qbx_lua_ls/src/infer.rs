@@ -3259,6 +3259,11 @@ impl<'a> Infer<'a> {
                     return only(ty, false);
                 }
                 (Some("tostring"), _) => return only(Type::String, true),
+                (Some(name @ ("pcall" | "xpcall")), Some(_)) => {
+                    if let Some(returned) = self.protected_call(args, if name == "pcall" { 1 } else { 2 }) {
+                        return returned;
+                    }
+                }
                 // `tonumber(n)` gives back a number it is given, and `nil` only for another value.
                 (Some("tonumber"), Some(arg)) if args.len() == 1 => {
                     let ty = match self.expr(arg).widen() {
@@ -3314,6 +3319,29 @@ impl<'a> Infer<'a> {
             inferred: fun.returns_inferred.then(|| bound(fun.explicit_returns.as_ref().unwrap_or(&fun.returns))),
             annotated: !fun.returns_inferred,
         }
+    }
+
+    /// What `pcall(f, ...)` and `xpcall(f, handler, ...)` return: `true` and what calling `f` with
+    /// the arguments after the first `skip` returns, or `false` and the error. Each value takes the
+    /// type of what `f` returns there, as lua-language-server reads it, and the error is `any` when
+    /// `f` returns nothing. `None` when what `f` returns is not known.
+    fn protected_call(&self, args: &[Expr], skip: usize) -> Option<Returned> {
+        let called = self.call_values(args.first()?, None, args.get(skip..).unwrap_or_default());
+        if called.values.iter().all(Type::is_unknown) && !called.nothing {
+            return None;
+        }
+        let returned = if called.nothing { Vec::new() } else { called.values };
+        let after = |first: Type, values: &[Type]| std::iter::once(first).chain(values.iter().cloned()).collect();
+        // A function that returns nothing leaves the error alone after the status.
+        let values = if returned.is_empty() { vec![Type::Boolean, Type::Any] } else { after(Type::Boolean, &returned) };
+        Some(Returned {
+            values,
+            sets: vec![after(Type::BooleanLit(true), &returned), vec![Type::BooleanLit(false), Type::Any]],
+            declared: called.declared,
+            nothing: false,
+            inferred: called.inferred.map(|values| after(Type::Boolean, &values)),
+            annotated: called.annotated,
+        })
     }
 
     /// What `string.match`, `string.find` and `string.gmatch` return for a pattern written as a

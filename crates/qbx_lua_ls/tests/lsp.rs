@@ -17327,3 +17327,32 @@ print(line, number, everything, kilobytes, finished, previous, zero, seed)
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
 }
+
+#[test]
+fn protected_calls_return_what_their_function_returns() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return integer, string
+local function both() return 1, 'a' end
+local ok, text = pcall(tostring, 1)
+local fine, count, name = pcall(both)
+local handled, first = xpcall(both, debug.traceback)
+local failed, problem = pcall(error, 'x')
+local found, module = pcall(require, 'table.new')
+print(ok, text, fine, count, name, handled, first, failed, problem, found, module)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("ok, text", "ok: boolean"),
+        ("text =", "text: string"),
+        ("count, name", "count: integer"),
+        ("name =", "name: string"),
+        ("first =", "first: integer"),
+        ("problem =", "problem: any"),
+        ("module =", "module: any"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
