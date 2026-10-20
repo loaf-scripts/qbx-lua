@@ -3565,7 +3565,7 @@ print(60 - now.sec, os.time(now), os.time({ year = 2024, month = 1, day = '2' })
     for (needle, expected) in [
         ("err) -- failed", "err: string\n"),
         ("to + 1) -- found", "to: integer\n"),
-        ("capture = string", "capture: any"),
+        ("capture = string", "capture: string?"),
         ("now = os", "now: osdate"),
         ("utc = os", "utc: osdate"),
         ("formatted = os", "formatted: string\n"),
@@ -17092,6 +17092,45 @@ AddEventHandler('closest',
         ("label) print", "(parameter) label: string"),
         ("count) print", "(parameter) count: integer"),
         ("inner) print", "(parameter) inner: boolean"),
+    ];
+    for (needle, expected) in hovers {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn string_patterns_written_as_literals_type_their_captures() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local first, second = ('12-34'):match('(%d+)-(%d+)')
+local position = ('abc'):match('()b')
+local whole = string.match('abc', '%a+')
+local from, to, letter, after = ('abc'):find('(b)()')
+local plainFrom, plainTo = ('a.b'):find('.', 1, true)
+for key, at in ('a=1'):gmatch('(%w+)=()') do print(key, at) end
+local escaped = ('a]b'):match('[]a](%]?)')
+local pattern = '(%d+)'
+local dynamic = ('12'):match(pattern)
+if first then print(second:upper()) end
+print(position, whole, from, to, letter, after, plainFrom, plainTo, escaped, dynamic)
+";
+    client.open_with(CLIENT, text);
+    let hovers = [
+        ("first,", "local first: string?"),
+        ("second =", "local second: string?"),
+        ("position =", "local position: integer?"),
+        ("whole =", "local whole: string?"),
+        ("from,", "local from: integer?"),
+        ("letter,", "local letter: string?"),
+        ("after =", "local after: integer?"),
+        ("plainTo =", "local plainTo: integer?"),
+        ("key,", "key: string"),
+        ("at in", "at: integer"),
+        ("escaped =", "local escaped: string?"),
+        ("dynamic =", "local dynamic: string?"),
+        ("second:upper", "second: string"),
     ];
     for (needle, expected) in hovers {
         let (l, c) = pos(text, needle, 0);

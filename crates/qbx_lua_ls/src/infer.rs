@@ -3227,6 +3227,9 @@ impl<'a> Infer<'a> {
             inferred: None,
             annotated: declared,
         };
+        if let Some(returned) = self.pattern_call(base, method, args) {
+            return returned;
+        }
         if method.is_none() {
             match (base.dotted_path().as_deref(), args.first()) {
                 (Some("require" | "lib.require" | "lib.load"), Some(arg)) => {
@@ -3304,6 +3307,52 @@ impl<'a> Infer<'a> {
             nothing: false,
             inferred: fun.returns_inferred.then(|| bound(fun.explicit_returns.as_ref().unwrap_or(&fun.returns))),
             annotated: !fun.returns_inferred,
+        }
+    }
+
+    /// What `string.match`, `string.find` and `string.gmatch` return for a pattern written as a
+    /// literal, called on `string` or as a method of a string: the values of its captures, each a
+    /// `string`, or an `integer` for a position capture `()`. `match` and `gmatch` give the whole
+    /// match for a pattern without captures, and `find` gives the positions of the match first.
+    /// `match` and `find` return all of them, or `nil` alone when nothing matches; the iterator of
+    /// `gmatch` returns them for each match.
+    fn pattern_call(&self, base: &Expr, method: Option<&Name>, args: &[Expr]) -> Option<Returned> {
+        let (name, pattern_at) = match method {
+            Some(method) if self.expr(base).widen() == Type::String => (method.text.to_string(), 0),
+            Some(_) => return None,
+            None => (base.dotted_path()?.strip_prefix("string.")?.to_string(), 1),
+        };
+        let captures = pattern_captures(args.get(pattern_at)?.as_string()?)?;
+        let declared = |values: Vec<Type>, sets: Vec<Vec<Type>>| Returned {
+            values,
+            sets,
+            declared: true,
+            nothing: false,
+            inferred: None,
+            annotated: true,
+        };
+        let found = |values: Vec<Type>| {
+            let optional = values.iter().map(|value| value.clone().optional()).collect();
+            declared(optional, vec![values, vec![Type::Nil]])
+        };
+        let whole_match = |captures: Vec<Type>| if captures.is_empty() { vec![Type::String] } else { captures };
+        match name.as_str() {
+            "match" => Some(found(whole_match(captures))),
+            "find" => {
+                // `plain` turns the pattern into text to look for, which has no captures.
+                let plain = match args.get(pattern_at + 2).map(|arg| &arg.unparen().kind) {
+                    None | Some(ExprKind::Nil | ExprKind::False) => false,
+                    Some(ExprKind::True) => true,
+                    Some(_) => return None,
+                };
+                let captures = if plain { Vec::new() } else { captures };
+                Some(found([Type::Integer, Type::Integer].into_iter().chain(captures).collect()))
+            }
+            "gmatch" => {
+                let iterator = FunType { returns: whole_match(captures), ..FunType::default() };
+                Some(declared(vec![Type::Fun(Arc::new(iterator))], Vec::new()))
+            }
+            _ => None,
         }
     }
 
@@ -5091,4 +5140,56 @@ fn passed_functions(expr: &Expr) -> Vec<&FuncBody> {
             _ => None,
         })
         .collect()
+}
+
+/// The value each capture of a Lua pattern gives, in order: an `integer` for a position capture
+/// `()` and a `string` for any other. `None` for a malformed pattern, which Lua rejects.
+fn pattern_captures(pattern: &str) -> Option<Vec<Type>> {
+    let bytes = pattern.as_bytes();
+    let mut captures = Vec::new();
+    let mut open = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        i = match bytes[i] {
+            b'%' => match bytes.get(i + 1)? {
+                b'b' if i + 3 < bytes.len() => i + 4,
+                b'b' => return None,
+                b'f' if bytes.get(i + 2) == Some(&b'[') => pattern_set_end(bytes, i + 2)?,
+                b'f' => return None,
+                _ => i + 2,
+            },
+            b'[' => pattern_set_end(bytes, i)?,
+            b'(' if bytes.get(i + 1) == Some(&b')') => {
+                captures.push(Type::Integer);
+                i + 2
+            }
+            b'(' => {
+                captures.push(Type::String);
+                open += 1;
+                i + 1
+            }
+            b')' => {
+                open = open.checked_sub(1)?;
+                i + 1
+            }
+            _ => i + 1,
+        };
+    }
+    (open == 0).then_some(captures)
+}
+
+/// Where the set `[...]` starting at `start` of a Lua pattern ends, as Lua's `classEnd` finds it: a
+/// `]` right after the `[` or `[^` belongs to the set, and so does one escaped as `%]`.
+fn pattern_set_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    if bytes.get(i) == Some(&b'^') {
+        i += 1;
+    }
+    loop {
+        let byte = *bytes.get(i)?;
+        i += if byte == b'%' { 2 } else { 1 };
+        if *bytes.get(i)? == b']' {
+            return Some(i + 1);
+        }
+    }
 }

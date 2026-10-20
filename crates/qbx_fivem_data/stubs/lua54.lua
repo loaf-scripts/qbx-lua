@@ -633,7 +633,7 @@ function string.dump(f, strip) end
 ---@param pattern string
 ---@param init? integer
 ---@param plain? boolean
----@return (integer, integer, ...any) | nil
+---@return (integer, integer, ...string) | nil
 ---@nodiscard
 function string.find(s, pattern, init, plain) end
 
@@ -677,7 +677,7 @@ function string.lower(s) end
 ---@param s string|number
 ---@param pattern string
 ---@param init? integer
----@return any ...
+---@return (string, ...string) | nil
 ---@nodiscard
 function string.match(s, pattern, init) end
 
