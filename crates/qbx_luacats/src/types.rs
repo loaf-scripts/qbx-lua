@@ -220,6 +220,9 @@ pub struct FunType {
     pub lists_receiver: bool,
     /// The names declared with `@generic`, bound from the arguments of each call.
     pub generics: Vec<SmolStr>,
+    /// The constraints `@generic T: number` puts on the generics that have one, which tell the
+    /// `@overload` a call fits.
+    pub generic_bounds: Vec<(SmolStr, Type)>,
     /// The `@overload` signatures, for calls the declared one does not fit.
     pub overloads: Vec<Arc<FunType>>,
     /// The side an `@overload (server)` or `(client)` signature applies to.

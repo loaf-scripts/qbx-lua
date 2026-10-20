@@ -153,6 +153,8 @@ pub struct DocGroup {
     pub enum_keys: bool,
     pub enum_side: Option<Side>,
     pub generics: Vec<SmolStr>,
+    /// The constraints `@generic T: number` puts on the generics that have one.
+    pub generic_bounds: Vec<(SmolStr, Type)>,
     pub overloads: Vec<Arc<FunType>>,
     pub deprecated: Option<String>,
     pub is_async: bool,
@@ -224,7 +226,13 @@ impl DocGroup {
                 let lists_self = overload.params.first().is_some_and(|p| p.name == "self");
                 let is_method = is_method && !lists_self;
                 let lists_receiver = !is_method;
-                Arc::new(FunType { is_method, lists_receiver, generics: self.generics.clone(), ..(**overload).clone() })
+                Arc::new(FunType {
+                    is_method,
+                    lists_receiver,
+                    generics: self.generics.clone(),
+                    generic_bounds: self.generic_bounds.clone(),
+                    ..(**overload).clone()
+                })
             })
             .collect();
         let return_values = match self.returns.iter().any(|r| !r.values.is_empty()) {
@@ -241,6 +249,7 @@ impl DocGroup {
             is_method,
             lists_receiver: !is_method,
             generics: self.generics.clone(),
+            generic_bounds: self.generic_bounds.clone(),
             overloads,
             side: None,
             callback: self.callback.clone(),
@@ -609,8 +618,12 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                 group.ty_line = index;
             }
             "generic" => {
-                let names = rest.split(',').filter_map(|g| g.trim().split([':', ' ']).next()).filter(|g| !g.is_empty());
-                group.generics.extend(names.map(SmolStr::new));
+                for (name, bound) in generic_entries(rest) {
+                    if let Some(bound) = bound {
+                        group.generic_bounds.push((SmolStr::new(name), bound));
+                    }
+                    group.generics.push(SmolStr::new(name));
+                }
             }
             "vararg" => {
                 let ty = TypeParser::new(rest).parse();
@@ -632,7 +645,9 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
     // An added signature shares the `@generic` names of its doc comment, as an overload does.
     if !group.generics.is_empty() {
         for extend in &mut group.extends {
-            Arc::make_mut(&mut extend.fun).generics = group.generics.clone();
+            let fun = Arc::make_mut(&mut extend.fun);
+            fun.generics = group.generics.clone();
+            fun.generic_bounds = group.generic_bounds.clone();
         }
     }
     group
@@ -651,6 +666,33 @@ fn class_head(rest: &str) -> Option<(&str, &str, &str)> {
 /// `<T, K> : Base`, and the text after it. Without parameters, the list is empty.
 fn type_params(after_name: &str) -> (&str, &str) {
     after_name.strip_prefix('<').and_then(|list| list.split_once('>')).unwrap_or(("", after_name))
+}
+
+/// The generics an `@generic` line declares, each with its constraint: `T` with `number` and `K`
+/// with none for `T: number, K`. A comma inside a constraint, as in `T: table<string, integer>`,
+/// does not end it.
+fn generic_entries(list: &str) -> Vec<(&str, Option<Type>)> {
+    let mut entries = Vec::new();
+    let (mut depth, mut start) = (0i32, 0);
+    for (i, ch) in list.char_indices().chain(std::iter::once((list.len(), ','))) {
+        match ch {
+            '<' | '(' | '{' | '[' => depth += 1,
+            '>' | ')' | '}' | ']' => depth -= 1,
+            ',' if depth <= 0 => {
+                let entry = list[start..i].trim();
+                start = i + 1;
+                let (name, bound) = match entry.split_once(':') {
+                    Some((name, bound)) => (name.trim(), Some(TypeParser::new(bound).parse())),
+                    None => (entry.split(' ').next().unwrap_or(""), None),
+                };
+                if !name.is_empty() {
+                    entries.push((name, bound.filter(|bound| !bound.is_unknown())));
+                }
+            }
+            _ => {}
+        }
+    }
+    entries
 }
 
 /// The names in a list of type parameters, without their constraints: `T` and `K` of `T: table, K`.
@@ -1480,6 +1522,7 @@ mod tests {
     fn type_and_generics() {
         let doc = parse("---@generic T: table, K\n---@type table<string, fun(): boolean>");
         assert_eq!(doc.generics, ["T", "K"]);
+        assert_eq!(doc.generic_bounds, [(SmolStr::new("T"), Type::Table)]);
         assert_eq!(doc.type_at(0).unwrap().to_string(), "table<string, fun(): boolean>");
         assert_eq!(doc.type_at(1), None, "one type is the first name's alone");
         assert_eq!(doc.ty.unwrap().to_string(), "table<string, fun(): boolean>");
@@ -1489,6 +1532,12 @@ mod tests {
         assert_eq!(at(0).as_deref(), Some("boolean"));
         assert_eq!(at(1).as_deref(), Some("table<string, number>|string"));
         assert_eq!(at(2), None, "a list types no more names than it has types");
+
+        let doc = parse("---@generic M: table<string, integer>, V: vector2|vector3");
+        assert_eq!(doc.generics, ["M", "V"], "a comma inside a constraint does not end it");
+        let bounds: Vec<(String, String)> =
+            doc.generic_bounds.iter().map(|(name, bound)| (name.to_string(), bound.to_string())).collect();
+        assert_eq!(bounds, [("M".into(), "table<string, integer>".into()), ("V".into(), "vector2|vector3".into())]);
     }
 
     #[test]

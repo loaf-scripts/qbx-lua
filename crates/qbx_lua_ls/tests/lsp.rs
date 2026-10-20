@@ -17188,3 +17188,27 @@ print(fromThree, fromFour, fromNumber, fromOther, fromChild)
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
 }
+
+#[test]
+fn overloads_are_picked_by_the_constraints_of_generics() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@generic T: vector2|vector3|vector4
+---@param x T
+---@param y T
+---@return T
+---@overload fun(x: number, y: number, epsilon?: number): boolean
+local function approx(x, y) return x end
+
+local fromNumbers = approx(1, 2)
+local fromVectors = approx(vector3(1, 2, 3), vector3(1, 2, 3))
+print(fromNumbers, fromVectors)
+";
+    client.open_with(CLIENT, text);
+    let hovers = [("fromNumbers =", "local fromNumbers: boolean"), ("fromVectors =", "local fromVectors: vector3")];
+    for (needle, expected) in hovers {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}

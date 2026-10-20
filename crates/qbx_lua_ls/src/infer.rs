@@ -3865,9 +3865,12 @@ impl<'a> Infer<'a> {
             Type::Function | Type::Fun(_) => kind::FUNCTION,
             Type::Thread | Type::Userdata => kind::OTHER,
             Type::Variadic(inner) => return self.value_kinds(fun, inner, param, depth + 1),
-            Type::Named(name, _) if self.is_generic(fun, name) || NATIVE_HANDLE_TYPES.contains(&name.as_str()) => {
-                return None
+            // A parameter of a generic type takes the values of its constraint, as `T: vector3`.
+            Type::Named(name, _) if self.is_generic(fun, name) => {
+                let bound = fun.generic_bounds.iter().find(|(generic, _)| generic == name.as_str());
+                return bound.and_then(|(_, bound)| self.value_kinds(fun, bound, param, depth + 1));
             }
+            Type::Named(name, _) if NATIVE_HANDLE_TYPES.contains(&name.as_str()) => return None,
             // Classes describe tables, and also userdata such as `vector3`.
             Type::Named(name, _) if self.index.class(name, self.side).is_some() => kind::TABLE | kind::OTHER,
             Type::Named(..) => match self.resolve_alias(ty) {
@@ -3885,8 +3888,8 @@ impl<'a> Infer<'a> {
     }
 
     /// How closely a parameter of type `param` names the class of an argument of type `given`: 2 when
-    /// it names that class and 1 when it names one of its parents, through aliases and unions, and 0
-    /// when it names neither or `given` is no class.
+    /// it names that class and 1 when it names one of its parents, through aliases, unions and the
+    /// constraint of a generic, and 0 when it names neither or `given` is no class.
     fn class_match(&self, fun: &FunType, param: &Type, given: &Type, depth: u32) -> usize {
         let Type::Named(class, _) = given else { return 0 };
         if depth > 8 || self.index.class(class, self.side).is_none() {
@@ -3894,6 +3897,10 @@ impl<'a> Infer<'a> {
         }
         match param {
             Type::Named(name, _) if name == class => 2,
+            Type::Named(name, _) if self.is_generic(fun, name) => {
+                let bound = fun.generic_bounds.iter().find(|(generic, _)| generic == name.as_str());
+                bound.map_or(0, |(_, bound)| self.class_match(fun, bound, given, depth + 1))
+            }
             Type::Named(name, _) if self.index.class(name, self.side).is_some() => {
                 usize::from(self.class_extends(class, name))
             }
@@ -4749,6 +4756,7 @@ fn substitute_fun(fun: &FunType, generics: &[(SmolStr, Type)]) -> FunType {
         is_method: fun.is_method,
         lists_receiver: fun.lists_receiver,
         generics: fun.generics.iter().filter(unbound).cloned().collect(),
+        generic_bounds: fun.generic_bounds.iter().filter(|(name, _)| unbound(&name)).cloned().collect(),
         overloads: fun.overloads.iter().map(|overload| Arc::new(substitute_fun(overload, generics))).collect(),
         side: fun.side,
         callback: fun.callback.clone(),
