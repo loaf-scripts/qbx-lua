@@ -17369,3 +17369,134 @@ print(newTable)
     assert!(hover.contains("newTable: unknown"), "{hover}");
     assert_eq!(findings(&mut client, CLIENT, &["cast-local-type"]), [], "as lua-language-server reads it");
 }
+
+#[test]
+fn values_of_unrelated_classes_are_reported() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Plain
+---@field a number
+---@class Probe.Other
+---@field b string
+---@class Probe.Base
+---@class Probe.Child : Probe.Base
+
+---@param other Probe.Other
+local function takesOther(other) print(other) end
+---@param base Probe.Base
+local function takesBase(base) print(base) end
+---@param v vector4
+local function takesVector4(v) print(v) end
+---@param t table
+local function takesTable(t) print(t) end
+---@param either Probe.Other|Probe.Plain
+local function takesEither(either) print(either) end
+
+---@type Probe.Plain
+local plain = { a = 1 }
+---@type Probe.Child
+local child = {}
+takesOther(plain)
+takesBase(child)
+takesVector4(vector2(1, 2))
+takesTable(plain)
+takesEither(plain)
+takesOther({ b = 'x' })
+---@type Probe.Other
+local stored = plain
+---@return Probe.Other
+local function give() return plain end
+print(stored, give)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let codes = ["param-type-mismatch", "assign-type-mismatch", "return-type-mismatch"];
+    let mut found = findings(&mut client, CLIENT, &codes);
+    found.sort_by_key(|(_, line, _)| *line);
+    assert_eq!(
+        found,
+        [
+            (
+                "param-type-mismatch".to_string(),
+                line("takesOther(plain)"),
+                "Cannot assign `Probe.Plain` to parameter `other` of type `Probe.Other`".to_string()
+            ),
+            (
+                "param-type-mismatch".to_string(),
+                line("takesVector4(vector2"),
+                "Cannot assign `vector2` to parameter `v` of type `vector4`".to_string()
+            ),
+            (
+                "assign-type-mismatch".to_string(),
+                line("local stored"),
+                "Cannot assign `Probe.Plain` to `stored` of type `Probe.Other`".to_string()
+            ),
+            (
+                "return-type-mismatch".to_string(),
+                line("return plain"),
+                "Cannot return `Probe.Plain` as return value #1 of type `Probe.Other`".to_string()
+            ),
+        ],
+        "as in lua-language-server, a subclass, `table`, a union that lists the class and a table constructor pass"
+    );
+}
+
+#[test]
+fn generic_classes_and_values_from_exports_are_class_checked_with_strict() {
+    let mut client = Client::start(fixture_root());
+    client.open_with(
+        "shop/server.lua",
+        "---@class Shop.Crate\n---@field label string\n\n---@return Shop.Crate?\nlocal function getCrate() end\nexports('GetCrate', getCrate)\n",
+    );
+    let text = "\
+---@class Own.Crate
+---@field label string
+---@class Own.Typed<T> : promise
+
+---@param crate Own.Crate
+local function use(crate) print(crate) end
+
+---@type Own.Crate?
+local annotated = exports.shop:GetCrate()
+local held = exports.shop:GetCrate()
+if held then use(held) end
+---@type Own.Typed<string>
+local typed = promise.new()
+print(annotated, typed)
+";
+    client.open_with(SERVER, text);
+    let codes = ["param-type-mismatch", "assign-type-mismatch"];
+    let found = findings(&mut client, SERVER, &codes);
+    assert!(
+        found.is_empty(),
+        "as lua-language-server, which does not see exports or compare generic classes: {found:?}"
+    );
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "strict": true } } } }),
+    );
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let mut found = findings(&mut client, SERVER, &codes);
+    found.sort_by_key(|(_, line, _)| *line);
+    assert_eq!(
+        found,
+        [
+            (
+                "assign-type-mismatch".to_string(),
+                line("local annotated"),
+                "Cannot assign `Shop.Crate?` to `annotated` of type `Own.Crate?`".to_string()
+            ),
+            (
+                "param-type-mismatch".to_string(),
+                line("use(held)"),
+                "Cannot assign `Shop.Crate` to parameter `crate` of type `Own.Crate`".to_string()
+            ),
+            (
+                "assign-type-mismatch".to_string(),
+                line("local typed"),
+                "Cannot assign `promise` to `typed` of type `Own.Typed<string>`".to_string()
+            ),
+        ],
+        "with `strict` they are checked as other values are"
+    );
+}

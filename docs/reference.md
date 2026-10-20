@@ -357,6 +357,10 @@ With `strict`:
   [Return values](#return-values).
 - `unreachable-code` reports the code after a call of `error` or `os.exit` of its own, as
   TypeScript reports the code after a `throw`.
+- `param-type-mismatch`, `assign-type-mismatch` and `return-type-mismatch` also compare the classes
+  of generic classes, as `promise` for a `TypedPromise<string>`, and of values that come through
+  `exports`, as `exports.qbx_core:GetPlayerData()` for a local typed with a class of your own.
+  lua-language-server compares neither, as it does not see exports.
 - `missing-parameter` and `redundant-parameter` also count the arguments of natives, as
   `SetEntityCoords(ped, x, y, z)` leaves out four. FiveM passes `nil` for those, which scripts rely
   on, so they are only reported in strict mode.

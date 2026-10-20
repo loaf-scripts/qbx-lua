@@ -46,7 +46,10 @@ pub fn mismatched_casts(infer: &Infer) -> Vec<(Span, String)> {
             // A cast that widens the type, as `---@cast coords Cell | Coords` for a `Coords`, takes
             // every value the local may hold, as TypeScript takes `x as A | B` for a `B`, although
             // lua-language-server reports it.
-            if classes.rejected_part(ty, classes.file(), &expected).is_none() && takes_class(&classes, ty, &expected) {
+            let mut held = Vec::new();
+            classes.flatten(&expected, classes.file(), &mut held, 0);
+            let widens = held.iter().all(|part| !classes.rejects_value(ty, classes.file(), part));
+            if widens && takes_class(&classes, ty, &expected) {
                 continue;
             }
             let parts = match ty {
@@ -54,7 +57,7 @@ pub fn mismatched_casts(infer: &Infer) -> Vec<(Span, String)> {
                 one => std::slice::from_ref(one),
             };
             let rejects = |part: &Type| {
-                classes.rejects(&expected, classes.file(), part)
+                classes.rejects_value(&expected, classes.file(), part)
                     || (!holds_table && !takes_class(&classes, &expected, part))
             };
             if parts.iter().any(rejects) {
@@ -78,7 +81,7 @@ fn takes_class(classes: &Classes, declared: &Type, cast: &Type) -> bool {
         let Some((class, _, view)) = classes.class_of(cast, file) else { return true };
         parts.iter().any(|part| match classes.class_of(part, file) {
             Some((declared, ..)) => classes.extends(&class, view, &declared),
-            None => !classes.rejects(part, file, cast),
+            None => !classes.rejects_value(part, file, cast),
         })
     })
 }

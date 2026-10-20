@@ -118,7 +118,7 @@ impl Finder<'_, '_> {
                 continue;
             }
             let given = checked_value(self.infer, value_at(exprs, index), given);
-            if let Some(part) = self.classes.rejected_part(expected, from, &given) {
+            if let Some(part) = self.classes.rejected_part_of(expected, from, &given, value_at(exprs, index)) {
                 let shown = self.classes.shown(expected, from, &given, &part);
                 let name = target.name.text(self.infer.ctx.source);
                 self.out.push((span, format!("Cannot assign `{shown}` to `{name}` of type `{expected}`")));

@@ -24,7 +24,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::comparisons::Declared;
 use super::unknown_types::is_typed;
 use crate::index::{AliasDef, ClassDef, FileId, ResourceId};
-use crate::infer::{bound_parents, class_bindings, expanded_bindings, substitute, Infer};
+use crate::infer::{bound_parents, class_bindings, expanded_bindings, substitute, Infer, NATIVE_HANDLE_TYPES};
 use crate::luacats::applies_on;
 use crate::types::{DescribedValue, FunType, Param, Shape, Type};
 
@@ -751,10 +751,70 @@ impl<'a, 'b> Classes<'a, 'b> {
     /// Whether a value of type `given`, inferred in this file, can clearly not be stored where
     /// `expected` is declared in `from`.
     pub fn rejects(&self, expected: &Type, from: FileId, given: &Type) -> bool {
+        self.rejects_value(expected, from, given) || self.class_mismatch(expected, from, given)
+    }
+
+    /// The member of `given`, the type of `value`, that `expected` rejects, as `rejected_part`
+    /// finds it. Without `strict`, a value that comes through `exports` is not checked for its
+    /// classes: they are those of another resource, which lua-language-server does not see.
+    pub fn rejected_part_of(&self, expected: &Type, from: FileId, given: &Type, value: Option<&Expr>) -> Option<Type> {
+        if self.infer.strict() || !value.is_some_and(|value| self.infer.comes_from_exports(value)) {
+            return self.rejected_part(expected, from, given);
+        }
+        let mut parts = Vec::new();
+        self.flatten(given, self.file(), &mut parts, 0);
+        parts.into_iter().find(|part| self.rejects_value(expected, from, part))
+    }
+
+    /// Whether `expected` rejects `given` as `rejects` does, by the kinds of value and the literals
+    /// alone, for checks that compare classes their own way, as casts do.
+    pub fn rejects_value(&self, expected: &Type, from: FileId, given: &Type) -> bool {
         match (self.kinds(expected, from, 0), self.kinds(given, self.file(), 0)) {
             (Some(wanted), Some(got)) if wanted & got == 0 => true,
             _ => self.literal_mismatch(expected, from, given),
         }
+    }
+
+    /// Whether `given`, a value of a class, is of none of the classes that `expected`, declared in
+    /// `from`, takes and of no subclass of them, where `expected` takes no other table: a `Foo` for
+    /// a `Bar`, or a `vector2` for a `vector4`, as lua-language-server reads classes. A table type, a
+    /// generic, a name of no known class or alias and the names of native handles, which resources
+    /// declare as classes too, leave the class open, and so does a generic class, as
+    /// `TypedPromise<T>` or `Box<string>`, which lua-language-server does not compare either, unless
+    /// `strict` asks for it.
+    fn class_mismatch(&self, expected: &Type, from: FileId, given: &Type) -> bool {
+        let Some((class, _, view)) = self.class_of(given, self.file()) else { return false };
+        if NATIVE_HANDLE_TYPES.contains(&class.as_str()) {
+            return false;
+        }
+        let mut parts = Vec::new();
+        self.flatten(expected, from, &mut parts, 0);
+        let mut classes = Vec::new();
+        for part in &parts {
+            match part {
+                Type::Nil
+                | Type::Boolean
+                | Type::BooleanLit(_)
+                | Type::Number
+                | Type::Integer
+                | Type::IntLit(_)
+                | Type::Handle(_)
+                | Type::String
+                | Type::StringLit(_)
+                | Type::Function
+                | Type::Fun(_) => {}
+                Type::Named(name, _) if NATIVE_HANDLE_TYPES.contains(&name.as_str()) => return false,
+                Type::Named(..) => match self.class_of(part, from) {
+                    Some((_, args, view)) if !self.infer.strict() && self.is_generic_class(part, &args, view) => {
+                        return false
+                    }
+                    Some((name, _, _)) => classes.push(name),
+                    None => return false,
+                },
+                _ => return false,
+            }
+        }
+        !classes.is_empty() && !classes.iter().any(|ancestor| self.extends(&class, view, ancestor))
     }
 
     /// The member of `given`, inferred in this file, that can clearly not be stored where
@@ -839,6 +899,13 @@ impl<'a, 'b> Classes<'a, 'b> {
                 kinds
             }
         })
+    }
+
+    /// Whether `ty`, a class with the type arguments `args` as `view` sees it, is generic: it is
+    /// given type arguments, as `Box<string>`, or declares type parameters, as `Box<T>` does.
+    fn is_generic_class(&self, ty: &Type, args: &[Type], view: FileId) -> bool {
+        let Type::Named(name, _) = ty else { return false };
+        !args.is_empty() || self.class_defs(name, view).iter().any(|(_, def)| !def.generics.is_empty())
     }
 
     /// Whether `given` is a literal that `expected` lists only other literals for, like `'other'`
@@ -1162,7 +1229,7 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
         }
         let given = checked_value(infer, Some(value), given);
         let given = if removes { given.without_nil() } else { given };
-        if let Some(part) = classes.rejected_part(&ty, file, &given) {
+        if let Some(part) = classes.rejected_part_of(&ty, file, &given, Some(value)) {
             let shown = classes.shown(&ty, file, &given, &part);
             out.push((value.span, format!("Cannot assign `{shown}` to {target} of type `{ty}`")));
         }

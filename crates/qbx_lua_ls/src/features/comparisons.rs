@@ -656,17 +656,7 @@ impl<'a, 'b> Declared<'a, 'b> {
 
     /// Whether `call` reaches its function through `exports`, as `exports.res:Fn()` does.
     fn through_exports(&self, call: &Expr) -> bool {
-        let mut root = match &call.kind {
-            ExprKind::Call { callee, .. } => &**callee,
-            ExprKind::MethodCall { base, .. } => &**base,
-            _ => return false,
-        };
-        while let ExprKind::Field { base, .. } | ExprKind::Index { base, .. } = &root.unparen().kind {
-            root = base;
-        }
-        let ExprKind::Name(name) = &root.unparen().kind else { return false };
-        name.text == "exports"
-            && matches!(self.infer.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Global(_)))
+        self.infer.calls_through_exports(call)
     }
 
     fn is_native_call(&self, call: &Expr) -> bool {

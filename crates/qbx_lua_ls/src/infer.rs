@@ -3191,6 +3191,49 @@ impl<'a> Infer<'a> {
         })
     }
 
+    /// Whether `call` reaches its function through `exports`, as `exports.res:Fn()` does.
+    pub fn calls_through_exports(&self, call: &Expr) -> bool {
+        let mut root = match &call.kind {
+            ExprKind::Call { callee, .. } => &**callee,
+            ExprKind::MethodCall { base, .. } => &**base,
+            _ => return false,
+        };
+        while let ExprKind::Field { base, .. } | ExprKind::Index { base, .. } = &root.unparen().kind {
+            root = base;
+        }
+        let ExprKind::Name(name) = &root.unparen().kind else { return false };
+        name.text == "exports" && matches!(self.ctx.resolution.resolve_at(name.span.start), Some(Resolved::Global(_)))
+    }
+
+    /// Whether the value of `expr` is what a call through `exports` returns, or a field of it, also
+    /// through a local that it initialises and that is not assigned again, as `local data =
+    /// exports.qbx_core:GetPlayerData()` is: the types of another resource, which
+    /// lua-language-server does not see.
+    pub fn comes_from_exports(&self, expr: &Expr) -> bool {
+        self.comes_from_exports_at(expr, 0)
+    }
+
+    fn comes_from_exports_at(&self, expr: &Expr, depth: u32) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        match &expr.unparen().kind {
+            ExprKind::Call { .. } | ExprKind::MethodCall { .. } => self.calls_through_exports(expr),
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.comes_from_exports_at(base, depth + 1),
+            ExprKind::Name(name) => {
+                let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(name.span.start) else { return false };
+                let local = self.ctx.resolution.local(id);
+                if local.refs.iter().any(|reference| reference.write) {
+                    return false;
+                }
+                let Some(Decl::Local { stmt, index }) = self.ctx.decl(local.decl.start) else { return false };
+                let StmtKind::Local { exprs, .. } = &stmt.kind else { return false };
+                exprs.get(*index).is_some_and(|value| self.comes_from_exports_at(value, depth + 1))
+            }
+            _ => false,
+        }
+    }
+
     /// How many values `call` gives, when each signature its function may use, and each set of
     /// values it lists, gives the same number of them and none ends with `...T`: the `1` of
     /// `tonumber(x)`. `None` when that is not known, or is none.

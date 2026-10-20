@@ -242,8 +242,8 @@ impl Calls<'_, '_> {
             }
             let message = match (native, bound_param(fun, param, &bound)) {
                 (true, _) => native_mismatch(&self.classes, param, arg, given, self.infer.strict()),
-                (false, Some(param)) => mismatch(&self.classes, fun, &param, given),
-                (false, None) => mismatch(&self.classes, fun, param, given),
+                (false, Some(param)) => mismatch(&self.classes, fun, &param, given, Some(arg)),
+                (false, None) => mismatch(&self.classes, fun, param, given, Some(arg)),
             };
             out.extend(message.map(|message| (arg.span, message)));
         }
@@ -379,7 +379,7 @@ fn bound_param(fun: &FunType, param: &Param, bound: &[(SmolStr, Type)]) -> Optio
 }
 
 /// The message for a value of type `given` that `param` of `fun` does not take.
-pub fn mismatch(classes: &Classes, fun: &FunType, param: &Param, given: &Type) -> Option<String> {
+pub fn mismatch(classes: &Classes, fun: &FunType, param: &Param, given: &Type, arg: Option<&Expr>) -> Option<String> {
     let expected = expected(param);
     let is_generic = |name: &str| fun.generics.iter().any(|generic| generic == name);
     // Resources declare classes such as `Vehicle` that share the name of a native handle, which a
@@ -392,7 +392,7 @@ pub fn mismatch(classes: &Classes, fun: &FunType, param: &Param, given: &Type) -
     if classes.admits_nil(given, from) && !takes_nil(classes, param) {
         return Some(format!("Cannot assign `{given}` to parameter `{}` of type `{expected}`", param.name));
     }
-    rejected(classes, param, &given.without_nil())
+    rejected(classes, param, &given.without_nil(), arg)
 }
 
 /// The message for the value `arg` of type `given` that `param` of a native does not take, as the
@@ -451,13 +451,13 @@ fn is_literal(expr: &Expr) -> bool {
 
 /// The message for a value of type `given`, with no `nil` in it, that `param` clearly does not
 /// take: one that may be of another kind, or a literal it does not list.
-fn rejected(classes: &Classes, param: &Param, given: &Type) -> Option<String> {
+fn rejected(classes: &Classes, param: &Param, given: &Type, arg: Option<&Expr>) -> Option<String> {
     let expected = expected(param);
     let from = classes.file();
     if matches!(given, Type::Unknown | Type::Nil) {
         return None;
     }
-    let part = classes.rejected_part(expected, from, given)?;
+    let part = classes.rejected_part_of(expected, from, given, arg)?;
     let shown = classes.shown(expected, from, given, &part);
     Some(format!("Cannot assign `{shown}` to parameter `{}` of type `{expected}`", param.name))
 }

@@ -40,7 +40,7 @@ pub fn mismatched_returns(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
             let values: Vec<(Type, Span)> = values
                 .map(|(index, (given, span))| (checked_value(infer, value_at(exprs, index), given), span))
                 .collect();
-            out.extend(mismatches(&classes, function.closest(&classes, exprs, &values), &values));
+            out.extend(mismatches(&classes, function.closest(&classes, exprs, &values), &values, exprs));
         }
     }
     out
@@ -67,12 +67,13 @@ pub fn unknown_returns(infer: &Infer, chunk: &Chunk, pick: &dyn Fn(&Expr) -> boo
     out
 }
 
-/// Each of `values` that the `@return` type at its position does not take.
-fn mismatches(classes: &Classes, returns: &[Type], values: &[(Type, Span)]) -> Vec<(Span, String)> {
+/// Each of `values`, which the `return` of `exprs` passes, that the `@return` type at its position
+/// does not take.
+fn mismatches(classes: &Classes, returns: &[Type], values: &[(Type, Span)], exprs: &[Expr]) -> Vec<(Span, String)> {
     let mut out = Vec::new();
     for (i, (given, span)) in values.iter().enumerate() {
         let Some(expected) = expected_at(returns, i) else { break };
-        if let Some(part) = classes.rejected_part(expected, classes.file(), given) {
+        if let Some(part) = classes.rejected_part_of(expected, classes.file(), given, value_at(exprs, i)) {
             let shown = classes.shown(expected, classes.file(), given, &part);
             out.push((*span, format!("Cannot return `{shown}` as return value #{} of type `{expected}`", i + 1)));
         }
@@ -227,7 +228,7 @@ impl Documented<'_> {
     /// nearest in length.
     fn closest(&self, classes: &Classes, exprs: &[Expr], values: &[(Type, Span)]) -> &[Type] {
         let distance = |set: &&Vec<Type>| {
-            let rejected = mismatches(classes, set, values).len();
+            let rejected = mismatches(classes, set, values, exprs).len();
             (rejected, is_short(exprs, required_values(classes, set)), set.len().abs_diff(values.len()))
         };
         self.sets.iter().min_by_key(distance).unwrap_or(&self.returns)

@@ -145,7 +145,7 @@ impl Finder<'_, '_> {
                 .into_iter()
                 .map(|fun| {
                     let param = param_for(fun, via_colon, index)?;
-                    let refuses = !takes_nil(&classes, param) && mismatch(&classes, fun, param, &given).is_none();
+                    let refuses = !takes_nil(&classes, param) && mismatch(&classes, fun, param, &given, None).is_none();
                     refuses.then_some(param)
                 })
                 .collect();
