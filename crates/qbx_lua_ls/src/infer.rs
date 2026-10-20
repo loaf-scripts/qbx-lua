@@ -40,7 +40,8 @@ mod kind {
 }
 
 /// How well a call's arguments line up with a signature. Each fit counts the arguments that are one
-/// of the literal values their parameter lists, like `"keyPressed"` for `action: "keyPressed"`.
+/// of the literal values their parameter lists, like `"keyPressed"` for `action: "keyPressed"`, and
+/// those whose class their parameter names.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Fit {
     No,
@@ -51,11 +52,14 @@ enum Fit {
 
 /// The literal arguments a parameter lists, and of those the ones it takes alone: `"keyPressed"`
 /// is listed by `"keyPressed"|"keyReleased"|string` too, but only `action: "keyPressed"` pins it.
-/// Then the arguments of a known kind whose parameter declares the kinds it takes.
+/// `classes` scores the arguments of a class by their parameters, as `class_match` does, so
+/// `fun(x: vector3)` wins over `fun(x: vector2)` for a `vector3`. Then the arguments of a known kind
+/// whose parameter declares the kinds it takes.
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Literals {
     listed: usize,
     pinned: usize,
+    classes: usize,
     typed: usize,
 }
 
@@ -3752,6 +3756,7 @@ impl<'a> Infer<'a> {
                 literals.typed += 1;
             }
             let Some(given) = given else { continue };
+            literals.classes += self.class_match(fun, &param.ty, given, 0);
             match self.literal_fit(fun, &param.ty, given, 0) {
                 Some(true) => {
                     literals.listed += 1;
@@ -3877,6 +3882,52 @@ impl<'a> Infer<'a> {
                 kinds
             }
         })
+    }
+
+    /// How closely a parameter of type `param` names the class of an argument of type `given`: 2 when
+    /// it names that class and 1 when it names one of its parents, through aliases and unions, and 0
+    /// when it names neither or `given` is no class.
+    fn class_match(&self, fun: &FunType, param: &Type, given: &Type, depth: u32) -> usize {
+        let Type::Named(class, _) = given else { return 0 };
+        if depth > 8 || self.index.class(class, self.side).is_none() {
+            return 0;
+        }
+        match param {
+            Type::Named(name, _) if name == class => 2,
+            Type::Named(name, _) if self.index.class(name, self.side).is_some() => {
+                usize::from(self.class_extends(class, name))
+            }
+            Type::Named(..) => match self.resolve_alias(param) {
+                Type::Named(..) => 0,
+                resolved => self.class_match(fun, &resolved, given, depth + 1),
+            },
+            Type::Union(types) => {
+                types.iter().map(|part| self.class_match(fun, part, given, depth + 1)).max().unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+
+    /// Whether the class `class` extends `ancestor` through the parents its declarations list.
+    fn class_extends(&self, class: &str, ancestor: &str) -> bool {
+        let mut visited: FxHashSet<SmolStr> = FxHashSet::default();
+        let mut pending = vec![SmolStr::new(class)];
+        while let Some(name) = pending.pop() {
+            if name == ancestor {
+                return true;
+            }
+            if visited.len() > 64 || !visited.insert(name.clone()) {
+                continue;
+            }
+            for (_, def) in self.index.class_defs(&name) {
+                for parent in &def.parent_types {
+                    if let Type::Named(parent, _) = parent {
+                        pending.push(SmolStr::new(parent.as_str()));
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// A name `fun` declares with `@generic`, or a short one such as `T` that is neither a class nor

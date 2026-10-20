@@ -17138,3 +17138,53 @@ print(position, whole, from, to, letter, after, plainFrom, plainTo, escaped, dyn
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
 }
+
+#[test]
+fn overloads_are_picked_by_the_class_of_the_arguments() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param x number
+---@return number
+---@overload fun(x: vector2): vector2
+---@overload fun(x: vector3): vector3
+---@overload fun(x: vector4): vector4
+local function absolute(x) return x end
+
+---@class Probe.Plain
+---@field a number
+
+---@class Probe.Other
+---@field a number
+
+---@class Probe.Child : Probe.Other
+
+---@param x Probe.Plain
+---@return Probe.Plain
+---@overload fun(x: Probe.Other): Probe.Other
+local function pick(x) return x end
+
+---@type Probe.Other
+local other = { a = 1 }
+---@type Probe.Child
+local child = { a = 1 }
+local fromThree = absolute(vector3(1, 2, 3))
+local fromFour = absolute(vector4(1, 2, 3, 4))
+local fromNumber = absolute(2)
+local fromOther = pick(other)
+local fromChild = pick(child)
+print(fromThree, fromFour, fromNumber, fromOther, fromChild)
+";
+    client.open_with(CLIENT, text);
+    let hovers = [
+        ("fromThree =", "local fromThree: vector3"),
+        ("fromFour =", "local fromFour: vector4"),
+        ("fromNumber =", "local fromNumber: number"),
+        ("fromOther =", "local fromOther: Probe.Other"),
+        ("fromChild =", "local fromChild: Probe.Other"),
+    ];
+    for (needle, expected) in hovers {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
