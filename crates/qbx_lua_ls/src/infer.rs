@@ -2261,7 +2261,9 @@ impl<'a> Infer<'a> {
                 Type::Unknown
             };
         }
-        self.expr(first).as_fun().and_then(|f| f.returns.get(index).cloned()).unwrap_or_default()
+        // The loop ends when the iterator returns `nil` first, so the first variable never holds it,
+        // and lua-language-server leaves it out of the others too.
+        self.expr(first).as_fun().and_then(|f| f.returns.get(index).map(Type::without_nil)).unwrap_or_default()
     }
 
     /// `pairs({ 'male', 'female' })`: nothing else can reach a table built in the call, so its keys

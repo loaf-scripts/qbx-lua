@@ -17267,3 +17267,26 @@ print(fromNumbers, fromVectors)
         assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
     }
 }
+
+#[test]
+fn variables_of_a_for_in_loop_leave_out_the_nil_that_ends_it() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@return fun(): string?, integer?
+local function iterate() return function() end end
+---@param i integer
+local function takesInteger(i) print(i) end
+for line, count in iterate() do
+    print(line:upper())
+    takesInteger(count)
+end
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [("line, count", "line: string\n"), ("count in", "count: integer\n")] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let codes = ["param-type-mismatch", "need-check-nil"];
+    assert_eq!(findings(&mut client, CLIENT, &codes), [], "as lua-language-server reads them");
+}
