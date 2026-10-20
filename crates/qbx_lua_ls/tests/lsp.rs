@@ -15879,6 +15879,61 @@ fn enter_continues_and_clears_annotation_lines() {
 }
 
 #[test]
+fn glm_functions_return_what_the_runtime_returns() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param n number
+local function takesNumber(n) print(n) end
+---@param b boolean
+local function takesBoolean(b) print(b) end
+takesNumber(glm.abs(-2))
+takesNumber(glm.clamp(5, 0, 1))
+takesNumber(glm.mix(0, 10, 0.5))
+takesNumber(glm.cross(vector2(1, 0), vector2(0, 1)))
+takesBoolean(glm.approx(1, 1.0, 0.1))
+takesBoolean(glm.isnan(1))
+local q = quat(1, 0, 0, 0)
+local m = glm.mat4(1)
+local clamped = glm.clamp(vector3(1, 2, 3), 0, 1)
+local crossed = glm.cross(q, q)
+local product = m * m
+local moved = m * vector3(1, 2, 3)
+local zone = q * glm.polygon.new({ vector3(0, 0, 0), vector3(1, 0, 0), vector3(1, 1, 0) })
+local corner = zone[1]
+local turned = q * vector4(1, 2, 3, 4)
+local root = glm.sqrt(4)
+local floored = glm.floor(1.5)
+local absolute = glm.abs(-2)
+print(clamped, crossed, product, moved, corner, zone:contains(vector3(0, 0, 0)), turned, root, floored, absolute)
+glm.uaddCarry(1, 2)
+";
+    client.open_with(CLIENT, text);
+    let hovers = [
+        ("clamped =", "local clamped: vector3"),
+        ("crossed =", "local crossed: quat"),
+        ("product =", "local product: matrix"),
+        ("moved =", "local moved: vector3"),
+        ("zone =", "local zone: glm.polygon"),
+        ("corner =", "local corner: vector3"),
+        ("turned =", "local turned: vector4"),
+        ("root =", "local root: number"),
+        ("floored =", "local floored: integer"),
+        ("absolute =", "local absolute: integer"),
+    ];
+    for (needle, expected) in hovers {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (uadd, _) = pos(text, "glm.uaddCarry", 0);
+    assert_eq!(
+        client.diagnostics_for(CLIENT),
+        [("undefined-field".to_string(), uadd as u64)],
+        "the results take the kind of the arguments, and names the runtime lacks are not declared"
+    );
+}
+
+#[test]
 fn knows_glm_and_keeps_native_handle_names() {
     let mut client = Client::start(fixture_root());
     let text = client.open(CLIENT);

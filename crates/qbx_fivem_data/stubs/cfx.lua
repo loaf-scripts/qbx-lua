@@ -456,6 +456,7 @@ function promise:next(onFulfilled, onRejected) end
 ---@operator sub(vector2): vector2
 ---@operator mul(number): vector2
 ---@operator mul(vector2): vector2
+---@operator mul(matrix): vector2
 ---@operator div(number): vector2
 ---@operator div(vector2): vector2
 ---@operator unm: vector2
@@ -476,6 +477,8 @@ function promise:next(onFulfilled, onRejected) end
 ---@operator sub(vector3): vector3
 ---@operator mul(number): vector3
 ---@operator mul(vector3): vector3
+---@operator mul(quat): vector3
+---@operator mul(matrix): vector3|vector4
 ---@operator div(number): vector3
 ---@operator div(vector3): vector3
 ---@operator unm: vector3
@@ -499,6 +502,8 @@ function promise:next(onFulfilled, onRejected) end
 ---@operator sub(vector4): vector4
 ---@operator mul(number): vector4
 ---@operator mul(vector4): vector4
+---@operator mul(quat): vector4
+---@operator mul(matrix): vector4
 ---@operator div(number): vector4
 ---@operator div(vector4): vector4
 ---@operator unm: vector4
@@ -518,7 +523,9 @@ function promise:next(onFulfilled, onRejected) end
 ---@field w number
 ---@operator mul(quat): quat
 ---@operator mul(vector3): vector3
+---@operator mul(vector4): vector4
 ---@operator mul(number): quat
+---@operator mul(glm.polygon): glm.polygon
 ---@operator unm: quat
 ---@operator len: number
 
