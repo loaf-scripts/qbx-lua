@@ -4,6 +4,7 @@ use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::{Comment, SmolStr};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::env::argument_doc_anchor;
 use crate::signature::{documented, Requirement};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,7 +136,10 @@ impl<'ast> Visitor<'ast> for Collector<'_> {
                 (Some(call), Some(name)) if EVENT_REGISTRATION_CALLS.contains(&call) => {
                     let anchor = self.anchors.get(&expr.span.start).copied().unwrap_or(expr.span.start);
                     let handler = args.iter().skip(1).find_map(|arg| match &arg.kind {
-                        ExprKind::Function(func) => Some(Arity::documented(self.source, self.comments, anchor, func)),
+                        ExprKind::Function(func) => {
+                            let anchor = argument_doc_anchor(self.source, self.comments, arg.span.start, anchor);
+                            Some(Arity::documented(self.source, self.comments, anchor, func))
+                        }
                         _ => self.arity_of(arg),
                     });
                     let side = self.regions.effective(expr.span.start, self.side);

@@ -17059,3 +17059,43 @@ print(always, maybe, built, flagged)
         );
     }
 }
+
+#[test]
+fn functions_passed_below_their_own_doc_comment_take_it() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+RegisterNetEvent('unindented',
+---@param amount integer
+function(amount) print(amount) end)
+
+AddEventHandler('indented',
+    ---@param label string
+    function(label) print(label) end)
+
+---@param count integer
+RegisterNetEvent('statement', function(count) print(count) end)
+
+---@param outer string
+AddEventHandler('closest',
+    ---@param inner boolean
+    function(inner) print(inner) end)
+";
+    client.open_with(CLIENT, text);
+    client.notify(
+        "workspace/didChangeConfiguration",
+        json!({ "settings": { "qbxLua": { "diagnostics": { "rules": { "no-unknown": "warning" } } } } }),
+    );
+    let unknown = findings(&mut client, CLIENT, &["no-unknown"]);
+    assert!(unknown.is_empty(), "{unknown:?}");
+    let hovers = [
+        ("amount) print", "(parameter) amount: integer"),
+        ("label) print", "(parameter) label: string"),
+        ("count) print", "(parameter) count: integer"),
+        ("inner) print", "(parameter) inner: boolean"),
+    ];
+    for (needle, expected) in hovers {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}

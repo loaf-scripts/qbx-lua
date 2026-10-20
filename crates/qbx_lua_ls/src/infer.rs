@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use lsp_types::Range;
 use qbx_fivem_data::{native, Side};
-use qbx_lua_analysis::env::leading_doc_lines;
+use qbx_lua_analysis::env::{argument_doc_anchor, leading_doc_lines};
 use qbx_lua_analysis::scope::{LocalId, LocalKind, Resolution, Resolved};
 use qbx_lua_analysis::side_guard::SideRegions;
 use qbx_lua_syntax::ast::*;
-use qbx_lua_syntax::{CommentKind, NumberValue, SmolStr, Span};
+use qbx_lua_syntax::{Comment, CommentKind, NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::callback_wrappers::{self, Wrapper};
@@ -177,6 +177,7 @@ impl<'a> FileContext<'a> {
     pub fn new(file: FileId, source: &'a str, chunk: &'a Chunk, resolution: &'a Resolution) -> Self {
         let mut collector = DeclCollector {
             source,
+            comments: &chunk.comments,
             decls: FxHashMap::default(),
             call_anchors: FxHashMap::default(),
             tables: FxHashMap::default(),
@@ -296,10 +297,13 @@ impl<'a> FileContext<'a> {
         }
     }
 
-    /// Where the doc comment of the functions passed to a call is read: the start of the call, or
-    /// of the `x = f(...)` or `local x = f(...)` statement the call is the value of.
-    pub fn call_doc_anchor(&self, call_start: u32) -> u32 {
-        self.call_anchors.get(&call_start).copied().unwrap_or(call_start)
+    /// Where the doc comment of a function passed to a call is read: right above the argument at
+    /// `arg_start`, when the function starts a line of its own below `---` lines, or else at the
+    /// start of the call, or of the `x = f(...)` or `local x = f(...)` statement the call is the
+    /// value of.
+    pub fn arg_doc_anchor(&self, arg_start: u32, call_start: u32) -> u32 {
+        let anchor = self.call_anchors.get(&call_start).copied().unwrap_or(call_start);
+        argument_doc_anchor(self.source, &self.chunk.comments, arg_start, anchor)
     }
 
     pub fn local_owner_key(&self, decl_start: u32) -> SmolStr {
@@ -315,6 +319,7 @@ impl<'a> FileContext<'a> {
 
 struct DeclCollector<'a> {
     source: &'a str,
+    comments: &'a [Comment],
     decls: FxHashMap<u32, Decl<'a>>,
     call_anchors: FxHashMap<u32, u32>,
     tables: FxHashMap<u32, Expected<'a>>,
@@ -547,7 +552,11 @@ impl<'a> DeclCollector<'a> {
         for (arg_index, arg) in args.iter().enumerate() {
             let at = Expected::Arg { call, arg_index };
             match &arg.kind {
-                ExprKind::Function(func) => self.func(func, Some(doc_anchor.unwrap_or(call.span.start)), Some(at)),
+                ExprKind::Function(func) => {
+                    let anchor = doc_anchor.unwrap_or(call.span.start);
+                    let anchor = argument_doc_anchor(self.source, self.comments, arg.span.start, anchor);
+                    self.func(func, Some(anchor), Some(at))
+                }
                 _ => self.value(arg, None, at),
             }
         }

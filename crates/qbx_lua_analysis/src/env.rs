@@ -149,6 +149,18 @@ pub fn leading_doc_lines<'a>(source: &'a str, comments: &[Comment], offset: u32)
     lines
 }
 
+/// Where the doc comment of a function passed to a call is read: the `---` lines right above the
+/// argument at `arg_start`, when the function starts a line of its own below them, as
+/// lua-language-server binds them, or else those above `anchor`, the call or the statement it is
+/// the value of.
+pub fn argument_doc_anchor(source: &str, comments: &[Comment], arg_start: u32, anchor: u32) -> u32 {
+    if leading_doc_lines(source, comments, arg_start).is_empty() {
+        anchor
+    } else {
+        arg_start
+    }
+}
+
 /// Runs of adjacent `---` line comments, each one annotation block. Like LuaLS, other comments
 /// inside a run are passed over; a blank line or code ends it.
 pub fn doc_blocks<'c>(source: &str, comments: &'c [Comment]) -> Vec<Vec<&'c Comment>> {

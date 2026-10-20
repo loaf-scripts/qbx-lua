@@ -1012,7 +1012,7 @@ impl<'a> Indexer<'a> {
     fn handler_type(&self, arg: &Expr, offset: u32) -> Option<Arc<FunType>> {
         match &arg.kind {
             ExprKind::Function(func) => {
-                let anchor = self.ctx.call_doc_anchor(offset);
+                let anchor = self.ctx.arg_doc_anchor(arg.span.start, offset);
                 Some(Arc::new(self.infer.fun_type(func, Some(anchor), false)))
             }
             ExprKind::Name(name) => {
@@ -1087,13 +1087,13 @@ impl<'a> Indexer<'a> {
                 args.get(1).filter(|_| kind == EventKind::Callback).and_then(|arg| self.handler_type(arg, offset));
             (handler, None)
         } else {
-            let anchor = self.ctx.call_doc_anchor(offset);
             let found = args.iter().skip(1).find_map(|arg| match &arg.kind {
-                ExprKind::Function(func) => Some((func, Arc::new(self.infer.fun_type(func, None, false)))),
+                ExprKind::Function(func) => Some((arg, func, Arc::new(self.infer.fun_type(func, None, false)))),
                 _ => None,
             });
             match found {
-                Some((func, handler)) => {
+                Some((arg, func, handler)) => {
+                    let anchor = self.ctx.arg_doc_anchor(arg.span.start, offset);
                     let arity = Arity::documented(self.ctx.source, &self.ctx.chunk.comments, anchor, func);
                     (Some(handler), Some(arity))
                 }

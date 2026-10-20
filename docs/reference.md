@@ -1144,7 +1144,9 @@ values, as `{ [unknown]: unknown }` does. Without one, a parameter that
 only takes `any` from the `...` of the `fun(...)` its function is passed as, like the handler of
 `RegisterNetEvent`, counts as untyped, and so does the `data` of a `RegisterNUICallback` handler,
 which only the resource's own UI decides. Its `---@param` goes above the statement that makes the
-call, whether that is the call alone or `handlers[name] = RegisterNetEvent(name, function(id) end)`.
+call, whether that is the call alone or `handlers[name] = RegisterNetEvent(name, function(id) end)`,
+or right above the function when the function starts a line of its own inside the call, as
+lua-language-server reads it.
 A function written in a table takes the `---@param` lines above its field, and the parameter
 types of the field's `fun(...)` when the table has a declared type: the `---@type` above its
 `local`, the type of the parameter it is passed for, or `metatable` for the second argument of

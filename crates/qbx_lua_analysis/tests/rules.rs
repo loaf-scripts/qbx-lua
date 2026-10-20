@@ -134,6 +134,13 @@ fn events_are_checked_against_their_handlers() {
          RegisterNetEvent('clothes:named', load)",
     );
     assert_eq!(project("TriggerClientEvent('clothes:named', -1, true)", Side::Server, &[named]), Vec::<&str>::new());
+    // The doc comment right above a handler that starts its own line is the handler's.
+    let inline = (
+        Some(Side::Client),
+        "RegisterNetEvent('clothes:inline',\n    ---@param reset boolean\n    ---@param model? string\n    \
+         function(reset, model) print(reset, model) end)",
+    );
+    assert_eq!(project("TriggerClientEvent('clothes:inline', -1, true)", Side::Server, &[inline]), Vec::<&str>::new());
 }
 
 #[test]
