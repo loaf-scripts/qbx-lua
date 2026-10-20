@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use qbx_fivem_data::{native, Side};
+use qbx_fivem_data::{native, Native, Side};
 use qbx_lua_syntax::ast::{Expr, ExprKind, FuncBody, Name};
 use qbx_lua_syntax::{Comment, SmolStr};
 use qbx_luacats::luacats::{parse_doc_lines, DocGroup};
@@ -53,24 +53,29 @@ pub fn undocumented(func: &FuncBody, is_method: bool) -> Arc<FunType> {
 /// global function: the signature of a function of the stubs or of a native, `Some(None)` for another
 /// runtime value, and `None` where the runtime defines nothing.
 pub fn runtime_definition(path: &str, side: Option<Side>) -> Option<Option<Arc<FunType>>> {
-    if let Some(fun) = builtins().function(path) {
+    if let Some(fun) = builtins().functions(path, side).next() {
         return Some(Some(fun.clone()));
     }
     if let Some(native) = native(path) {
-        let params = native.on(side).params();
-        let params = params.map(|(name, ty, optional)| Param {
-            name: name.into(),
-            ty: parse_type(ty),
-            optional,
-            ..Param::default()
-        });
-        return Some(Some(Arc::new(FunType { params: params.collect(), ..FunType::default() })));
+        return Some(Some(native_signature(native.on(side))));
     }
     let defined = match path.split_once('.') {
         Some((table, field)) => builtins().get(table).is_some_and(|global| global.fields.contains(field)),
         None => builtins().get(path).is_some(),
     };
     defined.then_some(None)
+}
+
+/// The parameters of a native, as the native data declares them, for counting the arguments a call
+/// passes.
+pub fn native_signature(native: Native) -> Arc<FunType> {
+    let params = native.params().map(|(name, ty, optional)| Param {
+        name: name.into(),
+        ty: parse_type(ty),
+        optional,
+        ..Param::default()
+    });
+    Arc::new(FunType { params: params.collect(), ..FunType::default() })
 }
 
 /// The variable an `a.b.c` or `a['b']` chain starts from, and the field names after it.

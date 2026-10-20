@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use qbx_fivem_data::{native, Native, Side};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::{SmolStr, Span};
@@ -9,13 +10,13 @@ use rustc_hash::FxHashMap;
 
 use super::crossfile::{passed_count, plural};
 use super::{FileInput, Sink};
-use crate::env::leading_doc_lines;
+use crate::env::{builtins, leading_doc_lines};
 use crate::project::ResourceEnv;
 use crate::rules;
 use crate::scope::{LocalId, LocalKind, Resolved};
 use crate::side_guard::SideRegions;
 use crate::signature::{
-    defined, global_key, member_path, most_arguments, runtime_definition, undocumented, Requirement,
+    defined, global_key, member_path, most_arguments, native_signature, runtime_definition, undocumented, Requirement,
 };
 
 /// Every value assigned to a local or to a field of a local table, by local and dotted field path.
@@ -89,10 +90,16 @@ impl<'i, 'a> Callees<'i, 'a> {
             Resolved::Global(_) => {
                 let path = global_key(&root.text, fields)?;
                 let mut defs: Vec<_> = self.env().function_defs(&path, side).map(|def| def.cloned()).collect();
-                // What the runtime and `---@extend` lines define counts beside the definitions, so a
-                // native or a function the resource does not define keeps the signatures it has.
-                if !defs.is_empty() {
+                // What the runtime defines counts beside the definitions, so a native or a runtime
+                // function keeps the signatures it has, and alone where the workspace defines nothing.
+                if defs.is_empty() {
+                    defs = self.runtime_defs(&path, side);
+                } else {
                     defs.extend(runtime_definition(&path, side));
+                }
+                // What `---@extend` lines add counts beside the definitions, so a native or a
+                // function the resource does not define keeps the signatures it has.
+                if !defs.is_empty() {
                     defs.extend(self.env().extension_defs(&path, side).map(|fun| Some(fun.clone())));
                 }
                 defs
@@ -108,6 +115,19 @@ impl<'i, 'a> Callees<'i, 'a> {
             })
             .collect();
         (!signatures.is_empty()).then_some(signatures)
+    }
+
+    /// The signatures of the runtime function at `path` that the workspace does not define: those
+    /// its stub declares, such as the `n` that `string.rep` requires, and with `strict` those of the
+    /// native of that name. Scripts leave out trailing native arguments, which FiveM passes as nil,
+    /// so natives are only checked in strict mode.
+    fn runtime_defs(&self, path: &str, side: Option<Side>) -> Vec<Option<Arc<FunType>>> {
+        let stubs: Vec<_> = builtins().functions(path, side).map(|fun| Some(fun.clone())).collect();
+        if !stubs.is_empty() || !self.input.config.strict() {
+            return stubs;
+        }
+        let available = |found: &Native| found.side.is_available_on(side.unwrap_or(Side::Shared));
+        native(path).filter(available).map(|found| vec![Some(native_signature(found.on(side)))]).unwrap_or_default()
     }
 
     /// The function types that the functions `call` may run declare for its argument at

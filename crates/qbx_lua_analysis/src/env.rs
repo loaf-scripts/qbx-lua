@@ -21,8 +21,9 @@ pub struct BuiltinGlobal {
 #[derive(Debug, Default)]
 pub struct Builtins {
     globals: FxHashMap<SmolStr, BuiltinGlobal>,
-    /// The signatures of the functions the stubs declare, by dotted path, such as `os.time`.
-    functions: FxHashMap<SmolStr, Arc<FunType>>,
+    /// The signatures of the functions the stubs define, by dotted path such as `string.rep`, with
+    /// the side of the stub of each.
+    functions: FxHashMap<SmolStr, Vec<(Side, Arc<FunType>)>>,
 }
 
 /// Library tables whose field set is fully known, so reading anything else is a bug.
@@ -47,9 +48,12 @@ impl Builtins {
         self.globals.iter()
     }
 
-    /// The signature the stubs declare for the runtime function at the dotted `path`.
-    pub fn function(&self, path: &str) -> Option<&Arc<FunType>> {
-        self.functions.get(path)
+    /// The signatures that the stubs of code on `side` declare for the function at `path`, such as
+    /// `string.rep` or `print`.
+    pub fn functions(&self, path: &str, side: Option<Side>) -> impl Iterator<Item = &Arc<FunType>> {
+        let script_side = side.unwrap_or(Side::Shared);
+        let defined = self.functions.get(path).into_iter().flatten();
+        defined.filter(move |(stub_side, _)| stub_side.is_available_on(script_side)).map(|(_, fun)| fun)
     }
 
     fn entry(&mut self, name: &SmolStr, side: Side, library: bool) -> &mut BuiltinGlobal {
@@ -76,7 +80,7 @@ impl Builtins {
                     let fields: Vec<&str> = name.path.iter().chain(&name.method).map(|n| n.text.as_str()).collect();
                     if let Some(path) = global_key(&name.base.text, &fields) {
                         let signature = defined(source, &chunk.comments, stmt.span.start, func, name.method.is_some());
-                        self.functions.entry(path).or_insert(signature);
+                        self.functions.entry(path).or_default().push((stub.side, signature));
                     }
                 }
                 StmtKind::Assign { targets, .. } => {

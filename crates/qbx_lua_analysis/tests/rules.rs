@@ -2041,3 +2041,36 @@ fn whitespace_at_the_end_of_lines() {
         "local a = 1\nlocal b = 2\n\n-- comment  \nlocal s = [[x  \ny]]\nprint(a, b, s) --[[ c ]]\r\nprint(1)"
     );
 }
+
+#[test]
+fn calls_of_runtime_functions_and_with_strict_natives_are_counted() {
+    let client = Some(Side::Client);
+    assert_eq!(
+        missing_parameters("print(string.rep())", client, &[]),
+        ["'string.rep' is called with 0 arguments, but needs 2; 's' (string|number) will be nil"]
+    );
+    assert_eq!(
+        redundant_parameters("print(string.upper('a', 'b'))", client, &[]),
+        ["'string.upper' is called with 2 arguments, but takes at most 1"]
+    );
+    let natives = "print(GetEntityCoords())\nSetEntityCoords(1, 1.0, 2.0, 3.0)";
+    assert_eq!(missing_parameters(natives, client, &[]), Vec::<String>::new(), "scripts leave out native arguments");
+    let strict = {
+        let mut config = FileConfig::default();
+        config.set_strict_default(true);
+        config
+    };
+    assert_eq!(
+        call_messages_with("missing-parameter", natives, client, &[], &strict),
+        [
+            "'GetEntityCoords' is called with 0 arguments, but needs 2; 'entity' (Entity) will be nil",
+            "'SetEntityCoords' is called with 4 arguments, but needs 8; 'alive' (boolean) will be nil",
+        ]
+    );
+    let defined = [(client, "function GetEntityCoords() end")];
+    assert_eq!(
+        call_messages_with("missing-parameter", "print(GetEntityCoords())", client, &defined, &strict),
+        Vec::<String>::new(),
+        "a resource's own definition replaces the native"
+    );
+}

@@ -357,6 +357,9 @@ With `strict`:
   [Return values](#return-values).
 - `unreachable-code` reports the code after a call of `error` or `os.exit` of its own, as
   TypeScript reports the code after a `throw`.
+- `missing-parameter` and `redundant-parameter` also count the arguments of natives, as
+  `SetEntityCoords(ped, x, y, z)` leaves out four. FiveM passes `nil` for those, which scripts rely
+  on, so they are only reported in strict mode.
 - `cast-local-type` reports clearing a local declared with a table, as `cache = nil` after
   `local cache = {}`, the `nil` or `false` of a field, as in `total = counter.count`, and a `nil`
   that no annotation declares, such as one a function without `@return` gives. It
