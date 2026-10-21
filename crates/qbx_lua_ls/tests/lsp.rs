@@ -17540,3 +17540,31 @@ print(viaParam, viaTyped)
     let found = findings(&mut client, CLIENT, &["param-type-mismatch"]);
     assert!(found.is_empty(), "as lua-language-server narrows them: {found:?}");
 }
+
+#[test]
+fn methods_take_the_self_their_doc_comment_declares() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Zone
+---@field init? fun(self: Probe.Zone)
+local Zone = {}
+
+---@class Probe.ClientZone : Probe.Zone
+---@field extra number
+
+---@param zone Probe.ClientZone
+local function register(zone) print(zone) end
+
+---@param self Probe.ClientZone
+function Zone:init()
+    register(self)
+end
+print(Zone)
+";
+    client.open_with(CLIENT, text);
+    let (l, c) = pos(text, "self)\nend", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("self: Probe.ClientZone"), "{hover}");
+    let found = findings(&mut client, CLIENT, &["param-type-mismatch"]);
+    assert!(found.is_empty(), "as lua-language-server reads `---@param self`: {found:?}");
+}

@@ -345,11 +345,14 @@ impl<'a> Indexer<'a> {
     fn own_self_type(&self, expr: &Expr) -> Option<Type> {
         let ExprKind::Name(name) = &expr.kind else { return None };
         let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(name.span.start) else { return None };
-        let Some(crate::infer::Decl::SelfParam { name: method }) =
+        let Some(crate::infer::Decl::SelfParam { name: method, doc_anchor }) =
             self.ctx.decl(self.ctx.resolution.local(id).decl.start)
         else {
             return None;
         };
+        if let Some(declared) = self.infer.declared_self(*doc_anchor) {
+            return Some(declared);
+        }
         if !self.is_global(&method.base) {
             return None;
         }

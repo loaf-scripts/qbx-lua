@@ -117,7 +117,7 @@ pub enum Decl<'a> {
     Local { stmt: &'a Stmt, index: usize },
     LocalFunction { stmt: &'a Stmt, func: &'a FuncBody },
     Param { func: &'a FuncBody, index: usize, doc_anchor: Option<u32>, expected: Option<Expected<'a>> },
-    SelfParam { name: &'a FuncName },
+    SelfParam { name: &'a FuncName, doc_anchor: u32 },
     NumericFor,
     GenericFor { stmt: &'a Stmt, index: usize },
 }
@@ -375,7 +375,7 @@ impl<'a> DeclCollector<'a> {
             }
             StmtKind::Function { name, func } => {
                 if name.method.is_some() {
-                    self.decls.insert(func.params_span.start, Decl::SelfParam { name });
+                    self.decls.insert(func.params_span.start, Decl::SelfParam { name, doc_anchor: stmt.span.start });
                 }
                 self.func(func, anchor, Some(Expected::Member { stmt }));
             }
@@ -1519,7 +1519,9 @@ impl<'a> Infer<'a> {
         let local = self.ctx.resolution.local(id);
         if local.kind == LocalKind::ImplicitSelf {
             return match self.ctx.decl(local.decl.start) {
-                Some(Decl::SelfParam { name }) => self.self_type(name),
+                Some(Decl::SelfParam { name, doc_anchor }) => {
+                    self.declared_self(*doc_anchor).unwrap_or_else(|| self.self_type(name))
+                }
                 _ => Type::Unknown,
             };
         }
@@ -1549,7 +1551,9 @@ impl<'a> Infer<'a> {
                 }
                 expected.as_ref().and_then(|e| self.expected_param(e, *index)).unwrap_or_default()
             }
-            Decl::SelfParam { name } => self.self_type(name),
+            Decl::SelfParam { name, doc_anchor } => {
+                self.declared_self(*doc_anchor).unwrap_or_else(|| self.self_type(name))
+            }
             Decl::NumericFor => Type::Number,
             Decl::GenericFor { stmt, index } => self.for_in_type(stmt, *index),
         }
@@ -2251,6 +2255,14 @@ impl<'a> Infer<'a> {
     /// The class that `self` stands for in the doc comment of the statement at `anchor`, for `func`.
     fn doc_self_at(&self, anchor: u32, func: &FuncBody) -> Type {
         statement_at(self.ctx.chunk, anchor).map_or(Type::Unknown, |stmt| self.doc_self(stmt, func))
+    }
+
+    /// The type that the `---@param self` line of the doc comment at `anchor` gives the `self` of a
+    /// method, as `---@param self LoafWrapperClientZone` above `function Zone:_InitClientZone()` does,
+    /// whatever type the table it is defined on, or a field it is defined for, gives it.
+    pub(crate) fn declared_self(&self, anchor: u32) -> Option<Type> {
+        let doc = self.ctx.doc_at(anchor);
+        doc.params.iter().find(|param| param.name == "self").map(|param| param.ty.clone())
     }
 
     /// The type of the `self` of a function defined with `:`: a value of the table it is defined on,
