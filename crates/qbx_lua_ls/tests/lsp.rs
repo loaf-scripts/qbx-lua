@@ -9945,6 +9945,61 @@ if inside == 1 or IsPedInAnyVehicle(ped, false) == true then return end
 }
 
 #[test]
+fn messages_show_the_literal_types_that_declarations_give() {
+    let mut client = Client::start(fixture_root());
+    let text = "\n---@param flag boolean
+local function toggle(flag) end
+---@return 1|false
+local function wrapped() return false end
+---@type 'a'|'b'
+local letter = 'a'
+toggle(wrapped())
+local held = wrapped()
+toggle(held)
+toggle(letter)
+toggle(5)
+---@type boolean
+local stored = wrapped()
+---@return boolean
+local function give() return letter end
+local flag = false
+flag = wrapped()
+print(stored, give, flag)
+";
+    client.open_with(CLIENT, text);
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |code: &str, needle: &str, message: &str| (code.to_string(), line(needle), message.to_string());
+    let param = |needle: &str, shown: &str| {
+        finding(
+            "param-type-mismatch",
+            needle,
+            &format!("Cannot assign `{shown}` to parameter `flag` of type `boolean`"),
+        )
+    };
+    assert_eq!(
+        findings(
+            &mut client,
+            CLIENT,
+            &["param-type-mismatch", "assign-type-mismatch", "return-type-mismatch", "cast-local-type"]
+        ),
+        [
+            param("toggle(wrapped())", "1|false"),
+            param("toggle(held)", "1|false"),
+            param("toggle(letter)", "\"a\"|\"b\""),
+            // As lua-language-server shows it, a literal written out is shown as its kind.
+            param("toggle(5)", "integer"),
+            finding("assign-type-mismatch", "local stored", "Cannot assign `1|false` to `stored` of type `boolean`"),
+            finding(
+                "return-type-mismatch",
+                "function give",
+                "Cannot return `\"a\"|\"b\"` as return value #1 of type `boolean`"
+            ),
+            finding("cast-local-type", "flag = wrapped", "Cannot assign `1|false` to `flag`, defined as `boolean`"),
+        ]
+    );
+}
+
+#[test]
 fn literals_in_locals_count_by_their_kind_and_negation_by_its_operand() {
     let mut client = Client::start(fixture_root());
     let text = "\

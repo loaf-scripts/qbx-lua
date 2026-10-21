@@ -30,7 +30,7 @@ use qbx_lua_syntax::Span;
 use rustc_hash::FxHashMap;
 
 use super::arguments::reads_field;
-use super::class_tables::Classes;
+use super::class_tables::{reads_declaration, Classes};
 use super::comparisons::Declared;
 use super::unknown_types::{has_param_line, value_at};
 use crate::infer::{Decl, Expected, Infer};
@@ -165,8 +165,8 @@ impl Finder<'_, '_> {
     }
 
     /// Reports `given`, written at `span`, when the local that `target` names does not take it.
-    /// `native` tells whether a native gives it.
-    fn check(&mut self, target: &Expr, given: Type, native: bool, span: Span) {
+    /// `native` tells whether a native gives it, and `value` is the expression that gives it.
+    fn check(&mut self, target: &Expr, given: Type, native: bool, value: Option<&Expr>, span: Span) {
         let ExprKind::Name(name) = &target.kind else { return };
         let Some(Resolved::Local(id)) = self.infer.ctx.resolution.resolve_at(name.span.start) else { return };
         let Some((expected, declared_by_native)) = self.local_type(id) else { return };
@@ -189,7 +189,12 @@ impl Finder<'_, '_> {
         if parts.iter().all(|part| takes_part(part) || clears_table(part)) {
             return;
         }
-        let shown = if self.classes.literal_mismatch(&expected, from, &given) { given } else { given.widen() };
+        // A value that a declaration gives reads as declared, as in the type mismatch rules.
+        let declared = value.is_some_and(|value| reads_declaration(value) && self.declared.of(value) == given);
+        let shown = match declared || self.classes.literal_mismatch(&expected, from, &given) {
+            true => given,
+            false => given.widen(),
+        };
         self.out.push((span, format!("Cannot assign `{shown}` to `{}`, defined as `{expected}`", name.text)));
     }
 
@@ -267,18 +272,18 @@ impl<'c> Visitor<'c> for Finder<'_, '_> {
                     // A `---@type` above the assignment declares what it stores, as lua-language-server
                     // reads it, and `assign-type-mismatch` checks the value against it.
                     match doc.type_at(index).filter(|_| doc.declared_class().is_none()) {
-                        Some(annotated) => self.check(target, annotated.clone(), false, span),
+                        Some(annotated) => self.check(target, annotated.clone(), false, None, span),
                         None => {
                             let native = self.is_native_value(exprs, index);
                             let given = self.checked_value(exprs, index, given);
-                            self.check(target, given, native, span);
+                            self.check(target, given, native, value_at(exprs, index), span);
                         }
                     }
                 }
             }
             StmtKind::CompoundAssign { target, .. } => {
                 if let Some(given) = self.compound_value(target) {
-                    self.check(target, given, false, stmt.span);
+                    self.check(target, given, false, None, stmt.span);
                 }
             }
             _ => {}

@@ -826,12 +826,14 @@ impl<'a, 'b> Classes<'a, 'b> {
         parts.into_iter().find(|part| self.rejects(expected, from, part))
     }
 
-    /// How a message shows `given`, of which `expected` rejects `part`: as it is written when `part`
-    /// is a literal that `expected` does not list, like the `'c'` of `'a'|'c'`, and widened to its
-    /// kinds otherwise. A list that a local holds reads as one, as `integer[]` for `{ 1, 2 }`, as a
-    /// hover shows it.
-    pub fn shown(&self, expected: &Type, from: FileId, given: &Type, part: &Type) -> Type {
-        let shown = match self.literal_mismatch(expected, from, part) {
+    /// How a message shows `given`, the type of `value`, of which `expected` rejects `part`: as it is
+    /// written when a declaration gives it, as lua-language-server shows the `1|false` that a
+    /// function returns, or when `part` is a literal that `expected` does not list, like the `'c'`
+    /// of `'a'|'c'`, and widened to its kinds otherwise, as the `5` of `needsString(5)` is an
+    /// `integer`. A list that a local holds reads as one, as `integer[]` for `{ 1, 2 }`, as a hover
+    /// shows it.
+    pub fn shown(&self, expected: &Type, from: FileId, given: &Type, part: &Type, value: Option<&Expr>) -> Type {
+        let shown = match value.is_some_and(reads_declaration) || self.literal_mismatch(expected, from, part) {
             true => given.clone(),
             false => given.widen(),
         };
@@ -957,6 +959,20 @@ impl<'a, 'b> Classes<'a, 'b> {
             other => out.push(other),
         }
     }
+}
+
+/// Whether the type of `value` is what a declaration gives it rather than what it writes out: a
+/// name, a field or a call, as against a literal, an operator or a table constructor.
+pub fn reads_declaration(value: &Expr) -> bool {
+    matches!(
+        value.unparen().kind,
+        ExprKind::Name(_)
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::Vararg
+    )
 }
 
 /// `given`, the type of the `value` that an assignment stores or a `return` returns, as
@@ -1230,7 +1246,7 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
         let given = checked_value(infer, Some(value), given);
         let given = if removes { given.without_nil() } else { given };
         if let Some(part) = classes.rejected_part_of(&ty, file, &given, Some(value)) {
-            let shown = classes.shown(&ty, file, &given, &part);
+            let shown = classes.shown(&ty, file, &given, &part, Some(value));
             out.push((value.span, format!("Cannot assign `{shown}` to {target} of type `{ty}`")));
         }
     };

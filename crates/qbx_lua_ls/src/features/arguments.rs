@@ -432,7 +432,7 @@ fn native_mismatch(classes: &Classes, param: &Param, arg: &Expr, given: &Type, s
     classes.flatten(&given, from, &mut parts, 0);
     let rejected = |part: &&Type| **part != Type::Nil && !converts(part) && classes.rejects(expected, from, part);
     let part = parts.iter().find(rejected)?;
-    let shown = classes.shown(expected, from, &given, part);
+    let shown = classes.shown(expected, from, &given, part, Some(arg));
     Some(format!("Cannot assign `{shown}` to parameter `{}` of type `{expected}`", param.name))
 }
 
@@ -458,7 +458,7 @@ fn rejected(classes: &Classes, param: &Param, given: &Type, arg: Option<&Expr>) 
         return None;
     }
     let part = classes.rejected_part_of(expected, from, given, arg)?;
-    let shown = classes.shown(expected, from, given, &part);
+    let shown = classes.shown(expected, from, given, &part, arg);
     Some(format!("Cannot assign `{shown}` to parameter `{}` of type `{expected}`", param.name))
 }
 

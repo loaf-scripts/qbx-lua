@@ -74,7 +74,7 @@ fn mismatches(classes: &Classes, returns: &[Type], values: &[(Type, Span)], expr
     for (i, (given, span)) in values.iter().enumerate() {
         let Some(expected) = expected_at(returns, i) else { break };
         if let Some(part) = classes.rejected_part_of(expected, classes.file(), given, value_at(exprs, i)) {
-            let shown = classes.shown(expected, classes.file(), given, &part);
+            let shown = classes.shown(expected, classes.file(), given, &part, value_at(exprs, i));
             out.push((*span, format!("Cannot return `{shown}` as return value #{} of type `{expected}`", i + 1)));
         }
     }
