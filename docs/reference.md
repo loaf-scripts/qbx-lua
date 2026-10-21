@@ -353,6 +353,15 @@ With `strict`:
   narrow fields, and so do `assign-type-mismatch` and `return-type-mismatch`. A native takes no
   number or boolean for a string parameter, also one written out or a player's server id, and
   numbers and booleans no longer pass for each other. See [Function arguments](#function-arguments).
+- A native documented as `boolean` returns what the runtime gives scripts, in hovers too. The
+  generated Lua wrappers of natives give `1` or `false` for a `BOOL` result, so
+  `IsPedInAnyVehicle(ped)` is a `1|false`, which a `boolean` parameter does not take and
+  `== true` never equals, and the integer `0` or `1` for the `BOOL` of a pointer the native fills,
+  so the `hit` of `local _, hit = GetShapeTestResult(handle)` is a `0|1`. A resource whose
+  `fxmanifest.lua` has a `use_experimental_fxv2_oal` entry, whatever its value, calls FiveM's
+  fxv2 natives instead, which give `true` or `false` for both: there they are `boolean`, and
+  `== 1` never equals them. Without `strict`, they are `boolean`, as in lua-language-server,
+  and compare with `1` as well. See [Impossible comparisons](#impossible-comparisons).
 - `assign-type-mismatch` reports `field = nil` for a field whose type does not allow `nil`. See
   [Return values](#return-values).
 - `unreachable-code` reports the code after a call of `error` or `os.exit` of its own, as
@@ -1122,7 +1131,9 @@ Only clear cases count, and the rest is left alone:
   `name = untyped(name)` does, unless a `---@cast name T` types it. `---@cast name +T` does not: it
   adds `T` to a type that is still not known, as it does for a local with no declared type.
 - Natives documented as `boolean` compared with a number. Scripts can get `1` instead of `true`
-  from them, so `IsPedInAnyVehicle(ped) == 1` is valid.
+  from them, so `IsPedInAnyVehicle(ped) == 1` is valid. With [`strict`](#strict-mode), such a
+  native returns what the runtime of its resource gives, so `== true` is reported where it gives
+  `1|false` or `0|1`, and `== 1` where the fxv2 natives give a `boolean`.
 
 ## Unknown types
 

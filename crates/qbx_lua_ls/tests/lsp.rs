@@ -9945,6 +9945,126 @@ if inside == 1 or IsPedInAnyVehicle(ped, false) == true then return end
 }
 
 #[test]
+fn natives_documented_as_boolean_return_what_their_runtime_gives_with_strict() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-native-booleans-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    let text = "\
+---@param flag boolean
+local function toggle(flag) end
+local inside = IsPedInAnyVehicle(PlayerPedId(), false)
+toggle(inside)
+if IsPedInAnyVehicle(PlayerPedId(), false) == true then return end
+if inside == 1 then return end
+-- The `BOOL` a pointer holds is an integer to the Lua wrappers.
+local _, hit = GetShapeTestResult(0)
+local _, other = GetShapeTestResult(0)
+if hit == 1 then return end
+if other == true then return end
+";
+    // The runtime only asks whether an `fxmanifest.lua` has the entry, whatever its value.
+    let resources = [
+        ("plain", "fxmanifest.lua", ""),
+        ("legacy", "__resource.lua", "use_experimental_fxv2_oal 'yes'\n"),
+        ("fxv2", "fxmanifest.lua", "use_experimental_fxv2_oal 'no'\n"),
+    ];
+    for (name, manifest, entry) in resources {
+        let dir = fixture.0.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest_text = format!("fx_version 'cerulean'\ngame 'gta5'\n{entry}client_script 'main.lua'\n");
+        std::fs::write(dir.join(manifest), manifest_text).unwrap();
+        std::fs::write(dir.join("main.lua"), text).unwrap();
+    }
+    let mut client = Client::start(fixture.0.clone());
+    let rules = ["param-type-mismatch", "impossible-comparison"];
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let finding = |code: &str, needle: &str, message: &str| (code.to_string(), line(needle), message.to_string());
+    // The hover of the native and of the local, the signature help and the completion detail.
+    let shown = |client: &mut Client, file: &str| {
+        let (l, c) = pos(text, "IsPedInAnyVehicle", 0);
+        let native = client.hover_text(file, l, c);
+        let help = client.request("textDocument/signatureHelp", client.position_params(file, l, c + 18));
+        let completion = client.request("textDocument/completion", client.position_params(file, l, c + 10));
+        let items = completion["items"].as_array().unwrap();
+        let item = items.iter().find(|item| item["label"] == "IsPedInAnyVehicle").unwrap();
+        let (l, c) = pos(text, "inside =", 0);
+        let views = [
+            native,
+            client.hover_text(file, l, c),
+            help["signatures"][0]["label"].as_str().unwrap().to_string(),
+            item["detail"].as_str().unwrap().to_string(),
+        ];
+        views.map(|view| {
+            view.replace(
+                "```lua
+", "",
+            )
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+        })
+    };
+    let views = |result: &str| {
+        [
+            format!("function IsPedInAnyVehicle(ped: Ped, atGetIn: boolean): {result}"),
+            format!("local inside: {result}"),
+            format!("IsPedInAnyVehicle(ped: Ped, atGetIn: boolean): {result}"),
+            format!("function IsPedInAnyVehicle(ped: Ped, atGetIn: boolean): {result}"),
+        ]
+    };
+    for (name, _, _) in resources {
+        client.open_with(&format!("{name}/main.lua"), text);
+    }
+
+    for (name, _, _) in resources {
+        let file = format!("{name}/main.lua");
+        assert_eq!(findings(&mut client, &file, &rules), [], "{name}: a `boolean` without strict");
+        assert_eq!(shown(&mut client, &file), views("boolean"), "{name}");
+    }
+
+    client.set_strict(true);
+    for name in ["plain", "legacy"] {
+        let file = format!("{name}/main.lua");
+        assert_eq!(
+            findings(&mut client, &file, &rules),
+            [
+                finding(
+                    "param-type-mismatch",
+                    "toggle(inside)",
+                    "Cannot assign `1|false` to parameter `flag` of type `boolean`"
+                ),
+                finding("impossible-comparison", "if IsPed", "Comparing `1|false` with `true` is always false"),
+                finding("impossible-comparison", "if other", "Comparing `0|1` with `true` is always false"),
+            ],
+            "{name}: the Lua wrapper gives `1` or `false`"
+        );
+        assert_eq!(shown(&mut client, &file), views("1|false"), "{name}");
+    }
+    assert_eq!(
+        findings(&mut client, "fxv2/main.lua", &rules),
+        [
+            finding("impossible-comparison", "if inside == 1", "Comparing `boolean` with `1` is always false"),
+            finding("impossible-comparison", "if hit", "Comparing `boolean` with `1` is always false"),
+        ],
+        "the fxv2 natives give `true` or `false`"
+    );
+    assert_eq!(shown(&mut client, "fxv2/main.lua"), views("boolean"));
+}
+
+#[test]
 fn messages_show_the_literal_types_that_declarations_give() {
     let mut client = Client::start(fixture_root());
     let text = "\n---@param flag boolean

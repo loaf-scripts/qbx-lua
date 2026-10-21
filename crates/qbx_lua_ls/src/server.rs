@@ -211,6 +211,7 @@ impl Server {
         let mut ws = Workspace::default();
         ws.roots = workspace_roots(&params);
         ws.library = settings.library.iter().map(PathBuf::from).collect();
+        ws.strict_setting = settings.diagnostics.strict;
         let snippet_support = params
             .capabilities
             .text_document
@@ -664,6 +665,7 @@ impl Server {
                 let Ok(params) = serde_json::from_value::<DidChangeConfigurationParams>(params) else { return };
                 let section = params.settings.get("qbxLua").cloned().unwrap_or(params.settings);
                 if let Ok(settings) = serde_json::from_value::<Settings>(section) {
+                    self.ws.strict_setting = settings.diagnostics.strict;
                     self.settings = settings;
                     self.workspace_stale = true;
                     self.dirty.extend(self.docs.keys().cloned());

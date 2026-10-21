@@ -79,11 +79,11 @@ impl Native {
         }
     }
 
-    /// The types of the values it returns. A `table` has the LuaCATS type of `RETURN_TYPES` where
-    /// that table gives one.
+    /// The types of the values it returns: its result, then the values of the pointers it fills. A
+    /// `table` has the LuaCATS type of `RETURN_TYPES` where that table gives one.
     pub fn returns(&self) -> impl Iterator<Item = &'static str> {
         let native = self.name;
-        self.returns.split(',').filter(|r| !r.is_empty()).map(move |ty| match ty {
+        self.returns.split(',').filter(|r| !r.is_empty() && *r != "void").map(move |ty| match ty {
             "table" => RETURN_TYPES.iter().find(|(owner, _)| *owner == native).map_or(ty, |(_, ty)| ty),
             _ => ty,
         })
@@ -104,10 +104,20 @@ impl Native {
         })
     }
 
+    /// Whether the first of `returns` is the result of the native, rather than the value of a
+    /// pointer it fills: the table writes `void` ahead of the pointers of a native without one.
+    pub fn returns_result(&self) -> bool {
+        !self.returns.is_empty() && !self.returns.starts_with("void")
+    }
+
     pub fn signature(&self) -> String {
+        self.signature_returning(&self.returns().collect::<Vec<_>>())
+    }
+
+    /// `signature`, with `returns` written for the types of the values it returns.
+    pub fn signature_returning(&self, returns: &[&str]) -> String {
         let params: Vec<String> =
             self.params().map(|(n, t, optional)| format!("{n}{}: {t}", if optional { "?" } else { "" })).collect();
-        let returns: Vec<&str> = self.returns().collect();
         let mut out = format!("function {}({})", self.name, params.join(", "));
         if !returns.is_empty() {
             out.push_str(": ");
@@ -395,6 +405,14 @@ mod tests {
         assert_eq!(
             native("GetEntityPlayerIsFreeAimingAt").unwrap().signature(),
             "function GetEntityPlayerIsFreeAimingAt(player: Player, entity?: Entity): boolean, Entity"
+        );
+        // The values of the pointers are told from a result.
+        assert!(native("GetEntityPlayerIsFreeAimingAt").unwrap().returns_result());
+        assert!(!native("GetGroupSize").unwrap().returns_result());
+        assert!(!native("DeleteEntity").unwrap().returns_result());
+        assert_eq!(
+            native("GetEntityPlayerIsFreeAimingAt").unwrap().signature_returning(&["1|false", "Entity"]),
+            "function GetEntityPlayerIsFreeAimingAt(player: Player, entity?: Entity): 1|false, Entity"
         );
     }
 

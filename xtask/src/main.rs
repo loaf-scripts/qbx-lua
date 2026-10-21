@@ -165,6 +165,9 @@ fn add_native(natives: &mut BTreeMap<String, Native>, ns: &str, hash: &str, nati
     let result = native["results"].as_str().unwrap_or("void");
     if result != "void" {
         returns.push(lua_type(result));
+    } else if !out_types.is_empty() {
+        // Tells the values of the pointers from a result of the native.
+        returns.push("void".into());
     }
     returns.extend(out_types);
 

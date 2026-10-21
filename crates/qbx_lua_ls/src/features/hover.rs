@@ -605,9 +605,9 @@ fn local_hover(infer: &Infer, detail: &mut Detail, id: LocalId, offset: u32, cal
     out
 }
 
-fn native_hover(name: &str, side: Option<Side>) -> Option<String> {
+fn native_hover(infer: &Infer, name: &str, side: Option<Side>) -> Option<String> {
     let native = native(name)?.on(side);
-    let mut out = lua_block(&native.signature());
+    let mut out = lua_block(&infer.native_signature(&native));
     let canonical = native.alias_of.map(|target| format!(" · alias of `{target}`")).unwrap_or_default();
     out.push_str(&format!(
         "\n\n*{} native* · `{}` · `{}`{canonical}",
@@ -632,7 +632,7 @@ fn global_hover(
 ) -> Option<String> {
     let symbols = ws.index.globals_named(name, infer.ctx.file);
     let Some((file, symbol)) = infer.preferred_global(&symbols) else {
-        if let Some(hover) = native_hover(name, infer.side_at(at)) {
+        if let Some(hover) = native_hover(infer, name, infer.side_at(at)) {
             return Some(hover);
         }
         let ty = infer.global_type_at(name, Some(at));

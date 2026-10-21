@@ -13,7 +13,9 @@ use qbx_lua_syntax::{Comment, CommentKind, NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::callback_wrappers::{self, Wrapper};
-use crate::index::{instance_class, instance_owner, ClassDef, Distance, FileId, Index, Symbol, SymbolKind};
+use crate::index::{
+    instance_class, instance_owner, ClassDef, Distance, FileId, Index, ResourceEntry, Symbol, SymbolKind,
+};
 use crate::locate::{expression_at, statement_at};
 use crate::luacats::{applies_on, own_type, parse_doc_lines, CastEntry, DocExtend, DocGroup, DocOperator};
 use crate::narrow::{Casts, Fact, Flow, Origin, Version, DECLARATION};
@@ -619,6 +621,9 @@ pub struct Infer<'a> {
     typing: RefCell<Vec<(SmolStr, Range)>>,
     /// Whether the diagnostics this inference serves follow `strict`; see `Infer::strict`.
     strict: bool,
+    /// Whether natives give what the runtime returns, as `strict` reads them; see
+    /// `Infer::native_result`.
+    strict_natives: bool,
 }
 
 /// Natives call their handles `Vehicle`, `Ped` and so on. They are integers, and resources (ox_lib,
@@ -696,13 +701,50 @@ impl<'a> Infer<'a> {
             truncated: Cell::new(false),
             typing: RefCell::new(Vec::new()),
             strict: false,
+            strict_natives: false,
         }
     }
 
     /// An inference for the diagnostics of a file whose configuration sets `strict` so.
     pub fn with_strict(mut self, strict: bool) -> Self {
         self.strict = strict;
+        self.strict_natives = strict;
         self
+    }
+
+    /// Reads natives as `strict` does where `strict` is on for the file, as hover and completion
+    /// show what its diagnostics check.
+    pub fn with_strict_natives(mut self, strict: bool) -> Self {
+        self.strict_natives = strict;
+        self
+    }
+
+    /// The type of value `index` of those `native` returns where this file reads it otherwise than
+    /// the native data gives it. With `strict`, the Lua wrapper of a native gives a `BOOL` result as
+    /// `1` or `false`, and the `BOOL` that a pointer it fills holds as the integer `0` or `1`, unless
+    /// the resource calls the fxv2 natives, which give both as a `boolean`.
+    pub fn native_return(&self, native: &qbx_fivem_data::Native, index: usize) -> Option<Type> {
+        if !self.strict_natives || native.returns().nth(index) != Some("boolean") {
+            return None;
+        }
+        if self.index.resource_of(self.ctx.file).is_some_and(ResourceEntry::uses_fxv2_natives) {
+            return None;
+        }
+        Some(match index == 0 && native.returns_result() {
+            true => Type::union([Type::IntLit(1), Type::BooleanLit(false)]),
+            false => Type::union([Type::IntLit(0), Type::IntLit(1)]),
+        })
+    }
+
+    /// The signature of `native`, with the types of the values it returns as `native_return` reads
+    /// them.
+    pub fn native_signature(&self, native: &qbx_fivem_data::Native) -> String {
+        let returns: Vec<String> = native
+            .returns()
+            .enumerate()
+            .map(|(index, ty)| self.native_return(native, index).map_or_else(|| ty.to_string(), |ty| ty.to_string()))
+            .collect();
+        native.signature_returning(&returns.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
     /// Whether the diagnostics of the file follow the `strict` setting, reporting what TypeScript's
@@ -1437,7 +1479,14 @@ impl<'a> Infer<'a> {
         match native(name) {
             Some(native) => {
                 let side = at.map_or(self.side, |at| self.side_at(at));
-                let fun = Arc::new(native_fun_type(&native.on(side)));
+                let native = native.on(side);
+                let mut fun = native_fun_type(&native);
+                for (index, ty) in fun.returns.iter_mut().enumerate() {
+                    if let Some(returned) = self.native_return(&native, index) {
+                        *ty = returned;
+                    }
+                }
+                let fun = Arc::new(fun);
                 Type::Fun(with_signatures(&fun, self.index.global_extensions(name, self.ctx.file)))
             }
             None => Type::Unknown,

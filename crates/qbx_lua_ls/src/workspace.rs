@@ -45,6 +45,8 @@ pub struct Workspace {
     pub roots: Vec<PathBuf>,
     pub library: Vec<PathBuf>,
     pub lint_config: Config,
+    /// The editor's `strict` setting, which the configuration file overrides.
+    pub strict_setting: Option<bool>,
     /// Convars assigned with `set`, `setr` or `sets` in the workspace's .cfg files.
     pub cfg_convars: Vec<SmolStr>,
     locator: ResourceLocator,
@@ -109,6 +111,12 @@ impl Workspace {
             let index = index_file(id, stub.source, &chunk, &resolution, &self.index, side);
             self.index.set_file(id, entry(index));
         }
+    }
+
+    /// Whether `strict` is on for the file at `path`: as the configuration file sets it there, or
+    /// else as the editor does.
+    pub fn strict_for(&self, path: &Path) -> bool {
+        self.lint_config.strict_at(path).or(self.strict_setting).unwrap_or(false)
     }
 
     pub fn scan(&mut self) -> ScanStats {

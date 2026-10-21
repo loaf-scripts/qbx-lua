@@ -509,6 +509,17 @@ pub struct ResourceEntry {
     pub escrowed: bool,
 }
 
+impl ResourceEntry {
+    /// Whether the scripts of the resource call FiveM's fxv2 natives, which give a `BOOL` as `true`
+    /// or `false`: an `fxmanifest.lua` turns them on with a `use_experimental_fxv2_oal` entry,
+    /// whatever its value, as the runtime only asks whether there is one. Other resources call the
+    /// generated Lua wrappers, which give `1` or `false`.
+    pub fn uses_fxv2_natives(&self) -> bool {
+        self.manifest_path.file_name().is_some_and(|name| name == "fxmanifest.lua")
+            && self.manifest.directives.iter().any(|directive| directive.name == "use_experimental_fxv2_oal")
+    }
+}
+
 type Slot = (FileId, u32);
 
 /// How far a declaration is from the code that reads it, as `Index::distance` measures it.

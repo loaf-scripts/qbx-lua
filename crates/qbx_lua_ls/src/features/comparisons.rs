@@ -122,8 +122,9 @@ impl<'a, 'b> Declared<'a, 'b> {
 
     /// Reads a native documented as `boolean` as returning `boolean|integer`, for comparisons: its
     /// Lua wrapper gives `1` instead of `true`, so code compares its result with either. Everywhere
-    /// else it gives a `boolean`, as lua-language-server reads it. Guards hold across calls as
-    /// `through_calls` takes them.
+    /// else it gives a `boolean`, as lua-language-server reads it. With `strict`, a native gives
+    /// what the runtime of its resource returns, `1|false` or `boolean`, as `Infer::native_result`
+    /// reads it. Guards hold across calls as `through_calls` takes them.
     fn comparing(infer: &'a Infer<'b>) -> Self {
         Self { widens_native_booleans: true, ..Self::through_calls(infer) }
     }
@@ -589,9 +590,9 @@ impl<'a, 'b> Declared<'a, 'b> {
     }
 
     /// What `call` returns when its function declares it, with `boolean|integer` for the `boolean`
-    /// of a native when `widens_native_booleans` asks for it. With `annotations_only`, the declared
-    /// types of the arguments bind the generics of a generic, so `assert(Entities[id])` declares
-    /// nothing for a table no annotation types.
+    /// of a native when `widens_native_booleans` asks for it without `strict`. With `annotations_only`,
+    /// the declared types of the arguments bind the generics of a generic, so `assert(Entities[id])`
+    /// declares nothing for a table no annotation types.
     fn returned(&self, call: &Expr) -> Option<Vec<Type>> {
         let declared = match self.annotations_only {
             true => self.generic_returns(call).or_else(|| self.infer.annotated_returns(call)),
@@ -601,7 +602,7 @@ impl<'a, 'b> Declared<'a, 'b> {
             .or_else(|| self.callback_returns(call))
             .or_else(|| self.generic_returns(call))
             .or_else(|| self.returned_nils(call))?;
-        if !self.widens_native_booleans || !self.is_native_call(call) {
+        if !self.widens_native_booleans || self.infer.strict() || !self.is_native_call(call) {
             return Some(values);
         }
         let as_returned = |ty: Type| match ty {

@@ -303,13 +303,20 @@ impl Config {
         let relative = self.relative(path);
         let mut rules = self.rules.clone();
         let mut globals = self.globals.clone();
-        let mut strict = self.strict;
         for entry in self.overrides.iter().filter(|o| o.files.is_match(relative)) {
             rules.extend(entry.rules.iter().map(|(k, v)| (k.clone(), *v)));
             globals.extend(entry.globals.iter().cloned());
-            strict = entry.strict.or(strict);
         }
+        let strict = self.strict_at(path);
         FileConfig { rules, globals, ignore_unused_prefix: self.ignore_unused_prefix.clone(), strict }
+    }
+
+    /// What the configuration sets `strict` to for the file at `path`, as the last override that
+    /// matches it and sets it does, and `None` where it leaves it to the editor.
+    pub fn strict_at(&self, path: &Path) -> Option<bool> {
+        let relative = self.relative(path);
+        let overrides = self.overrides.iter().filter(|o| o.files.is_match(relative));
+        overrides.fold(self.strict, |strict, entry| entry.strict.or(strict))
     }
 
     /// The configured `imports` of the resource whose manifest is `manifest_path`. The scripts of a

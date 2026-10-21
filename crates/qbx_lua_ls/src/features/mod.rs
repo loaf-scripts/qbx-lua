@@ -47,7 +47,7 @@ use crate::workspace::Workspace;
 
 pub fn with_infer<R>(ws: &Workspace, doc: &Document, f: impl FnOnce(&Infer) -> R) -> R {
     let ctx = FileContext::new(doc.file, &doc.text, &doc.chunk, &doc.resolution);
-    let infer = Infer::new(&ctx, &ws.index);
+    let infer = Infer::new(&ctx, &ws.index).with_strict_natives(ws.strict_for(&doc.path));
     f(&infer)
 }
 
