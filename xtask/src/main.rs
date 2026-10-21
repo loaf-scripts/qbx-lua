@@ -148,11 +148,15 @@ fn add_native(natives: &mut BTreeMap<String, Native>, ns: &str, hash: &str, nati
         let ty = type_of(param);
         if is_pointer(&ty) {
             out_types.push(pointer_type(&ty));
-            if takes_pointer {
+            // The pointer that the wrapper takes is written `&name`, and one it fills itself, which
+            // takes no argument, `*name`, so that the place of each in the call is known.
+            let name = match takes_pointer {
                 // A native that releases the handle it is given does nothing without one.
-                let optional = if consumes_handle(raw_name) { "" } else { "?" };
-                params.push((format!("{param_name}{optional}"), pointer_type(&ty)));
-            }
+                true if consumes_handle(raw_name) => format!("&{param_name}"),
+                true => format!("&{param_name}?"),
+                false => format!("*{param_name}"),
+            };
+            params.push((name, pointer_type(&ty)));
         } else {
             params.push((param_name.clone(), lua_type(&ty)));
         }

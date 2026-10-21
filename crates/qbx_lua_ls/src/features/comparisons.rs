@@ -12,11 +12,11 @@
 
 use std::cell::{OnceCell, RefCell};
 
-use qbx_fivem_data::native;
+use qbx_fivem_data::{native, Native};
 use qbx_lua_analysis::scope::{Local, LocalId, Resolution, Resolved};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
-use qbx_lua_syntax::{NumberValue, Span};
+use qbx_lua_syntax::{NumberValue, SmolStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::class_tables::{Classes, Key};
@@ -667,15 +667,28 @@ impl<'a, 'b> Declared<'a, 'b> {
     /// Whether `callee` names a native, or a local that holds one as `local IsCamActive = IsCamActive`
     /// does.
     pub fn is_native(&self, callee: &Expr, depth: u32) -> bool {
-        let ExprKind::Name(name) = &callee.unparen().kind else { return false };
+        self.native_name(callee, depth).is_some()
+    }
+
+    /// The native that `callee` names, as `is_native` finds it, as code on the side of the file
+    /// calls it.
+    pub fn native_called(&self, callee: &Expr) -> Option<Native> {
+        let name = self.native_name(callee, 0)?;
+        native(&name).map(|found| found.on(self.infer.side()))
+    }
+
+    fn native_name(&self, callee: &Expr, depth: u32) -> Option<SmolStr> {
+        let ExprKind::Name(name) = &callee.unparen().kind else { return None };
         let ctx = self.infer.ctx;
         let Some(Resolved::Local(id)) = ctx.resolution.resolve_at(name.span.start) else {
-            return self.infer.index.globals_named(&name.text, self.classes.file()).is_empty()
+            let global = self.infer.index.globals_named(&name.text, self.classes.file()).is_empty()
                 && native(&name.text).is_some();
+            return global.then(|| name.text.clone());
         };
-        let Some(Decl::Local { stmt, index }) = ctx.decl(ctx.resolution.local(id).decl.start) else { return false };
-        let StmtKind::Local { exprs, in_unpack: false, .. } = &stmt.kind else { return false };
-        depth < MAX_DEPTH && exprs.get(*index).is_some_and(|value| self.is_native(value, depth + 1))
+        let Some(Decl::Local { stmt, index }) = ctx.decl(ctx.resolution.local(id).decl.start) else { return None };
+        let StmtKind::Local { exprs, in_unpack: false, .. } = &stmt.kind else { return None };
+        let value = exprs.get(*index).filter(|_| depth < MAX_DEPTH)?;
+        self.native_name(value, depth + 1)
     }
 }
 

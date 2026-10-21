@@ -18,14 +18,14 @@ use qbx_lua_analysis::{
 use qbx_lua_syntax::Span;
 use serde::{Deserialize, Serialize};
 
-use super::arguments::mismatched_arguments;
+use super::arguments::{mismatched_arguments, native_arg_kind};
 use super::assignments::mismatched_assignments;
 use super::callback_payloads::{missing_payloads, payloads, redundant_payloads, Payload};
 use super::casts::mismatched_casts;
 use super::class_cycles::circular_classes;
 use super::class_tables::missing_fields;
 use super::closes::unclosable_values;
-use super::comparisons::impossible_comparisons;
+use super::comparisons::{impossible_comparisons, Declared};
 use super::deprecated::deprecated_uses;
 use super::discards::discarded_returns;
 use super::doc_names::{undefined_doc_names, unextended_functions};
@@ -282,6 +282,7 @@ pub(crate) fn diagnostics_with_support(
                 manifest: &resource.manifest,
                 started_before: started_before.as_ref(),
                 installed: start_order.map(|order| &order.installed),
+                fxv2_natives: resource.uses_fxv2_natives(),
             }),
             _ => None,
         };
@@ -294,6 +295,7 @@ pub(crate) fn diagnostics_with_support(
         };
         let ctx = FileContext::new(doc.file, &doc.text, &doc.chunk, &doc.resolution);
         let infer = Infer::new(&ctx, &ws.index).with_strict(config.strict());
+        let declared = Declared::new(&infer);
         let mut found = check_file(&FileInput {
             relative_path: &relative_path,
             source: &doc.text,
@@ -306,6 +308,7 @@ pub(crate) fn diagnostics_with_support(
             crossrefs: Some(crossrefs),
             locale: support.and_then(|support| support.locale).or(owned_locale.as_ref()),
             value_count: Some(&|call| infer.value_count(call)),
+            native_arg: Some(&|arg| native_arg_kind(&infer, &declared, arg)),
         });
         type_diagnostics(ws, doc, &infer, &config, &mut found);
         found

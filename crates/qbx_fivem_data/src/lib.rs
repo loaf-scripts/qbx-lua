@@ -2,11 +2,14 @@ use std::sync::OnceLock;
 
 #[cfg(feature = "docs")]
 mod references;
+mod spread;
+
 #[cfg(feature = "docs")]
 pub use references::{
     control, controls, ped_config_flag, ped_config_flags, Control, PedConfigFlag, CONTROLS_SOURCE_URL,
     PED_CONFIG_FLAGS_SOURCE_URL,
 };
+pub use spread::{ArgKind, Misplaced, ParamKind, Passed, Spread, WrapperParam};
 
 static NATIVES: &str = include_str!("../data/natives.tsv");
 #[cfg(feature = "docs")]
@@ -89,18 +92,35 @@ impl Native {
         })
     }
 
-    /// `(name, type, optional)` triples. The table writes an optional parameter `name?`: the
-    /// pointer that the Lua wrapper takes as an initial value, which nil leaves 0. A function
-    /// parameter has the LuaCATS type of `CALLBACK_TYPES` where that table gives one.
+    /// `(name, type, optional)` triples of the parameters that the Lua wrapper takes. An optional
+    /// parameter is the pointer that the wrapper takes as an initial value, which nil leaves 0. A
+    /// function parameter has the LuaCATS type of `CALLBACK_TYPES` where that table gives one.
     pub fn params(&self) -> impl Iterator<Item = (&'static str, &'static str, bool)> {
+        let params = self.wrapper_params().filter(|param| param.kind != ParamKind::Filled);
+        params.map(|param| (param.name, param.ty, param.optional))
+    }
+
+    /// The parameters of the native in the order it declares them, as its Lua wrapper passes them
+    /// on, with the pointers the wrapper fills itself. The table writes the pointer that the
+    /// wrapper takes `&name`, and one it fills `*name`.
+    pub fn wrapper_params(&self) -> impl Iterator<Item = WrapperParam> {
         let native = self.name;
         self.params.split(',').filter_map(|p| p.split_once(':')).map(move |(name, ty)| {
-            let (name, optional) = match name.strip_suffix('?') {
-                Some(name) => (name, true),
-                None => (name, false),
-            };
+            let (name, filled) = name.strip_prefix('*').map_or((name, false), |name| (name, true));
+            let (name, taken) = name.strip_prefix('&').map_or((name, false), |name| (name, true));
+            let (name, optional) = name.strip_suffix('?').map_or((name, false), |name| (name, true));
             let callback = CALLBACK_TYPES.iter().find(|(owner, param, _)| *owner == native && *param == name);
-            (name, callback.map_or(ty, |(_, _, ty)| ty), optional)
+            let ty = callback.map_or(ty, |(_, _, ty)| ty);
+            let kind = match ty {
+                _ if filled => ParamKind::Filled,
+                _ if taken => ParamKind::Pointer,
+                "Hash" => ParamKind::Hash,
+                "string" => ParamKind::String,
+                "table" => ParamKind::Object,
+                ty if ty == "function" || ty.starts_with("fun(") => ParamKind::Function,
+                _ => ParamKind::Value,
+            };
+            WrapperParam { name, ty, optional, kind }
         })
     }
 

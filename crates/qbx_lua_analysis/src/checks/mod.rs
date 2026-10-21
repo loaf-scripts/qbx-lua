@@ -41,10 +41,16 @@ pub struct FileInput<'a> {
     /// How many values a call gives, when the types of the language server tell; without it a call
     /// at the end of the arguments passes any number of them.
     pub value_count: Option<ValueCount<'a>>,
+    /// What each argument of a call of a native is, as the types of the language server tell;
+    /// without it what the syntax of the argument shows counts.
+    pub native_arg: Option<NativeArg<'a>>,
 }
 
 /// Tells how many values a call gives, when that is known.
 pub type ValueCount<'a> = &'a dyn Fn(&Expr) -> Option<usize>;
+
+/// Tells what an argument passed to a native is, as far as the way the runtime passes it goes.
+pub type NativeArg<'a> = &'a dyn Fn(&Expr) -> qbx_fivem_data::ArgKind;
 
 #[derive(Clone, Copy)]
 pub struct ResourceInput<'a> {
@@ -57,6 +63,8 @@ pub struct ResourceInput<'a> {
     /// Every resource in the server's resources folder, including names they `provide`. Only
     /// known when a server.cfg was found, i.e. when the whole server is on disk.
     pub installed: Option<&'a rustc_hash::FxHashSet<qbx_lua_syntax::SmolStr>>,
+    /// Whether its scripts call the fxv2 natives; see `Manifest::uses_fxv2_natives`.
+    pub fxv2_natives: bool,
 }
 
 pub(crate) struct Sink<'a> {

@@ -39,6 +39,7 @@ fn codes_in_project(
         locale: locale.as_ref(),
         relative_path: "",
         value_count: None,
+        native_arg: None,
     };
     check_file(&input).into_iter().map(|d| d.code).collect()
 }
@@ -66,6 +67,7 @@ fn resource_project(source: &str, side: Side, own: &str, others: &[(&str, Option
         manifest: &manifest,
         started_before: None,
         installed: None,
+        fxv2_natives: false,
     };
     let config = FileConfig::default();
     let input = FileInput {
@@ -80,6 +82,7 @@ fn resource_project(source: &str, side: Side, own: &str, others: &[(&str, Option
         locale: None,
         relative_path: "",
         value_count: None,
+        native_arg: None,
     };
     check_file(&input).into_iter().map(|d| d.code).collect()
 }
@@ -264,6 +267,7 @@ fn modules_loaded_at_runtime_provide_their_globals() {
             manifest: &manifest,
             started_before: None,
             installed: None,
+            fxv2_natives: false,
         };
         let mut config = FileConfig::default();
         config.globals.push("lib".into());
@@ -279,6 +283,7 @@ fn modules_loaded_at_runtime_provide_their_globals() {
             locale: None,
             relative_path: "client.lua",
             value_count: None,
+            native_arg: None,
         };
         check_file(&input).into_iter().map(|d| d.code).collect()
     }
@@ -849,6 +854,7 @@ fn hash_fixes(source: &str) -> (String, usize) {
         locale: None,
         relative_path: "",
         value_count: None,
+        native_arg: None,
     });
     let hashes: Vec<_> = diagnostics.into_iter().filter(|d| d.code == "fivem/hash-literal").collect();
     qbx_lua_analysis::apply_fixes(source, &hashes)
@@ -957,6 +963,7 @@ fn call_messages_with(
         manifest: &manifest,
         started_before: None,
         installed: None,
+        fxv2_natives: false,
     };
     let input = FileInput {
         source,
@@ -970,6 +977,7 @@ fn call_messages_with(
         locale: None,
         relative_path: "",
         value_count: None,
+        native_arg: None,
     };
     check_file(&input).into_iter().filter(|d| d.code == code).map(|d| d.message).collect()
 }
@@ -1273,6 +1281,7 @@ fn findings_with(source: &str, code: &str, config: &FileConfig) -> Vec<(u32, Str
         locale: None,
         relative_path: "",
         value_count: None,
+        native_arg: None,
     };
     let lines = qbx_lua_syntax::LineIndex::new(source);
     check_file(&input)
@@ -1331,6 +1340,7 @@ for i = 10, n do print(i) end";
             locale: None,
             relative_path: "",
             value_count: None,
+            native_arg: None,
         };
         qbx_lua_analysis::apply_fixes(source, &check_file(&input)).0
     };
@@ -1753,6 +1763,7 @@ fn all_fixes(source: &str) -> String {
         locale: None,
         relative_path: "",
         value_count: None,
+        native_arg: None,
     };
     qbx_lua_analysis::apply_fixes(source, &check_file(&input)).0
 }
@@ -2072,5 +2083,19 @@ fn calls_of_runtime_functions_and_with_strict_natives_are_counted() {
         call_messages_with("missing-parameter", "print(GetEntityCoords())", client, &defined, &strict),
         Vec::<String>::new(),
         "a resource's own definition replaces the native"
+    );
+    // A vector fills a parameter for each of its parts, as the runtime spreads it, and an argument
+    // of no known kind may be a vector.
+    let vectors = "SetEntityCoords(1, vector3(1, 2, 3), false, false, false, true)
+                   SetEntityCoords(1, vector3(1, 2, 3), false)
+                   SetEntityCoords(1, coords, false, false, false)
+                   SetEntityCoords(ped, pos.x, pos.y, pos.z)";
+    assert_eq!(
+        call_messages_with("missing-parameter", vectors, client, &[], &strict),
+        [
+            "'SetEntityCoords' is called with 3 arguments, which fill 5 parameters, but needs 8; 'deadFlag' (boolean) will be nil",
+            // Values of no known kind that would leave parameters out even as vectors.
+            "'SetEntityCoords' is called with 4 arguments, but needs 8; 'alive' (boolean) will be nil",
+        ]
     );
 }

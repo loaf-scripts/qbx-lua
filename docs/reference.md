@@ -372,7 +372,11 @@ With `strict`:
   lua-language-server compares neither, as it does not see exports.
 - `missing-parameter` and `redundant-parameter` also count the arguments of natives, as
   `SetEntityCoords(ped, x, y, z)` leaves out four. FiveM passes `nil` for those, which scripts rely
-  on, so they are only reported in strict mode.
+  on, so they are only reported in strict mode. A vector fills a parameter for each of its parts
+  where the runtime spreads it, as `param-type-mismatch` checks it, and a call with an argument of
+  no known type for a number parameter, which may be a vector, is only reported when it would leave
+  a parameter out even as a vector of four parts. qbx-lint, which reads no types, counts the
+  vectors that `vector3(...)` and the like or a native such as `GetEntityCoords` return.
 - `cast-local-type` reports clearing a local declared with a table, as `cache = nil` after
   `local cache = {}`, the `nil` or `false` of a field, as in `total = counter.count`, and a `nil`
   that no annotation declares, such as one a function without `@return` gives. It
@@ -537,9 +541,22 @@ Natives are checked as the runtime passes their arguments on:
   hashed strings and vectors still pass, and so does a number for the server id of a player, which
   only the native data calls a string.
 - A hash parameter takes a string, which the wrappers hash.
-- A vector fills a number parameter for each of its parts, as in `SetEntityCoords(ped, coords, ...)`.
-  The values after a value of unknown type that may be a vector are not checked when the call
-  passes fewer values than the native takes, since they may go to later parameters.
+- A vector given for a number parameter fills one for each of its parts, as in
+  `SetEntityCoords(ped, coords, ...)`, as the runtime spreads it. Each part has to go to a number
+  parameter, so a `vector4` for the `x, y, z` of `SetEntityCoords` is reported, as its `w` reaches
+  the `alive` flag, and so is one whose `x`, `y` and `z` do not all find a parameter, as in
+  `SetEntityHeading(ped, coords)`, while a part past the last parameter goes where the native reads
+  nothing, as the heading of a `vector4` given to `AddBlipForCoord` does. The Lua wrapper
+  of a native binds the arguments by position before the runtime spreads the vector, so a spread
+  is also reported where it moves what the wrapper passes after it: a pointer the wrapper fills,
+  as the `groundZ` of `GetGroundZFor_3dCoord(coords, false)`, which gets the `false`, or an
+  argument that the parameter it is bound to converts otherwise than the one it reaches, as a
+  model name that reaches `modelHash` unhashed. The values after a value of unknown type that may
+  be a vector are not checked when the call passes fewer values than the native takes, since they
+  may go to later parameters.
+- A resource whose `fxmanifest.lua` has a `use_experimental_fxv2_oal` entry, whatever its value,
+  calls FiveM's fxv2 natives, which take each argument as its parameter and spread no vector, so
+  there a vector for a number parameter is reported.
 
 The values a native writes through its pointers are returned after its result, as FiveM's Lua
 wrappers return them: `local _, size = GetGroupSize(group)`. The wrappers take a pointer as an

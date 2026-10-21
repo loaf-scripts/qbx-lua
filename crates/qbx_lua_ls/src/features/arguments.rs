@@ -17,8 +17,11 @@
 //! them.
 //!
 //! Natives are checked as the runtime passes their arguments on: numbers and booleans pass for each
-//! other, as a `BOOL` is an integer to them, a hash parameter hashes a string, and a vector fills
-//! one number parameter for each of its parts. The native wrappers turn `nil`, `0` and `false` into
+//! other, as a `BOOL` is an integer to them, a hash parameter hashes a string, and a vector given
+//! for a number parameter fills one for each of its parts, as the runtime spreads it, where the
+//! Lua wrapper of the native, which binds the arguments by position before, still passes each
+//! after it where it is meant to go (`Native::spread`). The fxv2 natives that
+//! `use_experimental_fxv2_oal` turns on spread no vector. The native wrappers turn `nil`, `0` and `false` into
 //! NULL for string parameters, and only for those, and other values into their text, so a string
 //! parameter takes a number or a boolean written out, and the server id of a player, but not
 //! another number, such as a hash. A value of unknown type that may be a vector leaves where the
@@ -39,11 +42,12 @@
 
 use std::sync::Arc;
 
+use qbx_fivem_data::{ArgKind, Native, ParamKind, Passed, Spread, WrapperParam};
 use qbx_lua_analysis::scope::{LocalKind, Resolved};
 use qbx_lua_analysis::signature::{most_arguments, Requirement};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
-use qbx_lua_syntax::{SmolStr, Span};
+use qbx_lua_syntax::{NumberValue, SmolStr, Span};
 
 use super::callback_payloads::Payload;
 use super::class_tables::Classes;
@@ -87,7 +91,7 @@ fn checked_arguments(
     calls.visit_block(&chunk.block);
     for payload in payloads {
         let handlers: Vec<&FunType> = payload.handlers.iter().collect();
-        calls.passed(&handlers, false, false, payload.args);
+        calls.passed(&handlers, false, None, payload.args);
     }
     calls.out
 }
@@ -119,8 +123,11 @@ impl<'c> Visitor<'c> for Calls<'_, '_> {
 impl Calls<'_, '_> {
     fn check(&mut self, call: &Expr, base: &Expr, method: Option<&Name>, args: &[Expr]) {
         // A native's arguments are checked as the runtime converts them, which `no-unknown` leaves out.
-        let native = method.is_none() && !args.is_empty() && self.declared.is_native(base, 0);
-        let signatures = match native && self.unknowns.is_none() {
+        let native = match method {
+            None if !args.is_empty() => self.declared.native_called(base),
+            _ => None,
+        };
+        let signatures = match native.is_some() && self.unknowns.is_none() {
             true => definitions(self.infer, base, method),
             false => signatures(self.infer, &self.declared, call, base, method, args),
         };
@@ -132,7 +139,7 @@ impl Calls<'_, '_> {
     }
 
     /// Checks `args`, passed to a function that has one of `signatures`, or to a `native`.
-    fn passed(&mut self, signatures: &[&FunType], via_colon: bool, native: bool, args: &[Expr]) {
+    fn passed(&mut self, signatures: &[&FunType], via_colon: bool, native: Option<Native>, args: &[Expr]) {
         if let Some(pick) = self.unknowns {
             return self.unknown(signatures, via_colon, args, pick);
         }
@@ -191,7 +198,14 @@ impl Calls<'_, '_> {
     /// Reports the arguments that the signature closest to taking them does not take, unless one of
     /// them takes them all. Only the signatures that take as many arguments as the call passes count,
     /// unless none does.
-    fn compare(&mut self, signatures: &[&FunType], via_colon: bool, native: bool, args: &[Expr], values: &[Type]) {
+    fn compare(
+        &mut self,
+        signatures: &[&FunType],
+        via_colon: bool,
+        native: Option<Native>,
+        args: &[Expr],
+        values: &[Type],
+    ) {
         let mut closest: Option<Vec<(Span, String)>> = None;
         for fun in candidates(self.infer, signatures, via_colon, args) {
             let found = self.mismatches(fun, via_colon, native, args, values);
@@ -210,73 +224,200 @@ impl Calls<'_, '_> {
         &self,
         fun: &FunType,
         via_colon: bool,
-        native: bool,
+        native: Option<Native>,
         args: &[Expr],
         values: &[Type],
     ) -> Vec<(Span, String)> {
+        if let Some(native) = native {
+            return self.native_mismatches(native, fun, args, values);
+        }
         let mut out = Vec::new();
         // The generics of `fun` that the annotated types of the arguments decide, as the `number` of
         // `table.insert(list, value)` for a list declared as `number[]`.
-        let bound = match native || fun.generics.is_empty() {
+        let bound = match fun.generics.is_empty() {
             true => Vec::new(),
             false => {
                 let annotated: Vec<Type> = args.iter().map(|arg| self.annotated.of(arg)).collect();
                 self.infer.generics_bound_by(fun, args, via_colon, &annotated)
             }
         };
-        // The parameters that the vectors passed before take beyond their first.
-        let mut spread = 0;
         for (i, (arg, given)) in args.iter().zip(values).enumerate() {
             // The `self` a `.` call passes to a method has no parameter of its own.
-            let Some(param) = param_for(fun, via_colon, i + spread) else { continue };
-            if native && matches!(expected(param), Type::Number | Type::Integer) {
-                match self.vector_parts(arg, given) {
-                    Some(1) => {}
-                    Some(parts) => {
-                        spread += parts - 1;
-                        continue;
-                    }
-                    None if args.len() - i < fun.params.len().saturating_sub(i + spread) => break,
-                    None => {}
-                }
-            }
-            let message = match (native, bound_param(fun, param, &bound)) {
-                (true, _) => native_mismatch(&self.classes, param, arg, given, self.infer.strict()),
-                (false, Some(param)) => mismatch(&self.classes, fun, &param, given, Some(arg)),
-                (false, None) => mismatch(&self.classes, fun, param, given, Some(arg)),
+            let Some(param) = param_for(fun, via_colon, i) else { continue };
+            let message = match bound_param(fun, param, &bound) {
+                Some(param) => mismatch(&self.classes, fun, &param, given, Some(arg)),
+                None => mismatch(&self.classes, fun, param, given, Some(arg)),
             };
             out.extend(message.map(|message| (arg.span, message)));
         }
         out
     }
 
-    /// How many parameters of a native `arg` fills, declared as `declared`: a vector fills one for
-    /// each of its parts, as the runtime spreads it. Where nothing declares the type of `arg`, what
-    /// it holds tells, as only its place is in question. `None` when that is not known, or the type
-    /// allows vectors of different sizes, as the `vector` of the runtime stubs does.
-    fn vector_parts(&self, arg: &Expr, declared: &Type) -> Option<usize> {
-        let ty = match declared.is_unknown() {
-            true => self.infer.cast_after(arg.span.end).unwrap_or_else(|| self.infer.expr(arg)),
-            false => declared.clone(),
-        };
-        let parts = |ty: &Type| match ty {
-            Type::Named(name, _) => match name.as_str() {
-                "vector2" => Some(2),
-                "vector3" => Some(3),
-                "vector4" | "quat" => Some(4),
-                _ => Some(1),
-            },
-            Type::Unknown | Type::Any => None,
-            _ => Some(1),
-        };
-        match self.infer.expand_aliases(&ty.without_nil(), 0) {
-            Type::Union(types) => {
-                let mut sizes = types.iter().filter(|ty| **ty != Type::Nil).map(parts);
-                let first = sizes.next()??;
-                sizes.all(|size| size == Some(first)).then_some(first)
+    /// Each of `args` that the parameter of `native` it goes to does not take, with `fun` its
+    /// signature or one that an `---@extend` line adds. A vector given for a number parameter of the
+    /// native's own signature fills one for each of its parts, as `Native::spread` finds, unless
+    /// the resource calls the fxv2 natives, which take each argument as it is.
+    fn native_mismatches(&self, native: Native, fun: &FunType, args: &[Expr], values: &[Type]) -> Vec<(Span, String)> {
+        let fxv2 = self.infer.uses_fxv2_natives();
+        let kinds: Vec<ArgKind> = args.iter().map(|arg| native_arg_kind(self.infer, &self.declared, arg)).collect();
+        let taken: Vec<WrapperParam> =
+            native.wrapper_params().filter(|param| param.kind != ParamKind::Filled).collect();
+        let own = fun.params.iter().map(|param| param.name.as_str()).eq(taken.iter().map(|param| param.name));
+        let spread = (own && !fxv2).then(|| native.spread(&kinds));
+        let mut out = Vec::new();
+        for (i, (arg, given)) in args.iter().zip(values).enumerate() {
+            let target = spread.as_ref().map_or(i, |spread| spread.targets[i]);
+            let Some(param) = fun.params.get(target) else { continue };
+            // A value of no known kind for a number parameter may be a vector, which would move the
+            // values after it.
+            let takes_parts = taken.get(target).is_some_and(WrapperParam::takes_parts);
+            if kinds[i] == ArgKind::Unknown && takes_parts && !fxv2 && args.len() - i < fun.params.len() - target {
+                break;
             }
-            ty => parts(&ty),
+            let message = match (&spread, kinds[i]) {
+                (Some(spread), ArgKind::Vector(parts)) if takes_parts => {
+                    self.spread_mismatch(native, fun, args, i, parts, spread)
+                }
+                _ => native_mismatch(&self.classes, param, arg, given, self.infer.strict()).map(|message| {
+                    match fxv2 && matches!(kinds[i], ArgKind::Vector(_)) && matches!(expected(param), Type::Number) {
+                        true => format!(
+                            "{message}: the fxv2 natives that `use_experimental_fxv2_oal` turns on do not spread vectors"
+                        ),
+                        false => message,
+                    }
+                }),
+            };
+            out.extend(message.map(|message| (arg.span, message)));
         }
+        out
+    }
+
+    /// What is wrong with spreading the vector `args[i]` of `parts` parts over the parameters of
+    /// `native`, its signature `fun`, from the one `spread` sends it to: too few parameters left for
+    /// its `x`, `y` and `z`, one that takes no number, or a parameter after it that the runtime gives
+    /// another value.
+    fn spread_mismatch(
+        &self,
+        native: Native,
+        fun: &FunType,
+        args: &[Expr],
+        i: usize,
+        parts: u8,
+        spread: &Spread,
+    ) -> Option<String> {
+        let target = spread.targets[i];
+        let vector = native_arg_type(self.infer, &self.declared, &args[i]).without_nil();
+        let parts = usize::from(parts);
+        // The parts past the last parameter go where the native reads nothing, which leaves the
+        // heading of a `vector4` given for `x, y, z` out, but no `y` or `z`.
+        let left = fun.params.len() - target;
+        if left < parts && left < 3 {
+            return Some(format!(
+                "Cannot spread `{vector}` from parameter `{}`: {left} parameter{} left for its {parts} parts",
+                fun.params[target].name,
+                if left == 1 { " is" } else { "s are" },
+            ));
+        }
+        let covered = &fun.params[target..target + parts.min(left)];
+        let from = self.classes.file();
+        if let Some(param) = covered.iter().find(|param| self.classes.rejects(expected(param), from, &Type::Number)) {
+            let names: Vec<String> = covered.iter().map(|param| format!("`{}`", param.name)).collect();
+            return Some(format!(
+                "Cannot spread `{vector}` over parameters {}: parameter `{}` of type `{}` takes no `number`",
+                listed(&names),
+                param.name,
+                expected(param)
+            ));
+        }
+        let misplaced = spread.misplaced.filter(|misplaced| misplaced.vector == i)?;
+        let layout: Vec<WrapperParam> = native.wrapper_params().collect();
+        let param = layout[misplaced.param];
+        let receiver = match param.kind {
+            ParamKind::Filled | ParamKind::Pointer => format!("the pointer `{}`", param.name),
+            _ => format!("parameter `{}`", param.name),
+        };
+        let text = |index: usize| source_text(self.infer.ctx.source, &args[index]);
+        let gets = match (misplaced.gets, misplaced.means) {
+            (Passed::Arg(given), Passed::Hashed(meant)) if given == meant => format!("`{}` unhashed", text(given)),
+            (Passed::Arg(index) | Passed::Zero(index), _) => format!("`{}`", text(index)),
+            (Passed::Part(index, part), _) => format!("`{}.{}`", text(index), ["x", "y", "z", "w"][usize::from(part)]),
+            (Passed::Nil | Passed::Reference(None), _) => "`nil`".to_string(),
+            (Passed::Hashed(index), _) => format!("`{}` hashed", text(index)),
+            (Passed::Text(index), _) => format!("`{}` as text", text(index)),
+            (Passed::Reference(Some(index)), _) => format!("a reference to `{}`", text(index)),
+            (Passed::Packed(index, _), _) => format!("`{}` packed", index.map_or("nil".into(), text)),
+            (Passed::Pointer(index), _) => format!("the pointer for `{}`", layout[index].name),
+        };
+        Some(format!(
+            "`{}` is spread after the Lua wrapper of `{}` binds the arguments, so {receiver} gets {gets}: pass its parts",
+            text(i),
+            native.name
+        ))
+    }
+}
+
+/// The type of `arg`, passed to a native, as far as where it goes is in question: its declared type,
+/// or what it holds where nothing declares it.
+fn native_arg_type(infer: &Infer, declared: &Declared, arg: &Expr) -> Type {
+    let ty = infer.cast_after(arg.span.end).unwrap_or_else(|| declared.of(arg));
+    match ty.is_unknown() {
+        true => infer.expr(arg),
+        false => ty,
+    }
+}
+
+/// What `arg`, passed to a native, is, as far as the way the runtime passes it goes; see
+/// `native_arg_type`. A type that allows values of several kinds, as the `vector` of the runtime
+/// stubs allows vectors of different sizes, is of none.
+pub fn native_arg_kind(infer: &Infer, declared: &Declared, arg: &Expr) -> ArgKind {
+    match &arg.unparen().kind {
+        ExprKind::Nil | ExprKind::False => return ArgKind::Zero,
+        ExprKind::Number(NumberValue::Int(0)) => return ArgKind::Zero,
+        ExprKind::Number(NumberValue::Float(value)) if *value == 0.0 => return ArgKind::Zero,
+        _ => {}
+    }
+    let kind = |ty: &Type| match ty {
+        Type::Named(name, _) => match name.as_str() {
+            "vector2" => ArgKind::Vector(2),
+            "vector3" => ArgKind::Vector(3),
+            "vector4" | "quat" => ArgKind::Vector(4),
+            _ => ArgKind::Value,
+        },
+        Type::String | Type::StringLit(_) => ArgKind::String,
+        Type::Fun(_) | Type::Function => ArgKind::Function,
+        Type::Nil | Type::BooleanLit(false) | Type::IntLit(0) => ArgKind::Zero,
+        Type::Unknown | Type::Any => ArgKind::Unknown,
+        _ => ArgKind::Value,
+    };
+    match infer.expand_aliases(&native_arg_type(infer, declared, arg), 0) {
+        Type::Union(types) => {
+            let mut kinds = types.iter().filter(|ty| **ty != Type::Nil).map(kind);
+            let first = kinds.next().unwrap_or(ArgKind::Zero);
+            match kinds.all(|other| other == first) {
+                true => first,
+                false => ArgKind::Unknown,
+            }
+        }
+        ty => kind(&ty),
+    }
+}
+
+/// `names` listed as a sentence does, as "`x`, `y` and `z`".
+fn listed(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The source of `expr` on one line, cut short where it is long.
+fn source_text(source: &str, expr: &Expr) -> String {
+    let text: Vec<&str> = source[expr.span.start as usize..expr.span.end as usize].split_whitespace().collect();
+    let text = text.join(" ");
+    match text.chars().count() > 32 {
+        true => format!("{}…", text.chars().take(31).collect::<String>()),
+        false => text,
     }
 }
 

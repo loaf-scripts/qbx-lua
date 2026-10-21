@@ -123,6 +123,16 @@ impl Manifest {
         self.maps.iter().any(|map| crate::glob::manifest_glob_match(&map.value, relative_path))
     }
 
+    /// Whether the scripts of the resource call FiveM's fxv2 natives, which read each argument as
+    /// its parameter, spreading no vector, and give a `BOOL` as `true` or `false`: an
+    /// `fxmanifest.lua`, the manifest at `path`, turns them on with a `use_experimental_fxv2_oal`
+    /// entry, whatever its value, as the runtime only asks whether there is one. Other resources
+    /// call the generated Lua wrappers.
+    pub fn uses_fxv2_natives(&self, path: &std::path::Path) -> bool {
+        path.file_name().is_some_and(|name| name == "fxmanifest.lua")
+            && self.directives.iter().any(|directive| directive.name == "use_experimental_fxv2_oal")
+    }
+
     pub fn lua54_enabled(&self) -> bool {
         self.lua54.as_ref().is_some_and(|e| matches!(e.value.as_str(), "yes" | "true"))
     }

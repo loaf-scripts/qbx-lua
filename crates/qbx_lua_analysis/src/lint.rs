@@ -119,6 +119,7 @@ fn lint_loose_file(path: &Path, config: &Config, crossrefs: &CrossRefs) -> Optio
         locale: None,
         relative_path: "",
         value_count: None,
+        native_arg: None,
     });
     Some(FileReport { path: file.path, source: file.source, diagnostics })
 }
@@ -199,11 +200,13 @@ fn lint_resource(
                     manifest: &resource.manifest,
                     started_before: started_before.as_ref(),
                     installed: start_order.as_ref().map(|order| &order.installed),
+                    fxv2_natives: resource.manifest.uses_fxv2_natives(&resource.manifest_path),
                 }),
                 crossrefs: Some(crossrefs),
                 locale: locale.as_ref(),
                 relative_path: &file.relative,
                 value_count: None,
+                native_arg: None,
             });
             FileReport { path: file.path.clone(), source: file.source.clone(), diagnostics }
         })

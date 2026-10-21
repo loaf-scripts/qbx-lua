@@ -9362,6 +9362,125 @@ print(describe, amount)
 }
 
 #[test]
+fn vectors_spread_over_native_parameters_where_the_runtime_passes_them_so() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-native-vectors-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    let plain = "\
+local ped = PlayerPedId()
+local coords = GetEntityCoords(ped, false)
+local spot = vector4(1.0, 2.0, 3.0, 90.0)
+SetEntityCoords(ped, coords, false, false, false, true)
+SetEntityCoords(ped, spot, false, false, true)
+local found, groundZ = GetGroundZFor_3dCoord(coords, false)
+local bin = GetClosestObjectOfType(coords, 2.0, 'prop_bin_01a', false, false, false)
+local hashed = GetClosestObjectOfType(coords, 2.0, `prop_bin_01a`, false, false, false)
+SetEntityHeading(ped, coords)
+print(found, groundZ, bin, hashed, GetDistanceBetweenCoords(coords, coords, true), AddBlipForCoord(spot))
+SetEntityCoords(ped, coords)
+";
+    let fxv2 = "\
+local ped = PlayerPedId()
+local coords = GetEntityCoords(ped, false)
+SetEntityCoords(ped, coords, false, false, false, true)
+SetEntityCoords(ped, coords.x, coords.y, coords.z, false, false, false, true)
+";
+    for (name, entry, text) in [("plain", "", plain), ("fxv2", "use_experimental_fxv2_oal 'yes'\n", fxv2)] {
+        let dir = fixture.0.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = format!("fx_version 'cerulean'\ngame 'gta5'\n{entry}client_script 'main.lua'\n");
+        std::fs::write(dir.join("fxmanifest.lua"), manifest).unwrap();
+        std::fs::write(dir.join("main.lua"), text).unwrap();
+    }
+    let mut client = Client::start(fixture.0.clone());
+    client.open_with("plain/main.lua", plain);
+    client.open_with("fxv2/main.lua", fxv2);
+    let finding = |text: &str, code: &str, needle: &str, message: &str| {
+        (code.to_string(), pos(text, needle, 0).0 as u64, message.to_string())
+    };
+    let spread = |native: &str, receiver: &str, gets: &str| {
+        format!(
+            "`coords` is spread after the Lua wrapper of `{native}` binds the arguments, so {receiver} gets {gets}: \
+             pass its parts"
+        )
+    };
+    assert_eq!(
+        findings(&mut client, "plain/main.lua", &["param-type-mismatch"]),
+        [
+            finding(
+                plain,
+                "param-type-mismatch",
+                "SetEntityCoords(ped, spot",
+                "Cannot spread `vector4` over parameters `xPos`, `yPos`, `zPos` and `alive`: parameter `alive` of type \
+                 `boolean` takes no `number`"
+            ),
+            finding(
+                plain,
+                "param-type-mismatch",
+                "GetGroundZ",
+                &spread("GetGroundZFor_3dCoord", "the pointer `groundZ`", "`false`")
+            ),
+            finding(
+                plain,
+                "param-type-mismatch",
+                "GetClosestObjectOfType(coords, 2.0, 'prop",
+                &spread("GetClosestObjectOfType", "parameter `modelHash`", "`'prop_bin_01a'` unhashed")
+            ),
+            finding(
+                plain,
+                "param-type-mismatch",
+                "SetEntityHeading",
+                "Cannot spread `vector3` from parameter `heading`: 1 parameter is left for its 3 parts"
+            ),
+        ]
+    );
+    let vectors = "the fxv2 natives that `use_experimental_fxv2_oal` turns on do not spread vectors";
+    assert_eq!(
+        findings(&mut client, "fxv2/main.lua", &["param-type-mismatch"]),
+        [finding(
+            fxv2,
+            "param-type-mismatch",
+            "SetEntityCoords(ped, coords,",
+            &format!("Cannot assign `vector3` to parameter `xPos` of type `number`: {vectors}")
+        )]
+    );
+
+    // With `strict`, the arguments of natives are counted with the parts of the vectors spread.
+    client.set_strict(true);
+    assert_eq!(
+        findings(&mut client, "plain/main.lua", &["missing-parameter"]),
+        [finding(
+            plain,
+            "missing-parameter",
+            "SetEntityCoords(ped, coords)",
+            "'SetEntityCoords' is called with 2 arguments, which fill 4 parameters, but needs 8; 'alive' (boolean) will \
+             be nil"
+        )]
+    );
+    assert_eq!(
+        findings(&mut client, "fxv2/main.lua", &["missing-parameter"]),
+        [finding(
+            fxv2,
+            "missing-parameter",
+            "SetEntityCoords(ped, coords,",
+            "'SetEntityCoords' is called with 6 arguments, but needs 8; 'ragdollFlag' (boolean) will be nil"
+        )]
+    );
+}
+
+#[test]
 fn natives_take_their_arguments_as_the_runtime_converts_them() {
     let mut client = Client::start(fixture_root());
     let text = "\

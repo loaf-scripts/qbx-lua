@@ -724,16 +724,18 @@ impl<'a> Infer<'a> {
     /// `1` or `false`, and the `BOOL` that a pointer it fills holds as the integer `0` or `1`, unless
     /// the resource calls the fxv2 natives, which give both as a `boolean`.
     pub fn native_return(&self, native: &qbx_fivem_data::Native, index: usize) -> Option<Type> {
-        if !self.strict_natives || native.returns().nth(index) != Some("boolean") {
-            return None;
-        }
-        if self.index.resource_of(self.ctx.file).is_some_and(ResourceEntry::uses_fxv2_natives) {
+        if !self.strict_natives || native.returns().nth(index) != Some("boolean") || self.uses_fxv2_natives() {
             return None;
         }
         Some(match index == 0 && native.returns_result() {
             true => Type::union([Type::IntLit(1), Type::BooleanLit(false)]),
             false => Type::union([Type::IntLit(0), Type::IntLit(1)]),
         })
+    }
+
+    /// Whether the resource of the file calls the fxv2 natives; see `ResourceEntry::uses_fxv2_natives`.
+    pub fn uses_fxv2_natives(&self) -> bool {
+        self.index.resource_of(self.ctx.file).is_some_and(ResourceEntry::uses_fxv2_natives)
     }
 
     /// The signature of `native`, with the types of the values it returns as `native_return` reads

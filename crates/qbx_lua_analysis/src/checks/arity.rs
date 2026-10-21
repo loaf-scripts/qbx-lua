@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use qbx_fivem_data::{native, Native, Side};
+use qbx_fivem_data::{native, ArgKind, Native, ParamKind, Side, WrapperParam};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
-use qbx_lua_syntax::{SmolStr, Span};
+use qbx_lua_syntax::{NumberValue, SmolStr, Span};
 use qbx_luacats::luacats::{applies_on, parse_doc_lines};
 use qbx_luacats::types::{FunType, Type};
 use rustc_hash::FxHashMap;
@@ -123,11 +123,43 @@ impl<'i, 'a> Callees<'i, 'a> {
     /// so natives are only checked in strict mode.
     fn runtime_defs(&self, path: &str, side: Option<Side>) -> Vec<Option<Arc<FunType>>> {
         let stubs: Vec<_> = builtins().functions(path, side).map(|fun| Some(fun.clone())).collect();
-        if !stubs.is_empty() || !self.input.config.strict() {
+        if !stubs.is_empty() {
             return stubs;
         }
+        self.runtime_native(path, side).map(|found| vec![Some(native_signature(found))]).unwrap_or_default()
+    }
+
+    /// With `strict`, the native that a call of the global at `path` runs, when no stub declares a
+    /// runtime function of that name.
+    fn runtime_native(&self, path: &str, side: Option<Side>) -> Option<Native> {
+        if !self.input.config.strict() || builtins().functions(path, side).next().is_some() {
+            return None;
+        }
         let available = |found: &Native| found.side.is_available_on(side.unwrap_or(Side::Shared));
-        native(path).filter(available).map(|found| vec![Some(native_signature(found.on(side)))]).unwrap_or_default()
+        native(path).filter(available).map(|found| found.on(side))
+    }
+
+    /// The native whose signature `signatures` gives a call of `root.fields`: a global that the
+    /// workspace does not define.
+    fn native_called(&self, call: &Expr, root: &Name, fields: &[&str]) -> Option<Native> {
+        if !matches!(self.input.resolution.resolve_at(root.span.start)?, Resolved::Global(_)) || self.env().opaque {
+            return None;
+        }
+        let side = self.regions.effective(call.span.start, self.input.side);
+        let path = global_key(&root.text, fields)?;
+        if self.env().function_defs(&path, side).next().is_some() {
+            return None;
+        }
+        self.runtime_native(&path, side)
+    }
+
+    /// What `arg`, passed to a native, is: as the types of the language server tell, or else as its
+    /// syntax shows.
+    fn arg_kind(&self, arg: &Expr) -> ArgKind {
+        match self.input.native_arg {
+            Some(kind) => kind(arg),
+            None => written_kind(self.input, arg),
+        }
     }
 
     /// The function types that the functions `call` may run declare for its argument at
@@ -305,39 +337,84 @@ impl Calls<'_, '_, '_, '_> {
         // Any definition or overload may be the one that runs.
         let Some(signatures) = self.callees.signatures(call, root, fields) else { return };
         let signatures: Vec<&FunType> = signatures.iter().map(|fun| fun.as_ref()).collect();
-        self.missing(&signatures, args, via_colon, span, display);
+        let native = self.callees.native_called(call, root, fields);
+        self.missing(&signatures, args, via_colon, span, display, native);
         self.redundant(&signatures, args, via_colon, display);
     }
 
     /// `missing-parameter`, for the signature that needs the fewest arguments. A call at the end
-    /// passes as many values as it gives, which only the language server tells.
-    fn missing(&mut self, signatures: &[&FunType], args: &[Expr], via_colon: bool, span: Span, display: &str) {
+    /// passes as many values as it gives, which only the language server tells. A vector passed to
+    /// a `native` fills a parameter for each of its parts where the runtime spreads it.
+    fn missing(
+        &mut self,
+        signatures: &[&FunType],
+        args: &[Expr],
+        via_colon: bool,
+        span: Span,
+        display: &str,
+        native: Option<Native>,
+    ) {
         let given = |last: &Expr| match last.is_call() {
             true => self.callees.input.value_count.and_then(|count| count(last)),
             false => None,
         };
         let passed = passed_count(args, 0).or_else(|| Some(args.len() - 1 + given(args.last()?)?));
         let Some(passed) = passed else { return };
+        let (filled, most) = match native.filter(|_| passed == args.len()) {
+            Some(native) => self.native_filled(native, args),
+            None => (passed, passed),
+        };
         let env = self.callees.env();
         let alias = |name: &str| env.alias(name);
         let least = signatures
             .iter()
             .map(|fun| Requirement::of(fun, via_colon, &alias))
             .min_by_key(|requirement| requirement.arguments);
-        let Some(least) = least.filter(|least| passed < least.arguments) else { return };
-        let missing = match least.first_missing(passed) {
+        let Some(least) = least.filter(|least| most < least.arguments) else { return };
+        let missing = match least.first_missing(filled) {
             Some(param) => format!("'{}' ({})", param.name, param.ty),
             None => "'self' (call it with ':')".to_string(),
         };
         self.sink.report(
             rules::MISSING_PARAMETER,
             span,
-            format!(
-                "'{display}' is called with {passed} argument{}, but needs {}; {missing} will be nil",
-                plural(passed),
-                least.arguments
-            ),
+            match filled == passed {
+                true => format!(
+                    "'{display}' is called with {passed} argument{}, but needs {}; {missing} will be nil",
+                    plural(passed),
+                    least.arguments
+                ),
+                false => format!(
+                    "'{display}' is called with {passed} argument{}, which fill {filled} parameters, but needs {}; \
+                     {missing} will be nil",
+                    plural(passed),
+                    least.arguments
+                ),
+            },
         );
+    }
+
+    /// How many parameters of `native` `args` fill, and how many they may fill at most: the runtime
+    /// spreads a vector over a parameter for each of its parts, unless the fxv2 natives read the
+    /// arguments, and an argument of no known kind for a number parameter may be a vector of up to
+    /// four parts.
+    fn native_filled(&self, native: Native, args: &[Expr]) -> (usize, usize) {
+        if self.callees.input.resource.is_some_and(|resource| resource.fxv2_natives) {
+            return (args.len(), args.len());
+        }
+        let kinds: Vec<ArgKind> = args.iter().map(|arg| self.callees.arg_kind(arg)).collect();
+        let spread = native.spread(&kinds);
+        let taken: Vec<WrapperParam> =
+            native.wrapper_params().filter(|param| param.kind != ParamKind::Filled).collect();
+        let widest: Vec<ArgKind> = kinds
+            .iter()
+            .zip(&spread.targets)
+            .map(|(kind, &target)| match kind {
+                ArgKind::Unknown if taken.get(target).is_some_and(WrapperParam::takes_parts) => ArgKind::Vector(4),
+                kind => *kind,
+            })
+            .collect();
+        (spread.filled, native.spread(&widest).filled)
     }
 
     /// `redundant-parameter`, for the signature that takes the most arguments, at the arguments
@@ -374,5 +451,41 @@ fn function_type<'t>(ty: &Type, alias: &impl Fn(&str) -> Option<&'t Type>, depth
             function_type(alias(name)?, alias, depth + 1)
         }
         _ => None,
+    }
+}
+
+/// What `arg` is as its syntax shows: a literal, a function, a comparison, or the vector that a
+/// constructor such as `vector3(x, y, z)` or a native such as `GetEntityCoords` returns. Anything
+/// else may be a vector, as `a + b` is for vectors.
+fn written_kind(input: &FileInput, arg: &Expr) -> ArgKind {
+    match &arg.unparen().kind {
+        ExprKind::String(_) | ExprKind::Binary { op: BinOp::Concat, .. } => ArgKind::String,
+        ExprKind::Nil | ExprKind::False => ArgKind::Zero,
+        ExprKind::Number(NumberValue::Int(0)) => ArgKind::Zero,
+        ExprKind::Number(NumberValue::Float(value)) if *value == 0.0 => ArgKind::Zero,
+        ExprKind::Number(_) | ExprKind::True | ExprKind::Table(_) => ArgKind::Value,
+        ExprKind::Unary { op: UnOp::Not | UnOp::Len, .. } => ArgKind::Value,
+        ExprKind::Binary { op: BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, .. } => {
+            ArgKind::Value
+        }
+        ExprKind::Function(_) => ArgKind::Function,
+        ExprKind::Call { callee, .. } => {
+            let ExprKind::Name(name) = &callee.unparen().kind else { return ArgKind::Unknown };
+            if !matches!(input.resolution.resolve_at(name.span.start), Some(Resolved::Global(_))) {
+                return ArgKind::Unknown;
+            }
+            match name.text.as_str() {
+                "vector2" | "vec2" => ArgKind::Vector(2),
+                "vector3" | "vec3" => ArgKind::Vector(3),
+                "vector4" | "vec4" | "quat" => ArgKind::Vector(4),
+                name => match native(name).filter(Native::returns_result).and_then(|n| n.returns().next()) {
+                    Some("vector3") => ArgKind::Vector(3),
+                    Some("string") => ArgKind::String,
+                    Some("any" | "table") | None => ArgKind::Unknown,
+                    Some(_) => ArgKind::Value,
+                },
+            }
+        }
+        _ => ArgKind::Unknown,
     }
 }
