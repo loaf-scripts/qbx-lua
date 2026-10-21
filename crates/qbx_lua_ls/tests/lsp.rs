@@ -12249,6 +12249,37 @@ local loose = free(1)
 }
 
 #[test]
+fn function_types_name_their_returned_values_as_lua_language_server_reads_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type fun(): ok: boolean, err: string
+local check
+---@param job fun(): (count: integer)
+local function run(job)
+    local counted = job()
+    return counted
+end
+---@alias Probe.Entry { handler: (fun(): any), onActive?: fun(active: boolean), motion?: number }
+---@type Probe.Entry
+local entry = { handler = function() end }
+local ok, err = check()
+print(ok, err, run, entry)
+";
+    client.open_with(CLIENT, text);
+    assert!(findings(&mut client, CLIENT, &["undefined-doc-name"]).is_empty());
+    for (needle, expected) in
+        [("ok, err", "local ok: boolean"), ("err = check", "local err: string"), ("counted", "local counted: integer")]
+    {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (l, c) = pos(text, "entry =", 0);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("onActive") && hover.contains("motion"), "{hover}");
+}
+
+#[test]
 fn async_function_types_are_function_types() {
     let mut client = Client::start(fixture_root());
     let text = "\

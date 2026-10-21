@@ -990,15 +990,16 @@ impl<'a> TypeParser<'a> {
         sets.map(|_| names)
     }
 
-    /// The types of a parenthesized list with a comma in it, such as `(string, string)`. A
-    /// parenthesized type like `(string|number)` is none and leaves the parser where it was.
+    /// The types of a parenthesized list of returned values with a comma in it, such as
+    /// `(string, string)`. A parenthesized type like `(string|number)` is none and leaves the parser
+    /// where it was.
     fn value_list(&mut self) -> Option<Vec<Type>> {
         if self.peek() != b'(' {
             return None;
         }
         let start = (self.pos, self.names.as_ref().map(Vec::len));
         self.pos += 1;
-        let first = self.parse();
+        let first = self.return_value();
         self.skip_ws();
         if self.peek() != b',' {
             self.rewind(start);
@@ -1006,8 +1007,32 @@ impl<'a> TypeParser<'a> {
         }
         self.pos += 1;
         let mut values = vec![first];
-        values.extend(self.list_until(b')'));
+        while !self.eat(b')') && self.pos < self.src.len() {
+            let before = self.pos;
+            let ty = self.return_value();
+            if self.pos == before {
+                break;
+            }
+            values.push(ty);
+            self.eat(b',');
+        }
         Some(values)
+    }
+
+    /// A value that a function returns, where lua-language-server reads `...: string` as any number
+    /// of strings. In a function type, `postfix` skips a name before it, as the `ok` of
+    /// `fun(): ok: boolean`.
+    fn return_value(&mut self) -> Type {
+        let start = self.pos;
+        self.skip_ws();
+        if self.rest().starts_with("...") {
+            self.pos += 3;
+            if self.eat(b':') {
+                return Type::Variadic(Box::new(self.parse()));
+            }
+        }
+        self.pos = start;
+        self.parse()
     }
 
     /// Goes back to a position taken before a parse that did not work out, with the names it found.
@@ -1225,8 +1250,11 @@ impl<'a> TypeParser<'a> {
         }
     }
 
+    /// The values that a function type returns, named or not, as lua-language-server reads them:
+    /// a `name:` after a comma is the next value, also where the function type is a parameter or a
+    /// field, as `b` is a value `cb` returns in `fun(cb: fun(): number, b: string)`.
     fn parse_return_list(&mut self) -> Vec<Type> {
-        let mut types = vec![self.parse()];
+        let mut types = vec![self.return_value()];
         loop {
             let checkpoint = self.pos;
             if !self.eat(b',') {
@@ -1234,7 +1262,7 @@ impl<'a> TypeParser<'a> {
             }
             self.skip_ws();
             let before = self.pos;
-            let ty = self.parse();
+            let ty = self.return_value();
             if self.pos == before || ty.is_unknown() {
                 self.pos = checkpoint;
                 break;
@@ -1267,11 +1295,35 @@ impl<'a> TypeParser<'a> {
             } else {
                 self.skip_char();
             }
+            self.skip_to_separator();
             if !self.eat(b',') {
                 self.eat(b';');
             }
         }
         Type::Shape(Arc::new(shape))
+    }
+
+    /// Skips what follows an entry of a shape up to the `,`, `;` or `}` after it, with the brackets
+    /// and quotes in it balanced: the `: fun(active: boolean)` that a field leaves when the function
+    /// type before it reads it as a returned value, as lua-language-server reads
+    /// `{ handler: fun(): any, onActive?: fun(active: boolean) }`.
+    fn skip_to_separator(&mut self) {
+        let mut depth = 0usize;
+        while self.pos < self.src.len() {
+            match self.peek() {
+                b',' | b';' | b'}' | b')' | b']' | b'>' if depth == 0 => return,
+                b'(' | b'{' | b'[' | b'<' => depth += 1,
+                b')' | b'}' | b']' | b'>' => depth -= 1,
+                quote @ (b'"' | b'\'') => {
+                    self.pos += 1;
+                    while self.pos < self.src.len() && self.peek() != quote {
+                        self.pos += 1;
+                    }
+                }
+                _ => {}
+            }
+            self.pos += 1;
+        }
     }
 }
 
@@ -1285,6 +1337,32 @@ mod tests {
 
     fn roundtrip(text: &str) -> String {
         parse_type(text).to_string()
+    }
+
+    #[test]
+    fn function_types_name_their_returned_values_as_lua_language_server_reads_them() {
+        let returns = |text: &str| match parse_type(text) {
+            Type::Fun(fun) => fun.returns.iter().map(Type::to_string).collect::<Vec<_>>(),
+            other => panic!("{text} is no function type: {other:?}"),
+        };
+        assert_eq!(returns("fun(): ok: boolean, err: string"), ["boolean", "string"]);
+        assert_eq!(returns("fun(): (ok: boolean)"), ["boolean"]);
+        assert_eq!(returns("fun(): (boolean, err: string?)"), ["boolean", "string?"]);
+        assert_eq!(returns("fun(): string?, n: integer"), ["string?", "integer"]);
+        assert_eq!(returns("fun(): ...: string"), ["...string"]);
+        assert_eq!(returns("fun(): (string|number)"), ["string|number"]);
+        // A `name:` after a comma is the next value, also where the function type is a parameter.
+        let Type::Fun(outer) = parse_type("fun(cb: fun(): number, b: string)") else { panic!() };
+        assert_eq!(outer.params.len(), 1);
+        assert_eq!(outer.params[0].ty.to_string(), "fun(): number, string");
+        // In a shape, what a field leaves after the function type takes is skipped.
+        let Type::Shape(shape) =
+            parse_type("{ handler: fun(): any, onActive?: fun(active: boolean), motion?: number }")
+        else {
+            panic!()
+        };
+        let fields: Vec<&str> = shape.fields.iter().map(|field| field.name.as_str()).collect();
+        assert_eq!(fields, ["handler", "motion"]);
     }
 
     #[test]
@@ -1395,7 +1473,7 @@ mod tests {
     fn characters_outside_ascii_in_lists_are_skipped_whole() {
         assert_eq!(roundtrip("fun(é: string)"), "fun(string)");
         assert_eq!(roundtrip("fun(a: string, —, b: number): boolean"), "fun(a: string, b: number): boolean");
-        assert_eq!(roundtrip("{ ü: string, a: number }"), "{ string: unknown, a: number }");
+        assert_eq!(roundtrip("{ ü: string, a: number }"), "{ a: number }");
     }
 
     #[test]
