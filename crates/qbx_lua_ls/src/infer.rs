@@ -1733,13 +1733,18 @@ impl<'a> Infer<'a> {
     }
 
     /// What a local declared as `declared` holds once it is given a value of type `value`: the parts
-    /// of `declared` of the kinds of value it may be, as the `string` of a `string?` for `'x'`. A
-    /// value of no known kind, or of none of those kinds, which `assign-type-mismatch` reports,
-    /// leaves all of it.
+    /// of `declared` of the kinds of value it may be, as the `string` of a `string?` for `'x'`, and
+    /// the class of a value that is a class `declared` names or a subclass of one, as `point =
+    /// toVector3(point)` makes a `vector3` of a `vector3|vector4|TablePoint`, as lua-language-server
+    /// narrows them. A value of no known kind, or of none of those kinds, which
+    /// `assign-type-mismatch` reports, leaves all of it.
     pub fn bounded(&self, declared: &Type, value: &Type) -> Type {
         let fun = FunType::default();
         let Some(kinds) = self.value_kinds(&fun, value, false, 0) else { return declared.clone() };
         let expanded = self.expand_aliases(declared, 0);
+        if self.names_class_of(&expanded, value) {
+            return value.clone();
+        }
         let Type::Union(parts) = &expanded else { return declared.clone() };
         let fits = |part: &&Type| self.value_kinds(&fun, part, false, 0).is_none_or(|part| part & kinds != 0);
         let kept: Vec<Type> = parts.iter().filter(fits).cloned().collect();
@@ -1747,6 +1752,22 @@ impl<'a> Infer<'a> {
             return declared.clone();
         }
         expanded.rebuilt(kept)
+    }
+
+    /// Whether `value` is of a class that `declared`, with its aliases expanded, names or that extends
+    /// one it names.
+    fn names_class_of(&self, declared: &Type, value: &Type) -> bool {
+        let Type::Named(class, _) = value else { return false };
+        if self.index.class(class, self.side).is_none() {
+            return false;
+        }
+        let parts = match declared {
+            Type::Union(parts) => parts.as_slice(),
+            one => std::slice::from_ref(one),
+        };
+        parts.iter().any(|part| {
+            matches!(part, Type::Named(name, _) if self.index.class(name, self.side).is_some() && self.class_extends(class, name))
+        })
     }
 
     /// The type of the name at `index` of a `local` statement. A name that takes what a call returns,

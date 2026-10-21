@@ -17500,3 +17500,43 @@ print(annotated, typed)
         "with `strict` they are checked as other values are"
     );
 }
+
+#[test]
+fn declared_locals_take_the_class_of_the_value_they_are_given() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.TablePoint
+---@field x number
+---@alias Probe.Point vector3|vector4|Probe.TablePoint
+
+---@param v vector3
+local function takesVector(v) print(v) end
+
+---@param point Probe.Point
+---@return vector3
+local function toVector3(point) return vector3(point.x, 0, 0) end
+
+---@param point Probe.Point
+local function viaParam(point)
+    point = toVector3(point)
+    takesVector(point)
+end
+
+---@param given Probe.Point
+local function viaTyped(given)
+    ---@type Probe.Point
+    local typed = given
+    typed = toVector3(typed)
+    takesVector(typed)
+end
+print(viaParam, viaTyped)
+";
+    client.open_with(CLIENT, text);
+    for needle in ["point)\nend", "typed)\nend"] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(": vector3"), "{needle}: {hover}");
+    }
+    let found = findings(&mut client, CLIENT, &["param-type-mismatch"]);
+    assert!(found.is_empty(), "as lua-language-server narrows them: {found:?}");
+}
