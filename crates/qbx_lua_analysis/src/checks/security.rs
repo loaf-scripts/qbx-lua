@@ -40,6 +40,9 @@ const VALIDATORS: &[&str] =
     &["assert", "type", "tonumber", "tostring", "math.type", "math.floor", "math.abs", "lib.assert"];
 const PLAYER_ID_NAMES: &[&str] = &["source", "src", "playerSource", "playerSrc"];
 const SQL_ROOTS: &[&str] = &["MySQL", "exports.oxmysql", "exports.ghmattimysql", "exports.mysql-async"];
+/// Statements that change the schema. They take no `?` placeholders: what is built into them is
+/// names and definitions of tables, columns and indexes, which no parameter can stand for.
+const SCHEMA_STATEMENTS: &[&str] = &["ALTER", "CREATE", "DROP", "TRUNCATE", "RENAME"];
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     if input.side == Some(Side::Client) {
@@ -63,6 +66,9 @@ impl Security<'_, '_> {
             return;
         }
         let Some(query) = args.first() else { return };
+        if changes_schema(query) {
+            return;
+        }
         // A parameter table next to the query means values are bound; what is concatenated then is
         // structure (a WHERE clause, a column list), which placeholders cannot express.
         let binds_parameters = args.get(1).is_some_and(|arg| !matches!(arg.kind, ExprKind::Function(_)));
@@ -128,6 +134,22 @@ impl Security<'_, '_> {
             }
         }
     }
+}
+
+/// Whether the query `query` builds starts with a statement that changes the schema, as
+/// `('ALTER TABLE `%s` %s'):format(name, clauses)` does.
+fn changes_schema(query: &Expr) -> bool {
+    let mut start = query.unparen();
+    loop {
+        match &start.kind {
+            ExprKind::Binary { op: BinOp::Concat, lhs, .. } => start = lhs.unparen(),
+            ExprKind::MethodCall { base, method, .. } if method.text == "format" => start = base.unparen(),
+            _ => break,
+        }
+    }
+    let Some(text) = start.as_string() else { return false };
+    let keyword = text.trim_start().split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or_default();
+    SCHEMA_STATEMENTS.iter().any(|statement| keyword.eq_ignore_ascii_case(statement))
 }
 
 fn has_dynamic_part(expr: &Expr) -> bool {

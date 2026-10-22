@@ -119,7 +119,7 @@ TypeScript's strict mode does; see [Strict mode](reference.md#strict-mode).
 | --- | --- | --- |
 | `security/client-supplied-source` | warning | A server net event accepts a player identifier from its caller. |
 | `security/unvalidated-event-argument` | warning | A client argument reaches a sensitive call without a recognized check. |
-| `security/sql-concatenation` | warning | A query is assembled with concatenation without a recognized parameter argument, or with `:format()` that inserts a `%s` other than an identifier written as `` `%s` ``. |
+| `security/sql-concatenation` | warning | A query is assembled with concatenation without a recognized parameter argument, or with `:format()` that inserts a `%s` other than an identifier written as `` `%s` ``. Statements that change the schema (`ALTER`, `CREATE`, `DROP`, `TRUNCATE`, `RENAME`) take no placeholders and are not checked. |
 
 These checks do not prove validation or authorization. For example, recognizing a parameter in
 a guard does not establish that the guard always runs before the sensitive operation. Review the

@@ -591,6 +591,16 @@ fn sql_must_use_placeholders() {
         lint("local name = 'players'\nMySQL.query(('SHOW COLUMNS FROM `%s`'):format(name))"),
         Vec::<&str>::new()
     );
+    // Statements that change the schema take no placeholders.
+    assert_eq!(
+        lint("local clauses = { 'ADD INDEX `a` (`a`)' }\nMySQL.query.await(('ALTER TABLE `%s` %s'):format('users', table.concat(clauses, ', ')))"),
+        Vec::<&str>::new()
+    );
+    assert_eq!(lint("local name = 'x'\nMySQL.query(' create table ' .. name .. ' (id INT)')"), Vec::<&str>::new());
+    assert_eq!(
+        lint("local name = 'x'\nMySQL.query(('SELECT * FROM %s WHERE altered = 1'):format(name))"),
+        ["security/sql-concatenation"]
+    );
 }
 
 #[test]
