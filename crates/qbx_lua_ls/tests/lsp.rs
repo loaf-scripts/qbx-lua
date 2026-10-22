@@ -3734,6 +3734,31 @@ set({ name = 'a', pay = 1 }, 1, 1)
 }
 
 #[test]
+fn fields_a_class_declares_hide_those_of_its_parents() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Kind 'a'|'b'
+
+---@class Test.Parent
+---@field kind Test.Kind
+
+---@class Test.Child : Test.Parent
+---@field kind 'a'
+
+---@param child Test.Child
+local function read(child)
+    local kind = child.kind
+    return kind
+end
+read({ kind = 'a' })
+";
+    client.open_with(CLIENT, text);
+    let (line, character) = pos(text, "local kind", 6);
+    let hover = client.hover_text(CLIENT, line, character);
+    assert!(hover.contains("local kind: \"a\""), "{hover}");
+}
+
+#[test]
 fn type_checks_and_literal_comparisons_narrow_the_locals_they_test() {
     let mut client = Client::start(fixture_root());
     let text = "\

@@ -4674,6 +4674,8 @@ impl<'a> Infer<'a> {
             }
         }
         let fields = out.len() > own;
+        // A field the class declares itself hides those of the same name its parents declare.
+        let declared: Vec<SmolStr> = out[own..].iter().map(|member| member.name.clone()).collect();
         self.owner_members(name, filter, out);
         // The functions its fields declare take the signatures of the methods set on its table.
         if fields {
@@ -4685,12 +4687,17 @@ impl<'a> Infer<'a> {
                 member.ty = substitute(&member.ty, &bindings);
             }
         }
+        let inherited = out.len();
         for (_, parent) in bound_parents(&defs, args) {
             match parent {
                 Type::Named(parent, args) => self.class_members(&parent, &args, filter, out, visited, depth + 1),
                 shape @ Type::Shape(_) => out.extend(self.guarded(|| self.members_matching(&shape, filter))),
                 _ => {}
             }
+        }
+        if !declared.is_empty() && out.len() > inherited {
+            let parents = out.split_off(inherited);
+            out.extend(parents.into_iter().filter(|member| !declared.contains(&member.name)));
         }
     }
 }
