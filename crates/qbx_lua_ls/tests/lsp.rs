@@ -5671,6 +5671,50 @@ send({ to = 'a' })
 }
 
 #[test]
+fn fields_of_unions_hold_what_each_type_declares() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.FieldA
+---@field id string
+
+---@class Test.FieldB
+---@field id string
+---@field catalog? boolean
+
+---@class Test.TabBase
+---@field label string
+
+---@class Test.TabA : Test.TabBase
+---@field fields Test.FieldA[]
+
+---@class Test.TabB : Test.TabBase
+---@field fields Test.FieldB[]
+
+---@alias Test.AnyTab Test.TabBase | Test.TabA | Test.TabB
+
+---@param tab Test.AnyTab
+---@param pair Test.TabA|Test.TabB
+local function getField(tab, pair)
+    local both = pair.fields
+    for i = 1, #tab.fields do
+        local field = tab.fields[i]
+        if field.catalog then
+            return field, both
+        end
+    end
+end
+
+getField({ label = 'l', fields = {} }, { label = 'l', fields = {} })
+";
+    client.open_with(CLIENT, text);
+    let (line, character) = pos(text, "both = pair", 0);
+    let hover = client.hover_text(CLIENT, line, character);
+    assert!(hover.contains("Test.FieldA[]|Test.FieldB[]"), "{hover}");
+    client.set_strict(true);
+    assert_eq!(findings(&mut client, CLIENT, &["undefined-field"]), [], "as in lua-language-server");
+}
+
+#[test]
 fn undefined_field_reports_fields_read_from_values_whose_type_lacks_them() {
     let mut client = Client::start(fixture_root());
     let text = "\

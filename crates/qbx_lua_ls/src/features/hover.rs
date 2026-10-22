@@ -333,10 +333,10 @@ impl Overview<'_, '_> {
                 Type::Fun(_) if !self.detail.reaches(from + 1) => self.out.push_str("function"),
                 Type::GlobalTable(path) => self.table(path, from + 1, indent),
                 // Tables that several files assign merge into a bare `table`, while reading the
-                // field finds the one the index holds, as hovering it does.
-                Type::Table => match self.infer.member(owner, &member.name).map(|info| info.ty) {
-                    Some(Type::GlobalTable(path)) => self.table(&path, from + 1, indent),
-                    _ => self.out.push_str("table"),
+                // field finds the ones the index holds, as hovering it does: the first is written out.
+                Type::Table => match self.infer.member(owner, &member.name).and_then(|info| first_table(&info.ty)) {
+                    Some(path) => self.table(&path, from + 1, indent),
+                    None => self.out.push_str("table"),
                 },
                 other => {
                     self.shown.push(other.clone());
@@ -383,6 +383,15 @@ impl Overview<'_, '_> {
 {}}}",
             "    ".repeat(indent)
         ));
+    }
+}
+
+/// The path of the table the index holds that `ty` is, or the first of a union of them.
+fn first_table(ty: &Type) -> Option<SmolStr> {
+    match ty {
+        Type::GlobalTable(path) => Some(path.clone()),
+        Type::Union(parts) => parts.iter().find_map(first_table),
+        _ => None,
     }
 }
 

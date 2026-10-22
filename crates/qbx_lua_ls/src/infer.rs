@@ -4266,6 +4266,25 @@ impl<'a> Infer<'a> {
 
     pub fn member(&self, ty: &Type, name: &str) -> Option<MemberInfo> {
         self.guarded(|| {
+            // A field of a union holds what it holds in each of the types that have it, as
+            // lua-language-server reads it: `fields` of `TabA|TabB` is `FieldA[]|FieldB[]`. One whose
+            // type is unknown tells nothing next to the others.
+            let resolved = match ty {
+                Type::Named(..) | Type::Require(_) => Cow::Owned(self.resolve_alias(ty)),
+                _ => Cow::Borrowed(ty),
+            };
+            if let Type::Union(parts) = &*resolved {
+                let found: Vec<MemberInfo> = parts
+                    .iter()
+                    .filter(|part| !matches!(part, Type::Nil))
+                    .filter_map(|part| self.member(part, name))
+                    .collect();
+                let known = found.iter().filter(|member| !member.ty.is_unknown()).count();
+                let mut found = found.into_iter().filter(|member| known == 0 || !member.ty.is_unknown());
+                let first = found.next()?;
+                let types: Vec<Type> = std::iter::once(first.ty.clone()).chain(found.map(|member| member.ty)).collect();
+                return Some(MemberInfo { ty: Type::union(types), ..first });
+            }
             let mut found = self.members_matching(ty, Some(name));
             if found.is_empty() {
                 return indexed_field(name, self.index_value(ty, &Type::StringLit(SmolStr::new(name)), 0));
