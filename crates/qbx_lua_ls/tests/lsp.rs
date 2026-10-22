@@ -2827,6 +2827,67 @@ end
 }
 
 #[test]
+fn functions_that_runtime_functions_run_right_away_keep_the_narrowing() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Call
+---@field onKeypad? fun(key: string)
+
+---@type Probe.Call?
+local call
+
+function EndProbeCall()
+    call = nil
+end
+
+function ProbeKeypad(key)
+    if not call then return end
+    if not call.onKeypad then return end
+    Citizen.CreateThreadNow(function()
+        call.onKeypad(key) -- now
+    end)
+    Citizen.CreateThreadNow(function()
+        Wait(0)
+        call.onKeypad(key) -- waited
+    end)
+    CreateThread(function()
+        call.onKeypad(key) -- later
+    end)
+    pcall(function() call.onKeypad(key) end) -- protected
+    xpcall(print, function() call.onKeypad(key) end) -- handled
+    table.sort({ 'a', 'b' }, function(a, b)
+        call.onKeypad(a) -- sorted
+        return a < b
+    end)
+    local text = ('ab'):gsub('a', function(found)
+        call.onKeypad(found) -- replaced
+        return found
+    end)
+    print(text, string.gsub('ab', 'b', function(found) call.onKeypad(found) end)) -- gsub
+end
+";
+    client.open_with(CLIENT, text);
+    let finding = |needle: &str, name: &str, ty: &str| {
+        let message = format!("`{name}` may be nil: its type here is `{ty}`");
+        ("need-check-nil".to_string(), pos(text, needle, 0).0 as u64, message)
+    };
+    let call = |needle: &str| finding(needle, "call", "Probe.Call?");
+    let keypad = |needle: &str| finding(needle, "call.onKeypad", "(fun(key: string))?");
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [call("-- later")],
+        "`pcall`, `xpcall`, `table.sort`, `gsub` and `Citizen.CreateThreadNow` run their functions before \
+         anything else may assign `call`, while `CreateThread` runs it later"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["need-check-nil"]),
+        [keypad("-- waited"), call("-- waited"), keypad("-- later"), call("-- later")],
+        "with `strict`, a function that `Citizen.CreateThreadNow` runs goes on later once it yields"
+    );
+}
+
+#[test]
 fn functions_that_runtime_functions_run_later_leave_the_narrowing_alone() {
     let mut client = Client::start(fixture_root());
     let text = "\

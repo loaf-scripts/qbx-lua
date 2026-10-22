@@ -388,7 +388,9 @@ fn name_root(resolution: &Resolution, name: &Name) -> Root {
 /// runs any time after it is created: inside it, a local may also hold what the code after its
 /// creation and the other functions assign, and once a function that assigns it is created, the
 /// code around may find what any function gives it, unless a runtime function that runs it later,
-/// as `SetTimeout` does, is given it. A call that yields, as `Wait(0)` does, lets that code run
+/// as `SetTimeout` does, is given it. One that a runtime function runs right away, as `pcall` and
+/// `Citizen.CreateThreadNow` do, starts with what the locals hold where it is given, and its fields
+/// too. A call that yields, as `Wait(0)` does, lets that code run
 /// too, so after one the locals it may assign hold any value it gives them again, and another call
 /// may run that code, so after one they may also hold what it gives them, which `Flow::counts`
 /// tells who reads it whether to take.
@@ -398,7 +400,7 @@ fn name_root(resolution: &Resolution, name: &Name) -> Root {
 /// value it stores, until something may change them: an assignment to the local or global or to a
 /// field of the same name of any table; a call that is given, or an assignment for a key that is not
 /// known to, the local or global, a table the field is read through, a local copied from one of them
-/// or a table built with them; a call that yields; or the start of a function, which runs later.
+/// or a table built with them; a call that yields; or the start of a function that runs later.
 /// Another call that may run code of a script changes the fields of any table as `Flow::counts`
 /// tells. A global itself, as `TabletId`, is narrowed the same way, as a field read through no
 /// keys, except that what the guards told about it still holds after a call that yields and in a
@@ -757,6 +759,8 @@ struct Walker<'a, 'r> {
     ran: FxHashMap<(Option<u32>, Ran), u32>,
     /// The functions that runtime functions are given to run later, by where they start.
     deferred: FxHashSet<u32>,
+    /// The functions that runtime functions are given to run right away, by where they start.
+    immediate: FxHashSet<u32>,
     aliases: Aliases,
     /// What the locals hold at the `goto`s that jump ahead to a label, by where its statement starts,
     /// as what changed since the block of the label started.
@@ -839,8 +843,8 @@ impl<'a, 'r> Walker<'a, 'r> {
         let functions: FxHashMap<u32, FuncId> =
             resolution.functions.iter().enumerate().skip(1).map(|(id, func)| (func.span.start, id as FuncId)).collect();
         let (yields, runs) = Yields::of(chunk, resolution, &functions);
-        let mut deferred = Deferred { resolution, out: FxHashSet::default() };
-        deferred.visit_block(&chunk.block);
+        let mut callbacks = Callbacks { resolution, later: FxHashSet::default(), now: FxHashSet::default() };
+        callbacks.visit_block(&chunk.block);
         let mut flow = flow;
         let mut chains: FxHashMap<LocalId, Vec<(u32, u32)>> = FxHashMap::default();
         for (local, writes) in &writes {
@@ -886,7 +890,8 @@ impl<'a, 'r> Walker<'a, 'r> {
             yields,
             runs,
             ran: FxHashMap::default(),
-            deferred: deferred.out,
+            deferred: callbacks.later,
+            immediate: callbacks.now,
             aliases: Aliases::default(),
             gotos: FxHashMap::default(),
             kinds: FxHashMap::default(),
@@ -1888,8 +1893,9 @@ impl<'a, 'r> Walker<'a, 'r> {
 
     /// Walks a function from what the locals around it hold where it is created. A local declared
     /// outside it that is assigned again may also hold, as the function runs any time later, what
-    /// the code around it assigns from there on and what other functions assign. Back in the code
-    /// that creates it, the locals it assigns may hold what it gives them from then on.
+    /// the code around it assigns from there on and what other functions assign, unless a runtime
+    /// function runs it right away. Back in the code that creates it, the locals it assigns may hold
+    /// what it gives them from then on.
     fn function(&mut self, func: &'a FuncBody) {
         let Some(id) = self.functions.get(&func.span.start).copied() else {
             return self.block(&func.body);
@@ -1918,18 +1924,25 @@ impl<'a, 'r> Walker<'a, 'r> {
         let frame = self.frame();
         frame.created = frame.loops.first().map_or(func.span.start, |(start, _)| (*start).min(func.span.start));
         let at = func.params_span.end;
+        // A function that a runtime function runs right away, as `pcall` does, starts with what the
+        // locals and fields hold where it is given, as nothing else has run since. What the code
+        // around and other functions give the locals reaches it once it yields, as one that
+        // `Citizen.CreateThreadNow` runs may, or calls code that may.
+        let now = self.immediate.contains(&func.span.start);
         let mut others = self.others_of(id);
         for local in self.captured.get(&id).cloned().unwrap_or_default() {
             let decl = self.resolution.local(local).func;
             let created = self.frames.iter().rev().find(|frame| frame.func == decl).map_or(0, |frame| frame.created);
             if let Some(origin) = self.others(local, created) {
-                let values = self.with_others(&self.values(local), origin);
-                self.set(local, at, values);
+                if !now {
+                    let values = self.with_others(&self.values(local), origin);
+                    self.set(local, at, values);
+                }
                 others.push((local, origin));
             }
         }
-        // It runs later, when its fields may hold anything.
-        let fields: Vec<LocalId> = self.fields.iter().copied().collect();
+        // Another runs later, when its fields may hold anything.
+        let fields: Vec<LocalId> = if now { Vec::new() } else { self.fields.iter().copied().collect() };
         for field in fields {
             let values = self.released(field, &self.values(field));
             self.set(field, at, values);
@@ -2299,29 +2312,56 @@ fn defers_path(path: &str) -> bool {
     )
 }
 
-/// Finds the functions written as arguments of the calls of runtime functions that run them later,
-/// as `defers_path` picks them.
-struct Deferred<'r> {
-    resolution: &'r Resolution,
-    out: FxHashSet<u32>,
+/// Whether the runtime function at `path` runs the function it is given as the argument at `index`
+/// right away, before the call returns: the one given to `pcall`, and to `xpcall` with its handler,
+/// the one `Citizen.CreateThreadNow` runs until it yields, the comparison of `table.sort` and the
+/// replacement of `string.gsub`.
+fn runs_now(path: &str, index: usize) -> bool {
+    matches!(
+        (path, index),
+        ("pcall" | "xpcall" | "Citizen.CreateThreadNow", 0) | ("xpcall" | "table.sort", 1) | ("string.gsub", 2)
+    )
 }
 
-impl<'ast> Visitor<'ast> for Deferred<'_> {
+/// Finds the functions written as arguments of the calls of runtime functions that run them later,
+/// as `defers_path` picks them, and of those that run them right away, as `runs_now` picks them,
+/// also the replacement of `text:gsub(pattern, function(found) ... end)`.
+struct Callbacks<'r> {
+    resolution: &'r Resolution,
+    later: FxHashSet<u32>,
+    now: FxHashSet<u32>,
+}
+
+impl<'ast> Visitor<'ast> for Callbacks<'_> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
-        if let ExprKind::Call { callee, args, .. } = &expr.kind {
-            let mut root = callee.unparen();
-            while let ExprKind::Field { base, .. } = &root.kind {
-                root = base.unparen();
-            }
-            let global = matches!(&root.kind, ExprKind::Name(name)
-                if matches!(self.resolution.resolve_at(name.span.start), Some(Resolved::Global(_))));
-            if global && callee.dotted_path().as_deref().is_some_and(defers_path) {
-                for arg in args {
-                    if let ExprKind::Function(func) = &arg.unparen().kind {
-                        self.out.insert(func.span.start);
+        let functions = |args: &'ast [Expr]| {
+            args.iter().enumerate().filter_map(|(index, arg)| match &arg.unparen().kind {
+                ExprKind::Function(func) => Some((index, func.span.start)),
+                _ => None,
+            })
+        };
+        match &expr.kind {
+            ExprKind::Call { callee, args, .. } => {
+                let mut root = callee.unparen();
+                while let ExprKind::Field { base, .. } = &root.kind {
+                    root = base.unparen();
+                }
+                let global = matches!(&root.kind, ExprKind::Name(name)
+                    if matches!(self.resolution.resolve_at(name.span.start), Some(Resolved::Global(_))));
+                if let Some(path) = callee.dotted_path().filter(|_| global) {
+                    for (index, start) in functions(args) {
+                        if defers_path(&path) {
+                            self.later.insert(start);
+                        } else if runs_now(&path, index) {
+                            self.now.insert(start);
+                        }
                     }
                 }
             }
+            ExprKind::MethodCall { method, args, .. } if method.text == "gsub" => {
+                self.now.extend(functions(args).filter(|(index, _)| *index == 1).map(|(_, start)| start));
+            }
+            _ => {}
         }
         visit::walk_expr(self, expr);
     }

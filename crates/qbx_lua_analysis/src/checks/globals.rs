@@ -4,7 +4,7 @@ use qbx_lua_syntax::visit::{self, Visitor};
 
 use rustc_hash::FxHashSet;
 
-use super::fivem::DEFERRING_CALLS;
+use super::fivem::{runs_now, DEFERRING_CALLS};
 use super::{FileInput, Sink};
 use crate::diagnostic::Tag;
 use crate::env::{builtins, is_meta_file};
@@ -74,9 +74,10 @@ impl SharedCode {
 
     /// Whether the code at `global`, in an unguarded part of a shared script, runs on both sides.
     /// With `strict`, as TypeScript knows no sides, any code may. Otherwise only code that runs
-    /// while the script loads does: outside function bodies, and in the functions that
-    /// `CreateThread` or `SetTimeout` start then. A function the script defines is left to the side
-    /// that calls it, as the callbacks of a shared config only one side calls are.
+    /// while the script loads does: outside function bodies, in the functions that `CreateThread`
+    /// or `SetTimeout` start then, and in those that run right away then, as the one given to
+    /// `pcall` does. A function the script defines is left to the side that calls it, as the
+    /// callbacks of a shared config only one side calls are.
     fn runs_on_both(&self, input: &FileInput, global: &GlobalRef) -> bool {
         let Some(load_time) = &self.load_time else { return true };
         let function = input.resolution.functions.get(global.func as usize);
@@ -85,7 +86,7 @@ impl SharedCode {
 }
 
 /// The functions, by where they start, that `CreateThread` or `SetTimeout` start while the script
-/// loads, also from such a function.
+/// loads, or that run right away then, as `runs_now` picks them, also from such a function.
 fn load_time_functions(resolution: &Resolution, chunk: &Chunk) -> FxHashSet<u32> {
     struct LoadTime<'a> {
         resolution: &'a Resolution,
@@ -101,14 +102,23 @@ fn load_time_functions(resolution: &Resolution, chunk: &Chunk) -> FxHashSet<u32>
         }
 
         fn visit_expr(&mut self, expr: &'ast Expr) {
-            if let (true, ExprKind::Call { callee, args, .. }) = (self.at_load, &expr.kind) {
-                if starts_thread(self.resolution, callee) {
-                    let started = args.iter().filter_map(|arg| match &arg.kind {
-                        ExprKind::Function(func) => Some(func.span.start),
-                        _ => None,
-                    });
-                    self.functions.extend(started);
+            let functions = |args: &'ast [Expr]| {
+                args.iter().enumerate().filter_map(|(index, arg)| match &arg.kind {
+                    ExprKind::Function(func) => Some((index, func.span.start)),
+                    _ => None,
+                })
+            };
+            match (self.at_load, &expr.kind) {
+                (true, ExprKind::Call { callee, args, .. }) => {
+                    let threads = starts_thread(self.resolution, callee);
+                    let path = global_path(self.resolution, callee).unwrap_or_default();
+                    let started = functions(args).filter(|(index, _)| threads || runs_now(&path, *index));
+                    self.functions.extend(started.map(|(_, start)| start));
                 }
+                (true, ExprKind::MethodCall { method, args, .. }) if method.text == "gsub" => {
+                    self.functions.extend(functions(args).filter(|(index, _)| *index == 1).map(|(_, start)| start));
+                }
+                _ => {}
             }
             visit::walk_expr(self, expr);
         }
@@ -121,13 +131,17 @@ fn load_time_functions(resolution: &Resolution, chunk: &Chunk) -> FxHashSet<u32>
 
 /// Whether `callee` is the global `CreateThread`, `SetTimeout` or one of their `Citizen` names.
 fn starts_thread(resolution: &Resolution, callee: &Expr) -> bool {
+    global_path(resolution, callee).is_some_and(|path| DEFERRING_CALLS.contains(&path.as_str()))
+}
+
+/// The dotted path of `callee` when it is read from a global, as `Citizen.CreateThreadNow`.
+fn global_path(resolution: &Resolution, callee: &Expr) -> Option<String> {
     let mut root = callee;
     while let ExprKind::Field { base, .. } = &root.kind {
         root = base;
     }
-    let ExprKind::Name(name) = &root.kind else { return false };
-    matches!(resolution.resolve_at(name.span.start), Some(Resolved::Global(_)))
-        && callee.dotted_path().is_some_and(|path| DEFERRING_CALLS.contains(&path.as_str()))
+    let ExprKind::Name(name) = &root.kind else { return None };
+    matches!(resolution.resolve_at(name.span.start), Some(Resolved::Global(_))).then(|| callee.dotted_path())?
 }
 
 /// `fivem/native-wrong-side` for a global the resource defines in the scripts of one side only:

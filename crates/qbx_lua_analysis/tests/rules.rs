@@ -544,6 +544,14 @@ fn shared_scripts_use_names_of_one_side_only_where_that_side_runs() {
         [client_native],
         "a thread that a thread started at load starts"
     );
+    for source in [
+        "Citizen.CreateThreadNow(function() AddTextEntry('a', 'b') end)",
+        "pcall(function() AddTextEntry('a', 'b') end)",
+        "table.sort({ 2, 1 }, function(a, b) AddTextEntry('a', 'b') return a < b end)",
+        "local text = ('a'):gsub('a', function() AddTextEntry('a', 'b') end)",
+    ] {
+        assert_eq!(wrong_side(source), [client_native], "a function run right away at load: {source}");
+    }
     assert_eq!(wrong_side("print(Translate('a'), GetGameTimer())"), none, "both sides have them");
 
     // A function is left to the side that calls it, except with `strict`.
@@ -1134,6 +1142,14 @@ fn source_tracking_respects_handlers_and_locals() {
     assert_eq!(codes(nested_handler), Vec::<&str>::new());
     let shadowed = "AddEventHandler('x', function(source)\n    Wait(0)\n    print(source)\nend)";
     assert_eq!(codes(shadowed), Vec::<&str>::new());
+    let now = "AddEventHandler('x', function()\n    Citizen.CreateThreadNow(function() print(source) end)\nend)";
+    assert_eq!(codes(now), Vec::<&str>::new(), "`Citizen.CreateThreadNow` runs its function right away");
+    let waited = "AddEventHandler('x', function()\n    Citizen.CreateThreadNow(function()\n        Wait(0)\n        print(source)\n    end)\nend)";
+    assert_eq!(codes(waited), ["fivem/source-after-yield"]);
+    let protected = "AddEventHandler('x', function()\n    Wait(0)\n    pcall(function() print(source) end)\nend)";
+    assert_eq!(codes(protected), ["fivem/source-after-yield"], "`pcall` runs its function after the `Wait`");
+    let later = "AddEventHandler('x', function()\n    SetTimeout(0, function() print(source) end)\nend)";
+    assert_eq!(codes(later), ["fivem/source-after-yield"]);
     let awaited = "AddEventHandler('x', function()\n    local r = MySQL.query.await('q')\n    print(source, r)\nend)";
     assert_eq!(
         codes_with(awaited, &{

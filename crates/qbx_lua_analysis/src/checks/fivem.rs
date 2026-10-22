@@ -12,9 +12,20 @@ use crate::scope::Resolved;
 
 const CITIZEN_ALIASES: &[&str] = &["Wait", "CreateThread", "SetTimeout", "ClearTimeout"];
 pub(super) const DEFERRING_CALLS: &[&str] =
-    &["SetTimeout", "CreateThread", "Citizen.SetTimeout", "Citizen.CreateThread", "Citizen.CreateThreadNow"];
+    &["SetTimeout", "CreateThread", "Citizen.SetTimeout", "Citizen.CreateThread"];
 const MAY_RUN_CALLBACKS: &[&str] =
     &["pcall", "xpcall", "load", "loadstring", "dofile", "require", "select", "assert", "error"];
+
+/// Whether the runtime function at `path` runs the function it is given as the argument at `index`
+/// right away, before the call returns: the one given to `pcall`, and to `xpcall` with its handler,
+/// the one `Citizen.CreateThreadNow` runs until it yields, the comparison of `table.sort` and the
+/// replacement of `string.gsub`, as with `text:gsub(pattern, function(found) ... end)`.
+pub(super) fn runs_now(path: &str, index: usize) -> bool {
+    matches!(
+        (path, index),
+        ("pcall" | "xpcall" | "Citizen.CreateThreadNow", 0) | ("xpcall" | "table.sort", 1) | ("string.gsub", 2)
+    )
+}
 
 pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     let uses_ox_lib_cache =
@@ -25,6 +36,7 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
         sink,
         functions: vec![FunctionState::default()],
         deferred: FxHashSet::default(),
+        immediate: FxHashSet::default(),
         reported_inner: FxHashSet::default(),
         hash_literal_forbidden: FxHashSet::default(),
         uses_ox_lib_cache,
@@ -32,7 +44,7 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     checker.visit_block(&input.chunk.block);
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct FunctionState {
     yielded_at: Option<Span>,
     deferred: bool,
@@ -43,6 +55,9 @@ struct FiveM<'a, 'b> {
     sink: &'a mut Sink<'b>,
     functions: Vec<FunctionState>,
     deferred: FxHashSet<u32>,
+    /// The functions that runtime functions run right away, by where they start, which go on from
+    /// where the code around them is.
+    immediate: FxHashSet<u32>,
     reported_inner: FxHashSet<u32>,
     /// Calls used as statements or unparenthesized prefix expressions cannot become literals.
     hash_literal_forbidden: FxHashSet<Span>,
@@ -216,12 +231,13 @@ impl FiveM<'_, '_> {
     fn mark_deferred_callbacks(&mut self, callee: &Expr, args: &[Expr]) {
         let Some(path) = self.global_path(callee) else { return };
         let defers = DEFERRING_CALLS.contains(&path.as_str()) || path.starts_with("MySQL.");
-        if !defers {
-            return;
-        }
-        for arg in args {
+        for (index, arg) in args.iter().enumerate() {
             if let ExprKind::Function(func) = &arg.kind {
-                self.deferred.insert(func.span.start);
+                if defers {
+                    self.deferred.insert(func.span.start);
+                } else if runs_now(&path, index) {
+                    self.immediate.insert(func.span.start);
+                }
             }
         }
     }
@@ -256,8 +272,11 @@ fn is_always_true(expr: &Expr) -> bool {
 
 impl<'ast> Visitor<'ast> for FiveM<'_, '_> {
     fn visit_func_body(&mut self, func: &'ast FuncBody) {
-        let deferred = self.deferred.contains(&func.span.start);
-        self.functions.push(FunctionState { yielded_at: None, deferred });
+        let state = match self.immediate.contains(&func.span.start) {
+            true => self.functions.last().cloned().unwrap_or_default(),
+            false => FunctionState { yielded_at: None, deferred: self.deferred.contains(&func.span.start) },
+        };
+        self.functions.push(state);
         visit::walk_func_body(self, func);
         self.functions.pop();
     }
@@ -301,6 +320,11 @@ impl<'ast> Visitor<'ast> for FiveM<'_, '_> {
                     }
                 }
                 return;
+            }
+            ExprKind::MethodCall { method, args, .. } if method.text == "gsub" => {
+                if let Some(ExprKind::Function(func)) = args.get(1).map(|arg| &arg.kind) {
+                    self.immediate.insert(func.span.start);
+                }
             }
             _ => {}
         }

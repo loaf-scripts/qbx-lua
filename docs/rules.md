@@ -84,10 +84,10 @@ TypeScript's strict mode does; see [Strict mode](reference.md#strict-mode).
 
 | Rule | Default | Check |
 | --- | --- | --- |
-| `fivem/native-wrong-side` | error | A native or runtime global is used on a side that lacks it, such as `TriggerClientEvent` in a client script. Names of one side, natives, runtime globals such as the server's `io` and `os` libraries, and globals that the resource defines in the scripts of one side only, are reported in a shared script where its code runs while it loads, outside functions or in a thread `CreateThread` or `SetTimeout` starts then; with `strict`, anywhere in it. An `IsDuplicityVersion()`, `lib.context`, `if os then` or `os and ...` guard keeps the code on one side. |
+| `fivem/native-wrong-side` | error | A native or runtime global is used on a side that lacks it, such as `TriggerClientEvent` in a client script. Names of one side, natives, runtime globals such as the server's `io` and `os` libraries, and globals that the resource defines in the scripts of one side only, are reported in a shared script where its code runs while it loads, outside functions, in a thread `CreateThread` or `SetTimeout` starts then or in a function `pcall` or `Citizen.CreateThreadNow` runs then; with `strict`, anywhere in it. An `IsDuplicityVersion()`, `lib.context`, `if os then` or `os and ...` guard keeps the code on one side. |
 | `fivem/import-not-declared` | warning | A library global is used without its manifest import on that side. |
 | `fivem/loop-never-yields` | error | An apparently infinite loop has no recognized yield or exit. |
-| `fivem/source-after-yield` | warning | Global `source` is read after a yield or in a deferred callback. |
+| `fivem/source-after-yield` | warning | Global `source` is read after a yield or in a deferred callback. A function that `pcall` or `Citizen.CreateThreadNow` runs right away goes on from the code around it. |
 | `fivem/citizen-prefix` | info | A `Citizen` call has a shorter global alias. Fix available. |
 | `fivem/hash-literal` | info | A literal `GetHashKey` argument can become a compile-time hash. Fix available in valid value positions. |
 | `fivem/legacy-native-pattern` | info | Use of `GetPlayerPed(-1)`, `GetDistanceBetweenCoords`, `Vdist`, or `Vdist2`. A fix is available for `GetPlayerPed(-1)`. |

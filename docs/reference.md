@@ -261,8 +261,9 @@ FiveM only loads the `io` and `os` libraries on the server, so ox_lib tests for 
 reported. `io` and `os`, natives and the other runtime globals of one side, such as
 `TriggerClientEvent`, and the globals that the resource only defines in scripts of one side, such
 as a function of `client/utils.lua`, are reported in scripts or guarded code of the other side, and
-in code of a shared script that runs while it loads: outside functions, or in a thread that
-`CreateThread` or `SetTimeout` starts then. A function of a shared script is left to the side that
+in code of a shared script that runs while it loads: outside functions, in a thread that
+`CreateThread` or `SetTimeout` starts then, or in a function that runs right away then, as one
+given to `pcall` or `Citizen.CreateThreadNow` does. A function of a shared script is left to the side that
 calls it, as the callbacks of a shared config usually only run on the client. With
 [`strict`](#strict-mode), as TypeScript knows no sides, they are reported anywhere in a shared
 script that no guard keeps on their side. In client scripts, `os` and `io` are not completed and have no hover. Their functions are FiveM's:

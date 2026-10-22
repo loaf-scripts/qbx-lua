@@ -316,7 +316,9 @@ it may find any value that a function gives the local, as after
 function that runs it later, as `SetTimeout`, `CreateThread`,
 `AddEventHandler`, `RegisterNetEvent`, `RegisterCommand`, `RegisterNUICallback`,
 `AddStateBagChangeHandler` and `exports` do, gives the locals around it nothing until a call
-yields.
+yields. One that a runtime function runs right away, as `pcall`, `xpcall`, `Citizen.CreateThreadNow`,
+`table.sort` and `string.gsub` do, starts with what the locals hold where it is given, as the guards
+around it tell, and reads what other code gives them only once it yields or calls code that may.
 
 Without [`strict`](../../docs/reference.md#strict-mode), `impossible-comparison` does not rely on
 a guard past a call that may run that code, as any call does but one of a native or of a function of
@@ -383,7 +385,8 @@ table the field is read through, a local copied from one of them or a table buil
 assignment to a key of one that is not known, as `reset(data)`, `data:reset()`, `reset(job)` after
 `local job = data.job`, `clearAll({ data })` or `data[key] = nil`; a call that yields; and a loop
 whose code may do any of these before it starts again. A function does not see what the guards
-around it tell about fields, as it runs later. Other calls are taken to change no field, as
+around it tell about fields, as it runs later, unless a runtime function runs it right away, as
+`pcall` does. Other calls are taken to change no field, as
 TypeScript takes them, although the code of another file may assign the fields of a global, except
 by `impossible-comparison` as [for locals](#locals-that-are-assigned-again), and an assignment to a
 field still has to store a value of the type the field is declared with.
@@ -407,7 +410,8 @@ end
 What the guards tell still holds after a call, after a call that yields, as `Wait(0)`, and in a
 function created after them, as lua-language-server reads it. With `strict`, it holds only through
 calls that do not yield, as TypeScript reads a variable that other code may assign: another thread
-may change the global while the code waits, and a function created inside the guard runs later.
+may change the global while the code waits, and a function created inside the guard runs later,
+unless a runtime function runs it right away.
 
 ### Casts
 
