@@ -3695,6 +3695,123 @@ print(build({}))
 }
 
 #[test]
+fn literal_fields_narrow_unions_of_the_types_that_declare_them() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.TabType 'home'|'reports'|'users'
+
+---@class Test.BaseTab
+---@field type Test.TabType
+---@field label string
+
+---@class Test.HomeTab : Test.BaseTab
+---@field type 'home'
+
+---@class Test.ReportsTab : Test.BaseTab
+---@field type 'reports'
+---@field name string
+
+---@class Test.UnitsTab
+---@field type 'units'
+
+---@alias Test.AnyTab Test.BaseTab|Test.HomeTab|Test.ReportsTab|Test.UnitsTab
+
+---@param tab Test.ReportsTab
+local function useReports(tab) print(tab.name) end
+
+---@param tab Test.HomeTab
+local function useHome(tab) print(tab.label) end
+
+---@return Test.AnyTab?
+local function get() end
+
+local tab = get()
+if not tab or tab.type ~= 'reports' then
+    return
+end
+useReports(tab)
+
+---@param other Test.HomeTab|Test.ReportsTab
+local function both(other)
+    if other.type == 'reports' then
+        useReports(other)
+    else
+        useHome(other)
+    end
+    useHome(other)
+end
+both({ type = 'home', label = 'h' })
+";
+    client.open_with(CLIENT, text);
+    let mismatch = |needle: &str, given: &str, param: &str| {
+        let message = format!("Cannot assign `{given}` to parameter `tab` of type `{param}`");
+        ("param-type-mismatch".to_string(), pos(text, needle, 0).0 as u64, message)
+    };
+    let last = mismatch("useHome(other)\nend", "Test.HomeTab|Test.ReportsTab", "Test.HomeTab");
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        std::slice::from_ref(&last),
+        "as in lua-language-server, the types that declare the literal are left, and the others where it differs"
+    );
+    let (line, character) = pos(text, "useReports(tab)\n\n", 11);
+    let hover = client.hover_text(CLIENT, line, character);
+    assert!(hover.contains("local tab: Test.ReportsTab"), "{hover}");
+    client.set_strict(true);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [mismatch("useReports(tab)\n\n", "Test.BaseTab|Test.ReportsTab", "Test.ReportsTab"), last],
+        "as in TypeScript, a `Test.BaseTab` whose `type` is 'reports' is left too"
+    );
+}
+
+#[test]
+fn literal_fields_that_differ_rule_out_the_types_they_exhaust() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.Cloth
+---@field kind 'component'|'prop'
+
+---@class Test.Tattoo
+---@field kind 'tattoo'
+
+---@class Test.Eye
+---@field kind 'eye'
+
+---@param image Test.Eye
+local function useEye(image) print(image) end
+
+---@param image Test.Tattoo|Test.Eye
+local function useMarks(image) print(image) end
+
+---@param image Test.Cloth|Test.Tattoo|Test.Eye
+local function apply(image)
+    if image.kind == 'component' then
+        return
+    elseif image.kind == 'prop' then
+        return
+    elseif image.kind == 'tattoo' then
+        return
+    else
+        useEye(image)
+    end
+end
+
+---@param image Test.Cloth|Test.Tattoo|Test.Eye
+local function marks(image)
+    if image.kind == 'eye' or image.kind == 'tattoo' then
+        useMarks(image)
+    end
+end
+apply({ kind = 'eye' })
+marks({ kind = 'eye' })
+";
+    client.open_with(CLIENT, text);
+    assert_eq!(findings(&mut client, CLIENT, &["param-type-mismatch"]), [], "as TypeScript narrows");
+    client.set_strict(true);
+    assert_eq!(findings(&mut client, CLIENT, &["param-type-mismatch"]), []);
+}
+
+#[test]
 fn values_stored_through_unions_of_classes_fit_their_fields() {
     let mut client = Client::start(fixture_root());
     let text = "\

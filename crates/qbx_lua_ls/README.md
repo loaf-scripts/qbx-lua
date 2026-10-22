@@ -200,7 +200,14 @@ globals are not narrowed. `assert(value)` also returns its value without `nil` a
 
 A comparison with a literal narrows the local to that literal: inside `if state == "busy" then`, a
 `"active"|"busy"|nil` and a `string` are both `"busy"`, and in the `else` branch the first is
-`"active"|nil`. A comparison with another local narrows by what the type of that local rules out,
+`"active"|nil`. Comparing a field with a literal narrows a union the local holds by the types of
+that field, as lua-language-server does: after `if tab.type ~= "reports" then return end`, a
+`HomeTab|ReportsTab` is the `ReportsTab` that declares `type` as `"reports"`. Where a type declares
+the field with that literal, as `"reports"` or `"reports"|"users"`, the others are left out, even
+one whose alias also lists it, and without such a type those whose field may hold the value are
+left. With [strict](../../docs/reference.md#strict-mode), as TypeScript narrows, every type whose
+field may hold it is left. A field differs from a literal in every type but those that declare it
+as that literal alone. A comparison with another local narrows by what the type of that local rules out,
 as TypeScript narrows by equality: after `if cam ~= activeCam then return end`, a `number?` is a
 `number` when `activeCam` is one, and a local typed as one literal narrows as that literal does.
 `type(name)` keeps the values of the kind it names. Classes count as tables, and

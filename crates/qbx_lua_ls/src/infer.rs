@@ -1126,6 +1126,10 @@ impl<'a> Infer<'a> {
             return Ok(ty.clone());
         }
         let declared = self.expand_aliases(ty, 0);
+        let facts: Vec<Cow<'f, Fact>> = facts.collect();
+        let facts: Vec<Cow<'f, Fact>> =
+            facts.iter().map(|fact| self.with_field_types(fact, &declared, &facts)).collect();
+        let facts = facts.into_iter();
         // A name that is no class or alias, as the `T` of `---@generic T` in its function, may hold
         // any value, so the guards leave it as it is, as TypeScript keeps a `T`, and narrow the rest.
         let parts = match &declared {
@@ -1142,6 +1146,98 @@ impl<'a> Infer<'a> {
         }
         let left = narrowed_by(&Type::union(known), facts).ok();
         Ok(Type::union(left.into_iter().chain(opaque)))
+    }
+
+    /// `fact`, with the `Fact::Field`s it holds read into the `Fact::Without`s they make of
+    /// `declared`, given `facts`, all that hold with it: the literals that the `~=` comparisons of a
+    /// field among them rule out together, as `"component"` and `"prop"` do for a `"component"|"prop"`.
+    fn with_field_types<'f>(&self, fact: &Cow<'f, Fact>, declared: &Type, facts: &[Cow<'f, Fact>]) -> Cow<'f, Fact> {
+        match &**fact {
+            Fact::Field { key, value, equal } => {
+                let excluded: Vec<&Type> = facts
+                    .iter()
+                    .filter_map(|other| match &**other {
+                        Fact::Field { key: other, value, equal: false } if other == key => Some(value),
+                        _ => None,
+                    })
+                    .collect();
+                Cow::Owned(self.field_fact(declared, key, value, *equal, &excluded))
+            }
+            Fact::AnyOf(alternatives)
+                if alternatives.iter().flatten().any(|fact| matches!(fact, Fact::Field { .. })) =>
+            {
+                let read = |fact: &Fact| match fact {
+                    Fact::Field { key, value, equal } => self.field_fact(declared, key, value, *equal, &[]),
+                    other => other.clone(),
+                };
+                Cow::Owned(Fact::AnyOf(alternatives.iter().map(|facts| facts.iter().map(read).collect()).collect()))
+            }
+            _ => fact.clone(),
+        }
+    }
+
+    /// The types of `declared` that its field `key` being equal to the literal `value` rules out, or
+    /// without `equal` being different from it and from `excluded`, as a `Fact::Without`. A field
+    /// differs from those literals in every type but those that declare it as them alone. A field
+    /// equals one in the types that list the literal in the type they declare for it, as
+    /// lua-language-server narrows: `ReportsTab` of `BaseTab|ReportsTab` for `tab.type == "reports"`,
+    /// though the `TabType` alias of `BaseTab` lists it too. Without such types, and with `strict` as
+    /// TypeScript narrows, it equals one in every type whose field may hold it, or that declares no
+    /// such field.
+    fn field_fact(&self, declared: &Type, key: &str, value: &Type, equal: bool, excluded: &[&Type]) -> Fact {
+        let parts = match declared {
+            Type::Union(parts) => &parts[..],
+            one => std::slice::from_ref(one),
+        };
+        // The type each part declares for the field, as it is written.
+        let fields: Vec<Option<Type>> = parts
+            .iter()
+            .map(|part| match part {
+                Type::Nil => None,
+                _ => self.member(part, key).map(|member| member.ty),
+            })
+            .collect();
+        let lists = |field: &Option<Type>| match field {
+            Some(Type::Union(types)) => types.contains(value),
+            Some(ty) => ty == value,
+            None => false,
+        };
+        let may_hold = |field: &Option<Type>| {
+            let Some(field) = field else { return true };
+            let field = self.expand_aliases(field, 0);
+            let types = match &field {
+                Type::Union(types) => &types[..],
+                one => std::slice::from_ref(one),
+            };
+            types.iter().any(|ty| {
+                ty == value
+                    || matches!(ty, Type::Unknown | Type::Any)
+                    || self.names_no_type(ty)
+                    || matches!(
+                        (value, ty),
+                        (Type::StringLit(_), Type::String)
+                            | (Type::IntLit(_), Type::Integer | Type::Number | Type::Handle(_))
+                            | (Type::BooleanLit(_), Type::Boolean)
+                    )
+            })
+        };
+        let differs = |field: &Option<Type>| {
+            let Some(field) = field else { return false };
+            let field = self.expand_aliases(field, 0);
+            let types = match &field {
+                Type::Union(types) => &types[..],
+                one => std::slice::from_ref(one),
+            };
+            types.iter().all(|ty| ty.is_literal() && (ty == value || excluded.contains(&ty)))
+        };
+        let listed = equal && !self.strict() && fields.iter().any(lists);
+        let rules_out = |field: &Option<Type>| match (equal, listed) {
+            (true, true) => !lists(field),
+            (true, false) => !may_hold(field),
+            (false, _) => differs(field),
+        };
+        let ruled_out = parts.iter().zip(&fields).filter(|(_, field)| rules_out(field)).map(|(part, _)| part.clone());
+        Fact::Without(ruled_out.collect())
     }
 
     /// Whether `ty` is a name that names no class or alias the file sees, as a generic does in the

@@ -50,6 +50,13 @@ pub enum Fact {
     SameAs { other: LocalId, at: u32 },
     /// It differs from the value of the local `other` where the comparison reads it, at `at`.
     NotSameAs { other: LocalId, at: u32 },
+    /// Its field `key` equals this `true`, `false`, string or integer, or differs from it without
+    /// `equal`, as `tab.type == "reports"` tells about `tab`. Which of its types that leaves depends
+    /// on the fields they declare, which `Infer::facts_left` reads into a `Without`; until then it
+    /// rules out nothing.
+    Field { key: SmolStr, value: Type, equal: bool },
+    /// It is none of these types, as a `Field` fact rules them out.
+    Without(Vec<Type>),
     /// The side of an `and` or `or` at `side` was true, or false without `truthy`, which tells
     /// nothing about the value itself. It stands for that side in an alternative of `AnyOf`, which
     /// `Infer::facts_left` drops when the type of the side there has no such value: after
@@ -122,7 +129,10 @@ impl Fact {
     fn apply_part(&self, ty: &Type) -> Option<Type> {
         let unknown = matches!(ty, Type::Unknown | Type::Any);
         match self {
-            Fact::SameAs { .. } | Fact::NotSameAs { .. } | Fact::Operand { .. } => Some(ty.clone()),
+            Fact::SameAs { .. } | Fact::NotSameAs { .. } | Fact::Field { .. } | Fact::Operand { .. } => {
+                Some(ty.clone())
+            }
+            Fact::Without(types) => (!types.contains(ty)).then(|| ty.clone()),
             Fact::AnyOf(alternatives) => {
                 let kept: Vec<Type> = alternatives
                     .iter()
@@ -2074,12 +2084,15 @@ impl<'a, 'r> Walker<'a, 'r> {
             ExprKind::Binary { op: op @ (BinOp::Eq | BinOp::Ne), lhs, rhs, .. } => {
                 let equal = (*op == BinOp::Eq) == holds;
                 let compared = match (literal(rhs), literal(lhs)) {
-                    (Some(value), _) => self.place(lhs).zip(Some(value)),
-                    (None, Some(value)) => self.place(rhs).zip(Some(value)),
+                    (Some(value), _) => Some((lhs, value)),
+                    (None, Some(value)) => Some((rhs, value)),
                     (None, None) => None,
                 };
-                if let Some((local, value)) = compared {
-                    out.push((local, if equal { Fact::Is(value) } else { Fact::IsNot(value) }));
+                if let Some((side, value)) = compared {
+                    self.field_compared(side, &value, equal, out);
+                    if let Some(local) = self.place(side) {
+                        out.push((local, if equal { Fact::Is(value) } else { Fact::IsNot(value) }));
+                    }
                 } else {
                     // `cam == activeCam` tells about `cam` what the type of `activeCam` there rules
                     // out, and the other way around.
@@ -2110,6 +2123,25 @@ impl<'a, 'r> Walker<'a, 'r> {
             // value: `?.` gives `nil` for a `nil` one, and the others raise an error.
             _ if holds => self.reads(cond, out),
             _ => {}
+        }
+    }
+
+    /// Adds what comparing the field `side` with the literal `value` tells about the value it is
+    /// read from, as `tab.type == "reports"` does about `tab`, or with `equal` false `~=`.
+    fn field_compared(&self, side: &Expr, value: &Type, equal: bool, out: &mut Facts) {
+        if *value == Type::Nil {
+            return;
+        }
+        let (base, key) = match &side.unparen().kind {
+            ExprKind::Field { base, name, .. } => (base, name.text.clone()),
+            ExprKind::Index { base, index, .. } => match index.as_string() {
+                Some(key) => (base, key.clone()),
+                None => return,
+            },
+            _ => return,
+        };
+        if let Some(place) = self.place(base) {
+            out.push((place, Fact::Field { key, value: value.clone(), equal }));
         }
     }
 

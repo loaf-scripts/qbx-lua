@@ -345,6 +345,10 @@ With `strict`:
   TypeScript does, for the checks that only count declared types. A table that a constructor builds
   and code fills, as `local seen = {}`, declares nothing. A global that one of its definitions
   declares as a class has that type for them too, as `Config` has beside `Config = Config or {}`.
+- Comparing a field with a literal, as `tab.type == "reports"`, leaves every type of a union whose
+  field may hold the literal, as TypeScript narrows, not only those that declare the field with it.
+  A `BaseTab|ReportsTab` whose `BaseTab` declares `type` with an alias that lists `"reports"` stays
+  whole. See [Type guards](../crates/qbx_lua_ls/README.md#type-guards).
 - `fivem/native-wrong-side` reports the names of one side anywhere in a shared script that no guard
   keeps on that side, not only in the code that runs while it loads. See
   [Globals and client/server context](#globals-and-clientserver-context).
