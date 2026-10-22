@@ -269,6 +269,18 @@ impl<'a, 'b> Classes<'a, 'b> {
         }
     }
 
+    /// The classes a value of type `ty` may be, as `class_of` finds each type of a union, when every
+    /// type it lists other than `nil` is one. A single class is the only one.
+    pub fn classes_of(&self, ty: &Type, from: FileId) -> Vec<(SmolStr, Vec<Type>, FileId)> {
+        match self.resolve(&ty.without_nil(), from, 0).without_nil() {
+            Type::Union(parts) => {
+                let classes: Option<Vec<_>> = parts.iter().map(|part| self.class_of(part, from)).collect();
+                classes.unwrap_or_default()
+            }
+            one => self.class_of(&one, from).into_iter().collect(),
+        }
+    }
+
     /// The table type a value of type `ty` must be, as `from` sees the names, looking through `?`
     /// and aliases: a shape like `{ value: string }`, an array like `string[]`, or a
     /// `table<K, V>`.
@@ -1288,6 +1300,34 @@ fn checked_fields(infer: &Infer, chunk: &Chunk, unknowns: Option<&dyn Fn(&Expr) 
         // entry, and nowhere else, as TypeScript reads it.
         let bracketed = matches!(access.key, Key::Typed(_));
         let removes = |removable: bool| if infer.strict() { removable } else { bracketed };
+        let owners = classes.classes_of(&access.owner, classes.file());
+        if owners.len() > 1 {
+            // A value stored through a union of classes is checked against the field each of them
+            // declares. As lua-language-server reads the field, the value has to fit one of them,
+            // and with `strict`, as TypeScript writes it, each of them.
+            let fields: Vec<(Type, FileId)> = owners
+                .iter()
+                .filter_map(|(class, args, view)| classes.field_type(class, args, *view, &access.key))
+                .collect();
+            let removable = owners
+                .iter()
+                .all(|(class, args, view)| classes.declared_field_type(class, args, *view, &access.key).is_none());
+            if clears && removable {
+                continue;
+            }
+            let removes = removes(removable);
+            let given = checked_value(infer, Some(value), classes.value_type(value));
+            let given = if removes { given.without_nil() } else { given };
+            let rejects =
+                |(ty, file): &&(Type, FileId)| classes.rejected_part_of(ty, *file, &given, Some(value)).is_some();
+            let reported = match (unknowns.is_some(), infer.strict()) {
+                (true, _) => fields.first(),
+                (false, true) => fields.iter().find(rejects),
+                (false, false) => fields.iter().all(|field| rejects(&field)).then(|| fields.first()).flatten(),
+            };
+            check(reported.cloned(), &access.key, value, removes);
+            continue;
+        }
         if let Some((class, args, view)) = classes.class_of(&access.owner, classes.file()) {
             let removable = classes.declared_field_type(&class, &args, view, &access.key).is_none();
             if clears && removable {

@@ -367,7 +367,8 @@ With `strict`:
   `== 1` never equals them. Without `strict`, they are `boolean`, as in lua-language-server,
   and compare with `1` as well. See [Impossible comparisons](#impossible-comparisons).
 - `assign-type-mismatch` reports `field = nil` for a field whose type does not allow `nil`. See
-  [Return values](#return-values).
+  [Return values](#return-values). A value stored through a union of classes has to fit the field
+  of each of them, not only of one. See [Strict classes](#strict-classes).
 - `unreachable-code` reports the code after a call of `error` or `os.exit` of its own, as
   TypeScript reports the code after a `throw`.
 - `param-type-mismatch`, `assign-type-mismatch` and `return-type-mismatch` also compare the classes
@@ -664,6 +665,11 @@ is neither reported nor checked against their types.
 Index types also decide what a field without its own `@field` holds, for every class and not only
 strict ones: with `---@field [string] number`, `abc.other` is a `number`, and `{ other = true }` and
 `abc.other = true` are an `assign-type-mismatch`.
+
+A value stored through a union of classes, as `grade.name = value` for a `JobGrade|GangGrade`, is
+checked against the field each of them declares. As lua-language-server reads the field, the value
+has to fit one of them; with [`strict`](#strict-mode), as TypeScript writes to a union, each of
+them.
 
 A generic class gives its fields the type arguments a value is declared with. With
 `---@class List<T>` and `---@field first T`, `first` of a `---@type List<string>` local is a

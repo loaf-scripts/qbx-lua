@@ -3695,6 +3695,45 @@ print(build({}))
 }
 
 #[test]
+fn values_stored_through_unions_of_classes_fit_their_fields() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Test.GradeA
+---@field name string
+---@field pay number
+
+---@class Test.GradeB
+---@field name string|number
+
+---@param grade Test.GradeA|Test.GradeB
+---@param mixed string|number|boolean
+---@param amount number
+local function set(grade, mixed, amount)
+    grade.name = mixed
+    grade.name = amount
+    grade.pay = 'x'
+end
+set({ name = 'a', pay = 1 }, 1, 1)
+";
+    client.open_with(CLIENT, text);
+    let lines = |client: &mut Client| -> Vec<u64> {
+        findings(client, CLIENT, &["assign-type-mismatch"]).into_iter().map(|(_, line, _)| line).collect()
+    };
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    assert_eq!(
+        lines(&mut client),
+        [line("grade.name = mixed"), line("grade.pay")],
+        "as in lua-language-server, a value fits when the field of one of the classes takes it"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        lines(&mut client),
+        [line("grade.name = mixed"), line("grade.name = amount"), line("grade.pay")],
+        "as TypeScript writes to a union, the field of each class has to take it"
+    );
+}
+
+#[test]
 fn type_checks_and_literal_comparisons_narrow_the_locals_they_test() {
     let mut client = Client::start(fixture_root());
     let text = "\
