@@ -30,7 +30,7 @@ const MAX_DEPTH: u32 = 16;
 /// Each `==` and `~=` of `chunk` whose sides share no value, with a message naming both types and
 /// the answer the comparison always gives.
 pub fn impossible_comparisons(infer: &Infer, chunk: &Chunk) -> Vec<(Span, String)> {
-    let mut finder = Finder { declared: Declared::through_calls(infer), out: Vec::new() };
+    let mut finder = Finder { declared: Declared::comparing(infer), out: Vec::new() };
     finder.visit_block(&chunk.block);
     finder.out
 }
@@ -59,6 +59,8 @@ pub struct Declared<'a, 'b> {
     through_calls: bool,
     /// Where the expression that each `--[[@as T]]` casts starts, by where it ends.
     cast_starts: OnceCell<FxHashMap<u32, u32>>,
+    /// Whether a native documented as `boolean` returns `boolean|integer`; see `Declared::comparing`.
+    widens_native_booleans: bool,
     /// The table whose sequence each numeric `for` variable walks, by the variable.
     sequences: OnceCell<FxHashMap<LocalId, LocalId>>,
     /// The types the locals read so far are declared with.
@@ -81,6 +83,7 @@ impl<'a, 'b> Declared<'a, 'b> {
             returned_nils: false,
             annotations_only: false,
             through_calls: false,
+            widens_native_booleans: false,
             cast_starts: OnceCell::new(),
             sequences: OnceCell::new(),
             declarations: RefCell::default(),
@@ -115,6 +118,14 @@ impl<'a, 'b> Declared<'a, 'b> {
     /// table an annotation declares has the type its loop gives it.
     pub fn annotations(infer: &'a Infer<'b>) -> Self {
         Self { annotations_only: true, ..Self::new(infer) }
+    }
+
+    /// Reads a native documented as `boolean` as returning `boolean|integer`, for comparisons: its
+    /// Lua wrapper gives `1` instead of `true`, so code compares its result with either. Everywhere
+    /// else it gives a `boolean`, as lua-language-server reads it. Guards hold across calls as
+    /// `through_calls` takes them.
+    fn comparing(infer: &'a Infer<'b>) -> Self {
+        Self { widens_native_booleans: true, ..Self::through_calls(infer) }
     }
 
     /// The type of `expr` as far as it is declared, and `unknown` beyond that.
@@ -577,10 +588,10 @@ impl<'a, 'b> Declared<'a, 'b> {
         sequences.get(&var) == Some(&table)
     }
 
-    /// What `call` returns when its function declares it. A native documented as `boolean` can
-    /// give scripts `1` instead of `true`, so code compares its result with either. With
-    /// `annotations_only`, the declared types of the arguments bind the generics of a generic, so
-    /// `assert(Entities[id])` declares nothing for a table no annotation types.
+    /// What `call` returns when its function declares it, with `boolean|integer` for the `boolean`
+    /// of a native when `widens_native_booleans` asks for it. With `annotations_only`, the declared
+    /// types of the arguments bind the generics of a generic, so `assert(Entities[id])` declares
+    /// nothing for a table no annotation types.
     fn returned(&self, call: &Expr) -> Option<Vec<Type>> {
         let declared = match self.annotations_only {
             true => self.generic_returns(call).or_else(|| self.infer.annotated_returns(call)),
@@ -590,7 +601,7 @@ impl<'a, 'b> Declared<'a, 'b> {
             .or_else(|| self.callback_returns(call))
             .or_else(|| self.generic_returns(call))
             .or_else(|| self.returned_nils(call))?;
-        if !self.is_native_call(call) {
+        if !self.widens_native_booleans || !self.is_native_call(call) {
             return Some(values);
         }
         let as_returned = |ty: Type| match ty {

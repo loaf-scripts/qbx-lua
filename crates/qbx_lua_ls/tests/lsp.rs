@@ -9930,6 +9930,21 @@ print(anything, describe)
 }
 
 #[test]
+fn natives_documented_as_boolean_return_a_boolean_outside_comparisons() {
+    let mut client = Client::start(fixture_root());
+    let text = "\n---@param flag boolean
+local function toggle(flag) end
+local ped = PlayerPedId()
+local inside = IsPedInAnyVehicle(ped, false)
+toggle(inside)
+toggle(IsPedInAnyVehicle(ped, false))
+if inside == 1 or IsPedInAnyVehicle(ped, false) == true then return end
+";
+    client.open_with(CLIENT, text);
+    assert_eq!(findings(&mut client, CLIENT, &["param-type-mismatch", "impossible-comparison"]), []);
+}
+
+#[test]
 fn literals_in_locals_count_by_their_kind_and_negation_by_its_operand() {
     let mut client = Client::start(fixture_root());
     let text = "\
