@@ -291,7 +291,10 @@ pub(crate) fn parse(text: &str, emmylua: bool, settings: &mut Settings) -> Resul
     for (code, level) in turned_on.chain(severities).chain(turned_off) {
         match ALIASES.iter().find(|(alias, _)| *alias == code) {
             Some((_, codes)) => settings.rules.extend(codes.iter().map(|c| (c.to_string(), level))),
-            None if EQUIVALENT_CODES.contains(&code.as_str()) => settings.rules.push((code, level)),
+            None if EQUIVALENT_CODES.contains(&code.as_str()) => {
+                settings.rules.push((code.clone(), level));
+                settings.rules.extend(crate::rules::narrower(&code).map(|narrow| (narrow.to_string(), level)));
+            }
             None => {}
         }
     }
@@ -466,6 +469,7 @@ mod tests {
             settings.rules,
             [
                 ("undefined-global".to_string(), Level::Off),
+                ("fivem/import-not-declared".to_string(), Level::Off),
                 ("missing-parameter".to_string(), Level::Off),
                 ("duplicate-set-field".to_string(), Level::Off)
             ]

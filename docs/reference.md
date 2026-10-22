@@ -104,7 +104,7 @@ qbx-lint needs anything beyond it. `--config` also accepts these files.
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |
 | `diagnostics.globals` | `globals`, without the names qbx-lint already knows: runtime globals, natives, and globals of imports such as `@ox_lib/init.lua`, so the manifest and client/server checks still apply to them |
-| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `global-in-nil-env`, `unused-local`, `unused-function`, `unused-label`, `unused-vararg`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-global-doc`, `missing-local-export-doc`, `incomplete-signature-doc`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `cast-local-type`, `no-unknown`, `need-check-nil`, `inject-field`, `newline-call`, `newfield-call`, `ambiguity-1`, `trailing-space`, `redundant-return`, `duplicate-doc-param`, `doc-field-no-class`, `unknown-operator`, `unknown-cast-variable`, `unknown-diag-code`, `close-non-object` and `circle-doc-class`; EmmyLua's `unused` covers the `unused-*` rules |
+| `diagnostics.disable` | `off` for `undefined-global`, `lowercase-global`, `global-in-nil-env`, `unused-local`, `unused-function`, `unused-label`, `unused-vararg`, `redefined-local`, `unreachable-code`, `empty-block`, `unbalanced-assignments`, `duplicate-index`, `duplicate-set-field`, `count-down-loop`, `missing-parameter`, `redundant-parameter`, `undefined-doc-name`, `undefined-doc-param`, `duplicate-doc-alias`, `duplicate-doc-field`, `missing-global-doc`, `missing-local-export-doc`, `incomplete-signature-doc`, `missing-fields`, `assign-type-mismatch`, `invisible`, `param-type-mismatch`, `return-type-mismatch`, `missing-return`, `redundant-return-value`, `discard-returns`, `cast-type-mismatch`, `cast-local-type`, `no-unknown`, `need-check-nil`, `inject-field`, `newline-call`, `newfield-call`, `ambiguity-1`, `trailing-space`, `redundant-return`, `duplicate-doc-param`, `doc-field-no-class`, `unknown-operator`, `unknown-cast-variable`, `unknown-diag-code`, `close-non-object` and `circle-doc-class`; `undefined-global` also covers `fivem/import-not-declared`, and EmmyLua's `unused` covers the `unused-*` rules |
 | `diagnostics.severity` | Levels for the same codes (`Error`, `Warning`, `Information`, `Hint`, with or without a trailing `!`) |
 | `diagnostics.neededFileStatus` | For the same codes, `Any` or `Opened` turns a rule that is off by default, such as `no-unknown` or `missing-global-doc`, on as a warning, unless `diagnostics.severity` gives its level. `None` turns a rule off, whatever its severity. With or without a trailing `!` |
 | `workspace.ignoreDir` | Exclusions. LuaLS entries are gitignore-style patterns; `.emmyrc.json` entries are directories from the root |
@@ -148,6 +148,10 @@ it, as in `---@diagnostic disable-next-line: unused-local (set later)`, are a no
 ---@diagnostic disable-next-line: undefined-global
 print(fromSomewhereElse)
 ```
+
+A code also suppresses the rules that report a narrower case of its finding: `undefined-global`
+covers `fivem/import-not-declared`, which reports an undefined global that a library the manifest
+does not load provides, where lua-language-server reports `undefined-global`.
 
 `-- luacheck: ignore` is recognized as a broad suppression: on its own line it disables subsequent
 findings; after code it suppresses that line. Luacheck's numeric codes and name filters are not

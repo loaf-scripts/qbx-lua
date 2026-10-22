@@ -1,5 +1,7 @@
 use qbx_lua_syntax::{Comment, LineIndex, Span};
 
+use crate::rules;
+
 #[derive(Debug)]
 struct LineRule {
     line: u32,
@@ -113,8 +115,12 @@ impl Suppressions {
         out
     }
 
+    /// Whether a comment suppresses `code` on `line`: one that names it, the rule it reports a
+    /// narrower case of, or no rule at all.
     pub fn is_suppressed(&self, code: &str, line: u32) -> bool {
-        let matches = |codes: &[String]| codes.is_empty() || codes.iter().any(|c| c == code);
+        let broader = rules::broader(code);
+        let matches =
+            |codes: &[String]| codes.is_empty() || codes.iter().any(|c| c == code || Some(c.as_str()) == broader);
         self.lines.iter().any(|rule| rule.line == line && matches(&rule.codes))
             || self.ranges.iter().any(|rule| rule.from_line <= line && line <= rule.to_line && matches(&rule.codes))
     }
@@ -151,6 +157,15 @@ function B() end",
         assert!(s.is_suppressed("builtin-overwrite", 0));
         assert!(!s.is_suppressed("builtin-overwrite", 1));
         assert!(s.is_suppressed("builtin-overwrite", 3));
+    }
+
+    #[test]
+    fn broader_codes_suppress_narrower_rules() {
+        let s = suppressions(
+            "---@diagnostic disable-next-line: undefined-global\nlib.logger()\n-- qbx-lint: disable-line fivem/import-not-declared\nlib.x()",
+        );
+        assert!(s.is_suppressed("fivem/import-not-declared", 1));
+        assert!(!s.is_suppressed("undefined-global", 3));
     }
 
     #[test]

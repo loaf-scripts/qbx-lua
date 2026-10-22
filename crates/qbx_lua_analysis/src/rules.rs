@@ -257,3 +257,19 @@ pub static RULES: &[Rule] = &[
 pub fn find(code: &str) -> Option<&'static Rule> {
     RULES.iter().find(|r| r.code == code)
 }
+
+/// Rules that report a narrower case of another rule's finding, with that rule: an undefined global
+/// that a library the manifest does not load provides is reported as `fivem/import-not-declared`,
+/// where lua-language-server reports `undefined-global`. What turns the broader rule off, a
+/// suppression comment or a lua-language-server setting, turns the narrower one off too.
+const NARROWER: &[(&str, &str)] = &[(IMPORT_NOT_DECLARED, UNDEFINED_GLOBAL)];
+
+/// The rule whose finding `code` reports a narrower case of, if any.
+pub fn broader(code: &str) -> Option<&'static str> {
+    NARROWER.iter().find(|(narrow, _)| *narrow == code).map(|(_, broad)| *broad)
+}
+
+/// The rules that report narrower cases of the finding of `code`.
+pub fn narrower(code: &str) -> impl Iterator<Item = &'static str> + '_ {
+    NARROWER.iter().filter(move |(_, broad)| *broad == code).map(|(narrow, _)| *narrow)
+}

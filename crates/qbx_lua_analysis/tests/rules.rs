@@ -288,6 +288,11 @@ fn modules_loaded_at_runtime_provide_their_globals() {
         check_file(&input).into_iter().map(|d| d.code).collect()
     }
     assert_eq!(codes("qbx.playAudio({ audioName = 'cell_door' })"), ["fivem/import-not-declared"]);
+    // lua-language-server reports these as undefined globals, so comments written for it cover them.
+    assert_eq!(
+        codes("---@diagnostic disable-next-line: undefined-global\nqbx.playAudio({ audioName = 'cell_door' })"),
+        Vec::<&str>::new()
+    );
     assert_eq!(
         codes("lib.load('@qbx_core.modules.lib')\nqbx.playAudio({ audioName = 'cell_door' })"),
         Vec::<&str>::new()
