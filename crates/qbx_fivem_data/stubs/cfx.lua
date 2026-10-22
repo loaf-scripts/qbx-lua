@@ -31,7 +31,7 @@ function Citizen.ClearTimeout(timerId) end
 
 ---Yields the current thread until the promise settles. Returns the resolved value, or raises the rejection value as an error.
 ---@param p promise
----@return any ...
+---@return any value
 function Citizen.Await(p) end
 
 ---Writes raw text to the console/log without appending a newline. A number is written as text.
@@ -43,18 +43,6 @@ function Citizen.Trace(text) end
 ---@param ... any
 ---@return any ...
 function Citizen.InvokeNative(hash, ...) end
-
----Calls a game native by hash like `Citizen.InvokeNative`, with the same arguments and marker values.
----@param hash integer|string
----@param ... any
----@return any ...
-function Citizen.InvokeNative2(hash, ...) end
-
----Returns a directly callable function for the native with the given hash, or nil when it cannot be resolved.
----@param hash integer|string
----@return function? native
----@nodiscard
-function Citizen.GetNative(hash) end
 
 ---Returns the Lua source of the lazily loaded wrapper for the named native, or nil when the native is unknown.
 ---@param name string
@@ -119,9 +107,7 @@ function Citizen.ResultAsString() end
 ---@nodiscard
 function Citizen.ResultAsVector() end
 
----Marker requesting the native result as a msgpack-serialised object that is decoded into a Lua value.
----@return any marker
----@nodiscard
+---Does nothing and returns nothing, for compatibility; `Citizen.ResultAsObject2(msgpack.unpack)` requests the native result as a msgpack-serialised object.
 function Citizen.ResultAsObject() end
 
 ---Marker requesting the native result as a msgpack-serialised object that `unpacker`, usually `msgpack.unpack`, decodes.
@@ -129,6 +115,12 @@ function Citizen.ResultAsObject() end
 ---@return any marker
 ---@nodiscard
 function Citizen.ResultAsObject2(unpacker) end
+
+---Returns a reference to `func` that other resources can call, as exports and event arguments pass functions, or nil for a value that is no function.
+---@param func function|table
+---@return string? reference
+---@nodiscard
+function Citizen.GetFunctionReference(func) end
 
 ---Runtime internal: marks the start of a scheduler boundary used to stitch stack traces across resources.
 ---@param boundaryId integer
@@ -197,13 +189,6 @@ function RemoveEventHandler(eventData) end
 ---@overload fun(eventName: string): nil
 ---@overload fun(eventName: string, handler?: fun(...: any)): EventHandlerData?
 function RegisterNetEvent(eventName, handler) end
-
----Old name of `RegisterNetEvent`.
----@deprecated
----@param eventName string
----@param handler? fun(...: any)
----@return EventHandlerData? eventData
-function RegisterServerEvent(eventName, handler) end
 
 ---Triggers a local event on this side (client or server), invoking every handler in every resource with the given arguments.
 ---@param eventName string
@@ -412,12 +397,19 @@ function msgpack.gettype(typeName) end
 ---@field failure? fun(value: any)
 promise = {}
 
----Creates a new pending promise.
+---What `promise.new` takes besides a function.
+---@class promise_options
+---@field success? fun(value: any) # Runs when the promise resolves.
+---@field failure? fun(value: any) # Runs when the promise rejects.
+---@field extend? fun(p: promise) # Runs with the new promise, and with each one `next` chains on it.
+
+---Creates a new pending promise. Given a function, it runs it with the promise and rejects the promise with the error it raises.
+---@param options? fun(p: promise)|promise_options
 ---@return promise p
 ---@nodiscard
-function promise.new() end
+function promise.new(options) end
 
----Returns a promise that resolves with a list of all results once every given promise has resolved, or rejects as soon as one rejects.
+---Returns a promise that settles once every given promise has, with the list of their values: it resolves when all of them resolved and rejects when any rejected.
 ---@param promises promise[]
 ---@return promise p
 ---@nodiscard
@@ -725,10 +717,33 @@ function table.clone(t, destination) end
 ---@return string ...
 function string.tostringall(...) end
 
----Creates a mutable string buffer of the given length. CfxLua extension.
+---Creates a mutable string buffer of the given length, or one that holds a copy of a string. CfxLua extension.
 ---@param length integer
----@return string
+---@return string blob
+---@overload fun(s: string): string
 function string.blob(length) end
+
+---Returns whether `s` is a string buffer that `string.blob` created. CfxLua extension.
+---@param s any
+---@return boolean
+---@nodiscard
+function string.isblob(s) end
+
+---Writes the values packed according to `fmt`, as `string.pack` packs them, into `blob` at position `pos` (default 1). Returns `blob`, or a new, larger one when they do not fit. CfxLua extension.
+---@param blob string
+---@param fmt string
+---@param ... string|number
+---@return string blob
+---@overload fun(blob: string, pos: integer, fmt: string, ...: string|number): string
+function string.blob_pack(blob, fmt, ...) end
+
+---Reads the values packed in `blob` according to `fmt`, from position `pos` (default 1), as `string.unpack` does. CfxLua extension.
+---@param blob string
+---@param fmt string
+---@return any ...
+---@overload fun(blob: string, pos: integer, fmt: string): ...any
+---@nodiscard
+function string.blob_unpack(blob, fmt) end
 
 ---The difference between 1 and the next larger number. CfxLua extension.
 ---@type number
@@ -1188,6 +1203,14 @@ function scrub(...) end
 ---@return integer
 ---@nodiscard
 function utf8.strlenutf8(s) end
+
+---Returns how many UTF-16 code units the UTF-8 characters between byte positions `i` (default 1) and `j` (default -1) take. CfxLua extension.
+---@param s string
+---@param i? integer
+---@param j? integer
+---@return integer
+---@nodiscard
+function utf8.len16(s, i, j) end
 
 ---Compares two UTF-8 strings without regard to case: negative, zero or positive as `a` sorts before, with or after `b`. CfxLua extension.
 ---@param a string

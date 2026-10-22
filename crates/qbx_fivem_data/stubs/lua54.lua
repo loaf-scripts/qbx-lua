@@ -11,8 +11,6 @@
 ---@alias read_format integer|"n"|"l"|"L"|"a"|"*n"|"*l"|"*L"|"*a"
 ---@alias seek_whence "set"|"cur"|"end"
 ---@alias vbuf_mode "no"|"full"|"line"
----@alias hook_mask "c"|"r"|"l"|"cr"|"cl"|"rl"|"crl"|""
----@alias hook_event "call"|"tail call"|"return"|"line"|"count"
 ---@alias locale_category "all"|"collate"|"ctype"|"monetary"|"numeric"|"time"
 ---@alias coroutine_status "running"|"suspended"|"normal"|"dead"
 
@@ -278,19 +276,10 @@ function coroutine.yield(...) end
 ---@field activelines table<integer, boolean>
 local debuginfo = {}
 
+---The debug functions FiveM keeps: it builds Lua with `LUA_SANDBOX`, which leaves out the others, such as
+---`debug.sethook` and `debug.getlocal`.
 ---@class debuglib
 debug = {}
-
----Enters an interactive prompt that executes each entered line until a line containing only "cont" is read.
-function debug.debug() end
-
----Returns the current hook function, its mask and its count for the given thread.
----@param co? thread
----@return function? hook
----@return string mask
----@return integer count
----@nodiscard
-function debug.gethook(co) end
 
 ---Returns a table describing a function or a stack level. `what` selects which groups of fields get filled in.
 ---@param f integer|function
@@ -300,25 +289,11 @@ function debug.gethook(co) end
 ---@nodiscard
 function debug.getinfo(f, what) end
 
----Returns the name and value of local number `index` at stack level `f`, or only the parameter name when `f` is a function.
----@param f integer|function
----@param index integer
----@return string? name
----@return any value
----@overload fun(thread: thread, f: integer|function, index: integer): string?, any
----@nodiscard
-function debug.getlocal(f, index) end
-
 ---Returns the real metatable of any value, ignoring `__metatable`.
 ---@param object any
 ---@return table? metatable
 ---@nodiscard
 function debug.getmetatable(object) end
-
----Returns the registry table.
----@return table registry
----@nodiscard
-function debug.getregistry() end
 
 ---Returns the name and value of upvalue number `up` of function `f`.
 ---@param f function
@@ -328,55 +303,12 @@ function debug.getregistry() end
 ---@nodiscard
 function debug.getupvalue(f, up) end
 
----Returns the `n`-th user value attached to a userdata and a boolean telling whether that slot exists.
----@param u userdata
----@param n? integer
----@return any value
----@return boolean exists
----@nodiscard
-function debug.getuservalue(u, n) end
-
----Sets a new C stack limit. Has no effect since Lua 5.4.3.
----@deprecated
----@param limit integer
----@return integer|boolean previous
-function debug.setcstacklimit(limit) end
-
----Installs `hook` as the debug hook. `mask` picks the events and `count` adds an every-N-instructions event; calling with no arguments removes the hook.
----@param hook? fun(event: hook_event, line?: integer)
----@param mask? hook_mask
----@param count? integer
----@overload fun(thread: thread, hook?: fun(event: hook_event, line?: integer), mask?: hook_mask, count?: integer)
-function debug.sethook(hook, mask, count) end
-
----Assigns `value` to local number `index` at stack level `level` and returns the local's name, or nil if there is none.
----@param level integer
----@param index integer
----@param value any
----@return string? name
----@overload fun(thread: thread, level: integer, index: integer, value: any): string?
-function debug.setlocal(level, index, value) end
-
 ---Sets the metatable of any value (nil removes it) and returns the value.
 ---@generic T
 ---@param value T
 ---@param metatable? table
 ---@return T value
 function debug.setmetatable(value, metatable) end
-
----Assigns `value` to upvalue number `up` of `f` and returns the upvalue's name, or nil if there is none.
----@param f function
----@param up integer
----@param value any
----@return string? name
-function debug.setupvalue(f, up, value) end
-
----Stores `value` as the `n`-th user value of `udata` and returns `udata`, or nil when the slot does not exist.
----@param udata userdata
----@param value any
----@param n? integer
----@return userdata? udata
-function debug.setuservalue(udata, value, n) end
 
 ---Returns a stack traceback string, optionally prefixed by `message` and starting at `level`. A non-string, non-nil message is returned untouched.
 ---@param message? any
@@ -385,20 +317,6 @@ function debug.setuservalue(udata, value, n) end
 ---@overload fun(thread: thread, message?: any, level?: integer): string
 ---@nodiscard
 function debug.traceback(message, level) end
-
----Returns a unique identifier for upvalue number `n` of `f`, useful to detect upvalues shared between closures.
----@param f function
----@param n integer
----@return lightuserdata? id
----@nodiscard
-function debug.upvalueid(f, n) end
-
----Makes upvalue `n1` of closure `f1` refer to upvalue `n2` of closure `f2`.
----@param f1 function
----@param n1 integer
----@param f2 function
----@param n2 integer
-function debug.upvaluejoin(f1, n1, f2, n2) end
 
 ---@class file
 local file = {}

@@ -10637,7 +10637,6 @@ M.gone()
 ---@deprecated
 local function hidden() end
 hidden()
-RegisterServerEvent('x')
 ---@diagnostic disable-next-line: deprecated
 OldThing()
 ";
@@ -10659,10 +10658,15 @@ OldThing()
 ---@deprecated",
                 "'M.gone' is deprecated"
             ),
-            finding("RegisterServerEvent", "'RegisterServerEvent' is deprecated"),
         ],
-        "a `---@field` does not keep a field from being deprecated, another definition does, locals are left \
-         alone, and the runtime's `RegisterServerEvent` is reported once, by the linter"
+        "a `---@field` does not keep a field from being deprecated, another definition does, and locals are \
+         left alone"
+    );
+    client.open_with(SERVER, "RegisterServerEvent('x')\n");
+    assert_eq!(
+        findings(&mut client, SERVER, &["deprecated"]),
+        [("deprecated".to_string(), 0, "'RegisterServerEvent' is deprecated".to_string())],
+        "the runtime's `RegisterServerEvent`, which only the server has, is reported once, by the linter"
     );
 }
 
@@ -14082,6 +14086,7 @@ fn runtime_stubs_follow_the_cfxlua_runtime() {
         "local copy = table.clone(table.clear(t), {})",
         "local kind = table.type(copy)",
         "print(removed, yielded, decoded, unpacked, kind)",
+        "CreateThread(function() Wait() end)",
     ]
     .join("\n");
     client.open_with(CLIENT, &text);
@@ -14092,6 +14097,25 @@ fn runtime_stubs_follow_the_cfxlua_runtime() {
     let hover = client.hover_text(CLIENT, 8, 6);
     assert!(hover.contains("empty") && hover.contains("mixed"), "{hover}");
     assert_eq!(client.diagnostics_for(CLIENT), []);
+
+    // FiveM builds Lua with `LUA_SANDBOX`, which leaves out most of the debug library, and the
+    // scheduler gives some functions to one side only or none of the values declared before.
+    let text = [
+        "debug.sethook(print, 'c')",
+        "print(debug.traceback(), debug.getinfo(1))",
+        "local sent = SendNUIMessage({})",
+        "local value = Citizen.Await(promise.new(function(p) p:resolve(1) end))",
+        "RegisterServerEvent('legacy')",
+        "print(sent, value, Citizen.GetFunctionReference(print), string.isblob(''), utf8.len16('a'))",
+    ]
+    .join("\n");
+    client.change(CLIENT, 2, &text);
+    assert!(client.hover_text(CLIENT, 2, 6).contains("sent: nil"), "SendNUIMessage returns nothing");
+    assert_eq!(
+        client.diagnostics_for(CLIENT),
+        [("fivem/native-wrong-side".to_string(), 4), ("undefined-field".to_string(), 0)],
+        "debug.sethook does not exist, and RegisterServerEvent exists only on the server"
+    );
 }
 
 #[test]

@@ -12,7 +12,6 @@ function RegisterNuiCallback(name, cb) end
 
 ---JSON-encodes `message` and posts it to this resource's NUI page, where it arrives as a window `message` event.
 ---@param message table
----@return boolean success
 function SendNUIMessage(message) end
 
 ---Sends a network event to the server; the handler there sees this player's id in `source`.
@@ -25,6 +24,18 @@ function TriggerServerEvent(eventName, ...) end
 ---@param bps integer
 ---@param ... any
 function TriggerLatentServerEvent(eventName, bps, ...) end
+
+---Returns a directly callable function for the native with the given hash, or nil when it cannot be resolved. Only the client has it.
+---@param hash integer|string
+---@return function? native
+---@nodiscard
+function Citizen.GetNative(hash) end
+
+---Calls a game native by hash like `Citizen.InvokeNative`, with the same arguments and marker values. Only the client has it.
+---@param hash integer|string
+---@param ... any
+---@return any ...
+function Citizen.InvokeNative2(hash, ...) end
 
 ---State bag wrapper for the local player; `LocalPlayer.state` is that player's state bag.
 ---@type PlayerInterface

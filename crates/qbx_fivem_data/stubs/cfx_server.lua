@@ -13,6 +13,13 @@ function TriggerClientEvent(eventName, playerSrc, ...) end
 ---@param ... any
 function TriggerLatentClientEvent(eventName, playerSrc, bps, ...) end
 
+---Old name of `RegisterNetEvent`, which only the server has.
+---@deprecated
+---@param eventName string
+---@param handler? fun(...: any)
+---@return EventHandlerData? eventData
+function RegisterServerEvent(eventName, handler) end
+
 ---Returns every identifier of the player, such as "license:...", "discord:..." or "steam:...".
 ---@param playerSrc integer|string
 ---@return string[] identifiers
@@ -82,7 +89,7 @@ local HttpHandlerResponse = {}
 ---@field build fun(resourceName: string, cb: fun(success: boolean, status: string)) # Builds the resource, then calls `cb`.
 local ResourceBuildTask = {}
 
----Writes a structured entry to the server log that RCON clients and txAdmin can read.
+---Does nothing: FiveM keeps it for old scripts.
 ---@param data table
 function RconLog(data) end
 
