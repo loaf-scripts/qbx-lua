@@ -39,7 +39,6 @@ const SENSITIVE_FUNCTIONS: &[&str] = &[
 const VALIDATORS: &[&str] =
     &["assert", "type", "tonumber", "tostring", "math.type", "math.floor", "math.abs", "lib.assert"];
 const PLAYER_ID_NAMES: &[&str] = &["source", "src", "playerSource", "playerSrc"];
-const SQL_ROOTS: &[&str] = &["MySQL", "exports.oxmysql", "exports.ghmattimysql", "exports.mysql-async"];
 /// Statements that change the schema. They take no `?` placeholders: what is built into them is
 /// names and definitions of tables, columns and indexes, which no parameter can stand for.
 const SCHEMA_STATEMENTS: &[&str] = &["ALTER", "CREATE", "DROP", "TRUNCATE", "RENAME"];
@@ -62,7 +61,7 @@ struct Security<'a, 'b> {
 
 impl Security<'_, '_> {
     fn sql(&mut self, path: &str, args: &[Expr]) {
-        if !SQL_ROOTS.iter().any(|root| path == *root || path.starts_with(&format!("{root}."))) {
+        if !super::sql::is_database_call(path) {
             return;
         }
         let Some(query) = args.first() else { return };

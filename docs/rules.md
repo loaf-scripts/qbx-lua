@@ -125,5 +125,18 @@ These checks do not prove validation or authorization. For example, recognizing 
 a guard does not establish that the guard always runs before the sensitive operation. Review the
 handler's control flow and runtime behavior separately.
 
+## SQL queries
+
+| Rule | Default | Check |
+| --- | --- | --- |
+| `sql/unquoted-reserved-word` | warning | A name in a query, such as a column or table, is a word the database reserves and has no backticks, so the query fails. Fix available. |
+| `sql/reserved-in-other-database` | off | A name in a query is a word that only the other of MariaDB and MySQL reserves and has no backticks, so the query fails there. Fix available. |
+
+They read the queries written out as strings: the first argument of the `MySQL` and
+`exports.oxmysql` functions, the queries of a transaction, strings on the line below
+`---@language sql`, and in the editor the first argument of a function whose first parameter takes
+`sql`. The database is MariaDB, which oxmysql recommends; `database = "mysql"` in `qbxlint.toml`
+makes it MySQL. See [SQL queries](reference.md#sql-queries).
+
 See the [analysis reference](reference.md) for exclusions, suppressions, and limits on checks
 across files and resources.

@@ -27,6 +27,7 @@ globals = ["SomeRuntimeGlobal"]
 ignore_unused_prefix = "_"
 strict_classes = false
 strict = false
+database = "mariadb"
 
 [rules]
 "unused-argument" = "off"
@@ -57,6 +58,7 @@ quote_style = "preserve"
 | `ignore_unused_prefix` | Locals and arguments with this prefix are exempt from unused checks; defaults to `_`. |
 | `strict_classes` | Makes every `---@class` without `(loose)` strict, as if it said `(strict)`. Only classes declared in files whose diagnostics are reported follow it. See [Strict classes](#strict-classes). Defaults to `false`. |
 | `strict` | Makes the type rules of qbx-lua-ls report what TypeScript's strict mode does beyond lua-language-server, such as `n + 1` for a `number?`. See [Strict mode](#strict-mode). Defaults to the editor's setting, which is `false` unless it is turned on. |
+| `database` | The database server whose reserved words the `sql/` rules check queries for: `mariadb` or `mysql`. See [SQL queries](#sql-queries). Defaults to `mariadb`. |
 | `rules` | Per-rule levels: `off`, `hint`, `info`, `warning` (or `warn`), and `error`. |
 | `overrides` | Per-file globals, rule levels, `strict` and `side`, selected by the `files` patterns, and imports for the resources whose `fxmanifest.lua` the patterns match. Later matching overrides take precedence for rule levels, `strict` and sides. See [Sides of unlisted scripts](#sides-of-unlisted-scripts). |
 | `format` | Formatting options, shown with their defaults above. |
@@ -1406,6 +1408,40 @@ takes `sql`, also as `sql?`, as calls write them, such as `DB.fetch`, `DB:query`
 defined with `:`, or `exports.mydb:scalar` for an export. Local functions are not listed.
 lua-language-server does not know the type; a definition file with `---@alias sql string`
 declares it there.
+
+### Reserved words
+
+`sql/unquoted-reserved-word` reports a name in a query, such as a column, a table or an alias, that
+the database reserves and that has no backticks: `SELECT key FROM items` fails, while
+``SELECT `key` FROM items`` runs. Its fix adds the backticks. `sql/reserved-in-other-database`,
+which is off unless it is turned on, also reports the words that only the other of MariaDB and
+MySQL reserves, such as `rank` for MariaDB, so that a query runs on both. Keywords that neither
+reserves, such as `name` or `status`, need no backticks. A word after a `.`, as `from` of `n.from`,
+is a name to the databases and needs none either.
+
+The database is MariaDB, which oxmysql recommends, with the reserved words it lists for its latest
+releases; a message names the release that started to reserve a word, as `offset` in MariaDB 10.6.
+Servers that run MySQL set `database = "mysql"` to check the reserved words of MySQL 8.4 instead.
+
+The rules read the strings written out where a query goes:
+
+```lua
+MySQL.query.await('SELECT `key` FROM items WHERE id = ?', { id })
+exports.oxmysql:execute('SELECT `key` FROM items')
+MySQL.transaction.await({ 'DELETE FROM items WHERE `key` = ?', { query = '...', values = { 1 } } })
+
+---@language sql
+local query = [[SELECT `key` FROM items]]
+
+DB.fetch('SELECT `key` FROM items')
+```
+
+These are the first argument of a function of `MySQL`, `exports.oxmysql`, `exports.ghmattimysql`
+or `exports['mysql-async']`, each query of a transaction, a string that starts on the line below a
+`---@language sql` comment of its own, as editors highlight it, and in qbx-lua-ls, also with local
+functions, the first argument of a function whose first parameter takes `sql`. A query built at
+runtime, with `..` or `:format()`, is not read, and neither is one the parser does not understand,
+such as a statement only one of the databases has.
 
 ## Events, exports, and locales
 

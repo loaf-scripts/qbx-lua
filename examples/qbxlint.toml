@@ -20,6 +20,9 @@ strict_classes = false
 # `number?`. Overrides can set it per folder. Without it, the editor's setting decides.
 strict = false
 
+# The database server whose reserved words the sql/ rules check queries for: "mariadb" or "mysql".
+database = "mariadb"
+
 # Files resources run without an fxmanifest.lua entry, for example through load(LoadResourceFile(...)).
 # Put them in an [[overrides]] entry instead to limit them to some resources.
 [imports]

@@ -1,8 +1,10 @@
 //! The functions that take an SQL query, for editors that highlight the query in their calls: those
 //! whose first parameter has the `sql` type, which the runtime stubs declare as a `string`.
+use qbx_lua_syntax::ast::{Expr, ExprKind};
 use qbx_luacats::types::{FunType, Type};
 
 use crate::index::{FileOrigin, Index, SymbolKind};
+use crate::infer::Infer;
 
 /// The functions of the workspace and its libraries whose first parameter takes `sql`, as calls
 /// write them: `Fetch`, `DB.fetch`, `DB:fetch` for a function defined with `:`, or
@@ -43,6 +45,19 @@ pub fn sql_functions(index: &Index) -> Vec<String> {
 /// one, as `sql?`.
 fn takes_sql(fun: &FunType) -> bool {
     fun.params.first().is_some_and(|param| is_sql(&param.ty))
+}
+
+/// Whether `call` passes its first argument to a parameter of the `sql` type, so that the argument
+/// is a query.
+pub fn passes_query(infer: &Infer, call: &Expr) -> bool {
+    let (base, method) = match &call.kind {
+        ExprKind::Call { callee, .. } => (&**callee, None),
+        ExprKind::MethodCall { base, method, .. } => (&**base, Some(method)),
+        _ => return false,
+    };
+    let Some((fun, _)) = infer.callee_fun(base, method) else { return false };
+    let (skip_params, skip_args) = fun.call_offsets(method.is_some());
+    skip_params.checked_sub(skip_args).and_then(|index| fun.params.get(index)).is_some_and(|param| is_sql(&param.ty))
 }
 
 fn is_sql(ty: &Type) -> bool {

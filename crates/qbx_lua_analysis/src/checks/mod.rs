@@ -10,6 +10,7 @@ mod locale;
 mod locals;
 pub mod manifest;
 mod security;
+mod sql;
 
 use qbx_fivem_data::Side;
 use qbx_lua_syntax::ast::{Chunk, Expr};
@@ -44,6 +45,9 @@ pub struct FileInput<'a> {
     /// What each argument of a call of a native is, as the types of the language server tell;
     /// without it what the syntax of the argument shows counts.
     pub native_arg: Option<NativeArg<'a>>,
+    /// Whether a call passes its first argument to a parameter of the `sql` type, as the types of
+    /// the language server tell; without it only the calls of the database libraries send queries.
+    pub takes_query: Option<TakesQuery<'a>>,
 }
 
 /// Tells how many values a call gives, when that is known.
@@ -51,6 +55,9 @@ pub type ValueCount<'a> = &'a dyn Fn(&Expr) -> Option<usize>;
 
 /// Tells what an argument passed to a native is, as far as the way the runtime passes it goes.
 pub type NativeArg<'a> = &'a dyn Fn(&Expr) -> qbx_fivem_data::ArgKind;
+
+/// Tells whether a call passes its first argument as a query.
+pub type TakesQuery<'a> = &'a dyn Fn(&Expr) -> bool;
 
 #[derive(Clone, Copy)]
 pub struct ResourceInput<'a> {
@@ -131,6 +138,7 @@ pub fn check_file(input: &FileInput) -> Vec<Diagnostic> {
     fivem::check(input, &mut sink);
     crossfile::check(input, &mut sink);
     security::check(input, &mut sink);
+    sql::check(input, &mut sink);
     locale::check(input, &mut sink);
 
     let mut diagnostics = sink.finish();

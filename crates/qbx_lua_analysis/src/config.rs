@@ -35,6 +35,16 @@ impl Level {
     }
 }
 
+/// The database server whose reserved words the `sql/` rules read queries for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Database {
+    /// MariaDB, which oxmysql recommends.
+    #[default]
+    MariaDb,
+    MySql,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct RawConfig {
@@ -44,6 +54,7 @@ struct RawConfig {
     ignore_unused_prefix: Option<String>,
     strict_classes: bool,
     strict: Option<bool>,
+    database: Database,
     rules: BTreeMap<String, Level>,
     overrides: Vec<RawOverride>,
     imports: Imports,
@@ -121,6 +132,8 @@ pub struct Config {
     /// Whether the type checks of qbx-lua-ls report what TypeScript's strict mode does beyond
     /// lua-language-server. `None` leaves it to the editor's setting.
     strict: Option<bool>,
+    /// The database server that the `sql/` rules check queries for.
+    pub database: Database,
     pub format: qbx_lua_fmt::FormatOptions,
     /// Whether `format` comes from a `qbxlint.toml`. Editors keep their own indentation otherwise.
     pub format_configured: bool,
@@ -266,6 +279,7 @@ impl Config {
             ignore_unused_prefix: raw.ignore_unused_prefix.unwrap_or_else(|| "_".to_string()),
             strict_classes: raw.strict_classes,
             strict: raw.strict,
+            database: raw.database,
             format: raw.format,
             format_configured: false,
             notes: Vec::new(),
@@ -308,7 +322,8 @@ impl Config {
             globals.extend(entry.globals.iter().cloned());
         }
         let strict = self.strict_at(path);
-        FileConfig { rules, globals, ignore_unused_prefix: self.ignore_unused_prefix.clone(), strict }
+        let database = self.database;
+        FileConfig { rules, globals, ignore_unused_prefix: self.ignore_unused_prefix.clone(), strict, database }
     }
 
     /// What the configuration sets `strict` to for the file at `path`, as the last override that
@@ -358,6 +373,8 @@ pub struct FileConfig {
     pub globals: Vec<String>,
     pub ignore_unused_prefix: String,
     strict: Option<bool>,
+    /// The database server that the `sql/` rules check queries for.
+    pub database: Database,
 }
 
 impl Default for FileConfig {
@@ -425,6 +442,16 @@ mod tests {
         assert_eq!(config.for_file(Path::new("/repo/tests/a.lua")).severity("undefined-global"), None);
         assert!(!config.strict_classes);
         assert!(Config::parse("strict_classes = true", PathBuf::from("/repo")).unwrap().strict_classes);
+    }
+
+    #[test]
+    fn database_defaults_to_mariadb() {
+        let file =
+            |text: &str| Config::parse(text, PathBuf::from("/repo")).map(|c| c.for_file(Path::new("/repo/a.lua")));
+        assert_eq!(file("").unwrap().database, Database::MariaDb);
+        assert_eq!(file("database = 'mysql'").unwrap().database, Database::MySql);
+        assert_eq!(file("database = 'mariadb'").unwrap().database, Database::MariaDb);
+        assert!(file("database = 'postgres'").is_err());
     }
 
     #[test]

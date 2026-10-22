@@ -33,6 +33,7 @@ use super::injected_fields::injected_fields;
 use super::nil_checks::{unchecked_nils, UncheckedNils};
 use super::returns::{mismatched_returns, missing_returns, redundant_returns};
 use super::retyped_locals::retyped_locals;
+use super::sql_functions::passes_query;
 use super::strict_classes::undeclared_fields;
 use super::undefined_fields::undefined_fields;
 use super::unknown_types::{typed_by_declaration, unknown_types, unknown_values};
@@ -309,6 +310,7 @@ pub(crate) fn diagnostics_with_support(
             locale: support.and_then(|support| support.locale).or(owned_locale.as_ref()),
             value_count: Some(&|call| infer.value_count(call)),
             native_arg: Some(&|arg| native_arg_kind(&infer, &declared, arg)),
+            takes_query: Some(&|call| passes_query(&infer, call)),
         });
         type_diagnostics(ws, doc, &infer, &config, &mut found);
         found

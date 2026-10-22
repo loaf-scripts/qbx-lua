@@ -9,6 +9,7 @@ pub enum Category {
     FiveM,
     Manifest,
     Security,
+    Sql,
 }
 
 impl Category {
@@ -21,6 +22,7 @@ impl Category {
             Category::FiveM => "fivem",
             Category::Manifest => "manifest",
             Category::Security => "security",
+            Category::Sql => "sql",
         }
     }
 }
@@ -159,6 +161,8 @@ pub const RESOURCE_NOT_FOUND: &str = "fivem/resource-not-found";
 pub const CLIENT_SUPPLIED_SOURCE: &str = "security/client-supplied-source";
 pub const UNVALIDATED_EVENT_ARGUMENT: &str = "security/unvalidated-event-argument";
 pub const SQL_CONCATENATION: &str = "security/sql-concatenation";
+pub const SQL_UNQUOTED_RESERVED_WORD: &str = "sql/unquoted-reserved-word";
+pub const SQL_RESERVED_IN_OTHER_DATABASE: &str = "sql/reserved-in-other-database";
 pub const UNKNOWN_LOCALE_KEY: &str = "qbox/unknown-locale-key";
 pub const UNUSED_LOCALE_KEY: &str = "qbox/unused-locale-key";
 
@@ -250,6 +254,8 @@ pub static RULES: &[Rule] = &[
     rule(CLIENT_SUPPLIED_SOURCE, Security, WARN, false, "A server net event takes the player id as an argument; clients can send any id, use the global 'source'."),
     rule(UNVALIDATED_EVENT_ARGUMENT, Security, WARN, false, "A value sent by a client reaches a sensitive call (money, items, commands, code loading) without ever being checked."),
     rule(SQL_CONCATENATION, Security, WARN, false, "A SQL query is built by concatenating or formatting values into it instead of using ? placeholders."),
+    rule(SQL_UNQUOTED_RESERVED_WORD, Sql, WARN, true, "A name in a query, such as a column, is a word the database reserves and has no backticks, so the query fails."),
+    rule(SQL_RESERVED_IN_OTHER_DATABASE, Sql, OFF, true, "A name in a query, such as a column, is a word that only the other of MariaDB and MySQL reserves and has no backticks, so the query fails there."),
     rule(UNKNOWN_LOCALE_KEY, Correctness, WARN, false, "locale() is called with a key that the resource's locale file does not define."),
     rule(UNUSED_LOCALE_KEY, Style, INFO, false, "A key of the locale file is never used by the resource's Lua code."),
 ];

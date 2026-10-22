@@ -1,8 +1,9 @@
+use qbx_lua_analysis::config::Database;
 use qbx_lua_analysis::crossref::CrossRefs;
 use qbx_lua_analysis::locale::LocaleFile;
 use qbx_lua_analysis::scope::resolve;
 use qbx_lua_analysis::summary::summarize;
-use qbx_lua_analysis::{check_file, FileConfig, FileInput, Level, Side};
+use qbx_lua_analysis::{apply_fixes, check_file, Diagnostic, FileConfig, FileInput, Level, Side};
 use qbx_lua_syntax::parse;
 
 fn codes_with(source: &str, config: &FileConfig) -> Vec<&'static str> {
@@ -18,6 +19,16 @@ fn codes_in_project(
     others: &[(Option<Side>, &str)],
     locale: Option<&str>,
 ) -> Vec<&'static str> {
+    diagnostics_in_project(source, config, side, others, locale).into_iter().map(|d| d.code).collect()
+}
+
+fn diagnostics_in_project(
+    source: &str,
+    config: &FileConfig,
+    side: Option<Side>,
+    others: &[(Option<Side>, &str)],
+    locale: Option<&str>,
+) -> Vec<Diagnostic> {
     let chunk = parse(source);
     let resolution = resolve(&chunk);
     let summary = summarize(source, &chunk, &resolution);
@@ -40,8 +51,9 @@ fn codes_in_project(
         relative_path: "",
         value_count: None,
         native_arg: None,
+        takes_query: None,
     };
-    check_file(&input).into_iter().map(|d| d.code).collect()
+    check_file(&input)
 }
 
 fn project(source: &str, side: Side, others: &[(Option<Side>, &str)]) -> Vec<&'static str> {
@@ -83,6 +95,7 @@ fn resource_project(source: &str, side: Side, own: &str, others: &[(&str, Option
         relative_path: "",
         value_count: None,
         native_arg: None,
+        takes_query: None,
     };
     check_file(&input).into_iter().map(|d| d.code).collect()
 }
@@ -183,6 +196,7 @@ fn legacy_core_object_only_on_qbox() {
             relative_path: "client.lua",
             value_count: None,
             native_arg: None,
+            takes_query: None,
         };
         check_file(&input).into_iter().map(|d| d.code).filter(|code| *code == "qbox/legacy-core-object").collect()
     }
@@ -348,6 +362,7 @@ fn modules_loaded_at_runtime_provide_their_globals() {
             relative_path: "client.lua",
             value_count: None,
             native_arg: None,
+            takes_query: None,
         };
         check_file(&input).into_iter().map(|d| d.code).collect()
     }
@@ -667,6 +682,140 @@ fn sql_must_use_placeholders() {
     );
 }
 
+/// Lints `source` as server code for `database`, with `sql/reserved-in-other-database` at `other`,
+/// and gives what the `sql/` rules find as each code and the text it covers.
+fn sql_findings(source: &str, database: Database, other: Level) -> Vec<(&'static str, String)> {
+    sql_diagnostics(source, database, other)
+        .into_iter()
+        .map(|d| (d.code, source[d.span.start as usize..d.span.end as usize].to_string()))
+        .collect()
+}
+
+fn sql_diagnostics(source: &str, database: Database, other: Level) -> Vec<Diagnostic> {
+    let mut config = FileConfig::default();
+    config.globals.push("MySQL".into());
+    config.database = database;
+    config.set("sql/reserved-in-other-database", other);
+    let found = diagnostics_in_project(source, &config, Some(Side::Server), &[], None);
+    found.into_iter().filter(|d| d.code.starts_with("sql/")).collect()
+}
+
+#[test]
+fn reserved_words_in_queries_need_backticks() {
+    let reserved = |source: &str| sql_findings(source, Database::MariaDb, Level::Off);
+    let word = |text: &str| ("sql/unquoted-reserved-word", text.to_string());
+    assert_eq!(
+        reserved("local id = 1\nMySQL.query.await('SELECT key, name FROM users WHERE id = ?', { id })"),
+        [word("key")]
+    );
+    assert_eq!(reserved("MySQL.query.await('SELECT `key`, `name` FROM users')"), []);
+    assert_eq!(reserved("MySQL.update('UPDATE users SET `group` = ? WHERE identifier = ?', { 'a', 'b' })"), []);
+    assert_eq!(
+        reserved("MySQL.update('UPDATE users SET group = ? WHERE identifier = ?', { 'a', 'b' })"),
+        [word("group")]
+    );
+    assert_eq!(reserved("exports.oxmysql:execute('SELECT * FROM `keys` WHERE key = ?', { 1 })"), [word("key")]);
+    assert_eq!(reserved("exports['oxmysql']:scalar('SELECT `desc` AS desc FROM items')"), [word("desc")]);
+
+    // Functions, table options and values the parser reads as names are no names of the query.
+    assert_eq!(
+        reserved("MySQL.query('SELECT LEFT(label, 2), REPLACE(label, \"a\", \"b\"), COUNT(*), key FROM items')"),
+        [word("key")]
+    );
+    assert_eq!(
+        reserved("MySQL.query('CREATE TABLE IF NOT EXISTS items (id INT NOT NULL AUTO_INCREMENT, desc TEXT, PRIMARY KEY (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4')"),
+        [word("desc")]
+    );
+    assert_eq!(
+        reserved("MySQL.insert('INSERT INTO items (id, created, key) VALUES (DEFAULT, CURRENT_TIMESTAMP, ?)', { 1 })"),
+        [word("key")]
+    );
+    assert_eq!(reserved("MySQL.query('SET @key = 1')"), []);
+    assert_eq!(
+        reserved("MySQL.query('SELECT n.from, t.*, key FROM db.key n JOIN items t ON t.desc = n.from')"),
+        [word("key")],
+        "a word after a `.` is a name to the databases"
+    );
+
+    // Queries built at runtime, and those the parser does not understand, are not read.
+    assert_eq!(reserved("local x = 'a'\nMySQL.query(('SELECT key FROM %s'):format(x))"), []);
+    assert_eq!(reserved("local x = 'a'\nMySQL.query('SELECT key FROM ' .. x)"), []);
+    assert_eq!(reserved("MySQL.query('ALTER TABLE items ADD COLUMN IF NOT EXISTS key INT')"), []);
+    assert_eq!(reserved("print('SELECT key FROM items')"), []);
+}
+
+#[test]
+fn queries_are_found_in_transactions_and_below_language_markers() {
+    let reserved = |source: &str| sql_findings(source, Database::MariaDb, Level::Off);
+    let word = |text: &str| ("sql/unquoted-reserved-word", text.to_string());
+    let transaction = "MySQL.transaction.await({\n    'UPDATE items SET key = 1',\n    { query = 'DELETE FROM items WHERE desc = ?', values = { 1 } },\n    { 'INSERT INTO items (`key`, order) VALUES (?, ?)', { 1, 2 } },\n})";
+    assert_eq!(reserved(transaction), [word("key"), word("desc"), word("order")]);
+
+    let marked = "---@language sql\nlocal query = 'SELECT key FROM items'\nlocal other = 'SELECT key FROM items'";
+    assert_eq!(reserved(marked), [word("key")]);
+    let indented = "do\n    ---@language   sql   the inventory\n    local query = [[SELECT key FROM items]]\n    print(query)\nend";
+    assert_eq!(reserved(indented), [word("key")]);
+    assert_eq!(reserved("---@language sqlite\nlocal query = 'SELECT key FROM items'"), []);
+    assert_eq!(reserved("local a = 1 ---@language sql\nlocal query = 'SELECT key FROM items'"), []);
+}
+
+#[test]
+fn reserved_words_follow_the_configured_database() {
+    let rank = "MySQL.query('SELECT rank, offset, name, option FROM jobs')";
+    let reserved = |text: &str| ("sql/unquoted-reserved-word", text.to_string());
+    let other = |text: &str| ("sql/reserved-in-other-database", text.to_string());
+    assert_eq!(sql_findings(rank, Database::MariaDb, Level::Off), [reserved("offset")]);
+    assert_eq!(
+        sql_findings(rank, Database::MariaDb, Level::Info),
+        [other("rank"), reserved("offset"), other("option")],
+        "a keyword neither database reserves, as `name`, needs no backticks"
+    );
+    assert_eq!(sql_findings(rank, Database::MySql, Level::Off), [reserved("rank"), reserved("option")]);
+    assert_eq!(
+        sql_findings(rank, Database::MySql, Level::Info),
+        [reserved("rank"), other("offset"), reserved("option")]
+    );
+
+    let messages = |database: Database| -> Vec<String> {
+        sql_diagnostics(rank, database, Level::Info).into_iter().map(|d| d.message).collect()
+    };
+    assert_eq!(
+        messages(Database::MariaDb),
+        [
+            "'rank' is a reserved word in MySQL; quote it as `rank` for the query to run there too",
+            "'offset' is a reserved word in MariaDB 10.6+, so the query fails; quote it as `offset`",
+            "'option' is a reserved word in MySQL; quote it as `option` for the query to run there too",
+        ]
+    );
+    assert_eq!(
+        messages(Database::MySql)[1],
+        "'offset' is a reserved word in MariaDB 10.6+; quote it as `offset` for the query to run there too"
+    );
+}
+
+#[test]
+fn quoting_fix_finds_the_name_in_the_source() {
+    let fixed = |source: &str| apply_fixes(source, &sql_diagnostics(source, Database::MariaDb, Level::Off)).0;
+    assert_eq!(fixed("MySQL.query('SELECT key FROM items')"), "MySQL.query('SELECT `key` FROM items')");
+    assert_eq!(
+        fixed("MySQL.query(\"SELECT \\\"ö\\\" AS label,\\n\\tkey FROM items\")"),
+        "MySQL.query(\"SELECT \\\"ö\\\" AS label,\\n\\t`key` FROM items\")"
+    );
+    assert_eq!(
+        fixed("MySQL.query('SELECT label, \\z\n      key FROM items')"),
+        "MySQL.query('SELECT label, \\z\n      `key` FROM items')"
+    );
+    assert_eq!(
+        fixed("MySQL.query([==[\n    SELECT label,\n        key\n    FROM items]==])"),
+        "MySQL.query([==[\n    SELECT label,\n        `key`\n    FROM items]==])"
+    );
+    assert_eq!(
+        fixed("MySQL.query('SELECT label FROM items WHERE key')"),
+        "MySQL.query('SELECT label FROM items WHERE `key`')"
+    );
+    assert_eq!(fixed("MySQL.query('SELECT \\65 FROM key')"), "MySQL.query('SELECT \\65 FROM key')");
+}
+
 #[test]
 fn locale_keys_must_exist() {
     let config = {
@@ -934,6 +1083,7 @@ fn hash_fixes(source: &str) -> (String, usize) {
         relative_path: "",
         value_count: None,
         native_arg: None,
+        takes_query: None,
     });
     let hashes: Vec<_> = diagnostics.into_iter().filter(|d| d.code == "fivem/hash-literal").collect();
     qbx_lua_analysis::apply_fixes(source, &hashes)
@@ -1057,6 +1207,7 @@ fn call_messages_with(
         relative_path: "",
         value_count: None,
         native_arg: None,
+        takes_query: None,
     };
     check_file(&input).into_iter().filter(|d| d.code == code).map(|d| d.message).collect()
 }
@@ -1361,6 +1512,7 @@ fn findings_with(source: &str, code: &str, config: &FileConfig) -> Vec<(u32, Str
         relative_path: "",
         value_count: None,
         native_arg: None,
+        takes_query: None,
     };
     let lines = qbx_lua_syntax::LineIndex::new(source);
     check_file(&input)
@@ -1420,6 +1572,7 @@ for i = 10, n do print(i) end";
             relative_path: "",
             value_count: None,
             native_arg: None,
+            takes_query: None,
         };
         qbx_lua_analysis::apply_fixes(source, &check_file(&input)).0
     };
@@ -1843,6 +1996,7 @@ fn all_fixes(source: &str) -> String {
         relative_path: "",
         value_count: None,
         native_arg: None,
+        takes_query: None,
     };
     qbx_lua_analysis::apply_fixes(source, &check_file(&input)).0
 }

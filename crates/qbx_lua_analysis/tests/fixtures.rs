@@ -77,6 +77,8 @@ fn bad_resource_reports_every_rule() {
                 | "security/client-supplied-source"
                 | "security/unvalidated-event-argument"
                 | "security/sql-concatenation"
+                | "sql/unquoted-reserved-word"
+                | "sql/reserved-in-other-database"
                 | "qbox/unknown-locale-key"
                 | "qbox/unused-locale-key"
                 | "fivem/resource-not-found"

@@ -14642,6 +14642,32 @@ fn count_down_loops_get_a_negative_step_as_a_quick_fix() {
 }
 
 #[test]
+fn reserved_words_in_queries_of_sql_parameters_get_backticks_as_a_quick_fix() {
+    let mut client = Client::start(fixture_root());
+    let text = "---@param query sql\nlocal function fetch(query) return query end\nlocal db = {}\n---@param query sql\nfunction db:scalar(query) return query end\n---@param name string\nlocal function label(name) return name end\nprint(fetch('SELECT key FROM items'), db:scalar('SELECT `key`, desc FROM items'), label('SELECT key FROM items'))\n";
+    client.open_with(CLIENT, text);
+    let found = client.diagnostics_for(CLIENT);
+    assert_eq!(
+        found,
+        [("sql/unquoted-reserved-word".to_string(), 7), ("sql/unquoted-reserved-word".to_string(), 7)],
+        "only the arguments that `sql` parameters take are queries"
+    );
+    let uri = client.uri(CLIENT).to_string();
+    let diagnostics = client.diagnostics[&uri].clone();
+    let actions = client.request(
+        "textDocument/codeAction",
+        json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": 7, "character": 20 }, "end": { "line": 7, "character": 20 } }, "context": { "diagnostics": diagnostics } }),
+    );
+    let fix =
+        actions.as_array().unwrap().iter().find(|a| a["title"] == "Quote 'key' with backticks").expect("quick fix");
+    let at = |character: u64| json!({ "start": { "line": 7, "character": character }, "end": { "line": 7, "character": character } });
+    assert_eq!(
+        fix["edit"]["changes"][&uri],
+        json!([{ "range": at(20), "newText": "`" }, { "range": at(23), "newText": "`" }])
+    );
+}
+
+#[test]
 fn trailing_whitespace_is_removed_by_a_quick_fix() {
     let mut client = Client::start(fixture_root());
     let text = "local total = 0  \nprint(total)\n";
