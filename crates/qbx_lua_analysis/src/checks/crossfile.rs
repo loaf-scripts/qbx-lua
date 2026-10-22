@@ -129,8 +129,12 @@ impl CrossFile<'_, '_> {
             return;
         }
         // Another resource's handler may ignore trailing payload on purpose, so only the
-        // resource's own handlers decide whether a trigger passes too much.
-        let most = if own.is_some() {
+        // resource's own handlers decide whether a trigger passes too much. A local event reaches
+        // every resource on this side, so what the resource's own handlers leave out may be for the
+        // others that listen, as it is for a hook only they handle.
+        let most = if call == "TriggerEvent" {
+            None
+        } else if own.is_some() {
             reachable.iter().filter(|r| owned_by(r)).filter_map(|r| r.handler).map(|a| a.params).max()
         } else {
             arities.iter().map(|a| a.params).max()

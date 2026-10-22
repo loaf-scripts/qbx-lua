@@ -222,6 +222,17 @@ fn event_checks_distinguish_own_handlers_from_other_resources() {
         none,
         "chat is a system resource"
     );
+    let own_local = ("hud", Some(Side::Client), "AddEventHandler('hud:keyReleased', function(key) end)");
+    assert_eq!(
+        resource_project("TriggerEvent('hud:keyReleased', 'Open', 250)", Side::Client, "hud", &[own_local]),
+        none,
+        "other resources that listen to a local event may take what the own handler leaves out"
+    );
+    let own_needs_two = ("hud", Some(Side::Client), "AddEventHandler('hud:keyReleased', function(key, time) end)");
+    assert_eq!(
+        resource_project("TriggerEvent('hud:keyReleased')", Side::Client, "hud", &[own_needs_two]),
+        ["fivem/event-missing-arguments"]
+    );
 }
 
 #[test]
