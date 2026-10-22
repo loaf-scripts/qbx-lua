@@ -14027,6 +14027,32 @@ end)";
 }
 
 #[test]
+fn handlers_of_scope_and_net_game_events_take_what_fivem_passes() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+RegisterNetEvent('onPlayerDropped', function(serverId, name, slotId)
+    print(serverId + 1, name, slotId)
+end)
+AddEventHandler('CEventShockingCarCrash', function(entities, eventEntity, data)
+    print(entities[1], eventEntity, data[1])
+end)
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("serverId + 1", "serverId: integer"),
+        ("name, slotId)\n", "name: string"),
+        ("slotId)\nend", "slotId: integer"),
+        ("entities[1]", "entities: integer[]"),
+        ("eventEntity, data[1]", "eventEntity: integer"),
+        ("data[1]", "data: number[]"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn native_callbacks_take_the_parameters_their_documentation_gives() {
     let mut client = Client::start(fixture_root());
     let text = "RegisterCommand('heal', function(source, args, rawCommand)\n    print(source, args[1], rawCommand)\nend, false)\nSetHttpHandler(function(request, response)\n    response.send(request.path)\nend)";

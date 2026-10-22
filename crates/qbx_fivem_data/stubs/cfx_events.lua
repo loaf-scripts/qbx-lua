@@ -1,7 +1,8 @@
 ---@meta
 
----The events that FiveM itself triggers. Each field is the handler that `AddEventHandler` registers
----for the event of its name; `(client)` and `(server)` name the only side that triggers it.
+---The events that FiveM itself triggers. Each field is the handler of the event of its name, which
+---`AddEventHandler` registers, or `RegisterNetEvent` for the events the server sends to clients;
+---`(client)` and `(server)` name the only side that triggers it.
 ---@class CfxEvents
 ---@field onResourceStart fun(resourceName: string) # Triggered immediately when a resource has started. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onResourceStart/)
 ---@field onResourceStarting fun(resourceName: string) # Triggered when a resource is trying to start; `CancelEvent()` prevents it from starting. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onResourceStarting/)
@@ -12,42 +13,185 @@
 ---@field (client) entityDamaged fun(victim: integer, culprit: integer, weapon: integer, baseDamage: number) # Triggered when an entity is damaged locally; `victim` and `culprit` are 0 when there is none, and `weapon` is a weapon hash. [Docs](https://docs.fivem.net/docs/scripting-reference/events/client-events/#entitydamaged)
 ---@field (client) mumbleConnected fun(address: string, reconnecting: boolean) # Triggered when the game completes (re)connecting to a Mumble server. [Docs](https://docs.fivem.net/docs/scripting-reference/events/client-events/#mumbleconnected)
 ---@field (client) mumbleDisconnected fun(address: string) # Triggered when the game disconnects from a Mumble server without being reconnected. [Docs](https://docs.fivem.net/docs/scripting-reference/events/client-events/#mumbledisconnected)
----@field (client) populationPedCreating fun(x: number, y: number, z: number, model: integer, overrideCalls: PopulationPedOverrides) # Triggered when the population system is creating a ped; `CancelEvent()` stops it, and `overrideCalls` changes its model or position. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/populationPedCreating/)
+---@field (client) populationPedCreating fun(x: number, y: number, z: number, model: integer, overrideCalls: PopulationPedOverrides) # Triggered when the population system is creating a ped; `CancelEvent()` stops it, and `overrideCalls` changes its model or position. `model` is an unsigned hash, so one of 0x80000000 or more differs from the hash of the same name in backticks. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/populationPedCreating/)
+---@field (client) onPlayerJoining fun(serverId: integer, name: string, slotId: integer) # Sent by the server when another player enters the scope of this client (OneSync) or joins the server (without OneSync). With OneSync, a joining client also gets one for itself, in slot 128. Needs `RegisterNetEvent`.
+---@field (client) onPlayerDropped fun(serverId: integer, name: string, slotId: integer) # Sent by the server when another player leaves the scope of this client (OneSync) or leaves the server (without OneSync). Needs `RegisterNetEvent`.
+---@field (client) mapDataLoaded fun(mapDataHash: integer) # Queued when the game loads a map data file (ymap); `mapDataHash` is the hash of its name.
+---@field (client) mapDataUnloaded fun(mapDataHash: integer) # Queued when the game unloads a map data file (ymap); `mapDataHash` is the hash of its name.
+---@field (client) CEventAcquaintancePed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventAcquaintancePedDead fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventAcquaintancePedDislike fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventAcquaintancePedHate fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventAcquaintancePedLike fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventAcquaintancePedWanted fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventAgitated fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventAgitatedAction fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventCallForCover fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventCarUndriveable fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventClimbLadderOnRoute fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventClimbNavMeshOnRoute fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventCombatTaunt fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventCommunicateEvent fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventCopCarBeingStolen fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventCrimeCryForHelp fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventCrimeReported fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventDamage fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventDeadPedFound fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventDeath fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventDecisionMakerResponse fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventDisturbance fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventDraggedOutCar fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventEncroachingPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventEntityDamaged fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventEntityDestroyed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventExplosion fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventExplosionHeard fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventFireNearby fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventFootStepHeard fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventFriendlyAimedAt fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventFriendlyFireNearMiss fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventGetOutOfWater fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventGivePedTask fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventGunAimedAt fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventGunShot fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventGunShotBulletImpact fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventGunShotWhizzedBy fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventHelpAmbientFriend fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventHurtTransition fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventInAir fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventInjuredCryForHelp fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventLeaderEnteredCarAsDriver fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventLeaderExitedCarAsDriver fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventLeaderHolsteredWeapon fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventLeaderLeftCover fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventLeaderUnholsteredWeapon fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventMeleeAction fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventMustLeaveBoat fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventNewTask fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventObjectCollision fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventOnFire fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventOpenDoor fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPedCollisionWithPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPedCollisionWithPlayer fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPedEnteredMyVehicle fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPedJackingMyVehicle fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPedOnCarRoof fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPedSeenDeadPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPlayerCollisionWithPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPlayerDeath fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPlayerUnableToEnterVehicle fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPotentialBeWalkedInto fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPotentialBlast fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPotentialGetRunOver fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventPotentialWalkIntoVehicle fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventProvidingCover fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventRanOverPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventReactionEnemyPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventReactionInvestigateDeadPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventReactionInvestigateThreat fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventRequestHelp fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventRequestHelpWithConfrontation fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventRespondedToThreat fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventScanner fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventScenarioForceAction fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventScriptCommand fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventScriptWithData fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingBicycleCrash fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingBicycleOnPavement fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingCarAlarm fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingCarChase fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingCarCrash fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingCarOnCar fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingCarPileUp fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingDangerousAnimal fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingDeadBody fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingDrivingOnPavement fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingEngineRevved fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingExplosion fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingFire fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingGunFight fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingGunshotFired fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingHelicopterOverhead fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingHornSounded fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingInDangerousVehicle fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingInjuredPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingMadDriver fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingMadDriverBicycle fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingMadDriverExtreme fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingMugging fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingNonViolentWeaponAimedAt fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingParachuterOverhead fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingPedKnockedIntoByPlayer fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingPedRunOver fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingPedShot fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingPlaneFlyby fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingPotentialBlast fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingPropertyDamage fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingRunningPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingRunningStampede fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingSeenCarStolen fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingSeenConfrontation fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingSeenGangFight fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingSeenInsult fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingSeenMeleeAction fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingSeenNiceCar fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingSeenPedKilled fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingSiren fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingStudioBomb fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingVehicleTowed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingVisibleWeapon fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingWeaponThreat fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingWeirdPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShockingWeirdPedApproaching fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` holds the position of the shocking event. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShoutBlockingLos fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShoutTargetPosition fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventShovePed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventStatChangedValue fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventStaticCountReachedMax fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventStuckInAir fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventSuspiciousActivity fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventSwitch2NM fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventUnidentifiedPed fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventVehicleCollision fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventVehicleDamage fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventVehicleDamageWeapon fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventVehicleOnFire fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
+---@field (client) CEventWrithe fun(entities: integer[], eventEntity: integer, data: number[]) # Game event queued for the peds in `entities`, about `eventEntity`; `data` is empty. [Docs](https://docs.fivem.net/docs/game-references/game-events/)
 ---@field (server) onServerResourceStart fun(resourceName: string) # Queued after a resource has started. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#onserverresourcestart)
 ---@field (server) onServerResourceStop fun(resourceName: string) # Triggered after a resource has stopped. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#onserverresourcestop)
 ---@field (server) onResourceListRefresh fun() # Triggered when the `refresh` command completes. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#onresourcelistrefresh)
 ---@field (server) playerConnecting fun(playerName: string, setKickReason: fun(reason: string), deferrals: PlayerConnectingDeferrals) # Triggered when a player is trying to connect; `source` is their temporary id. `CancelEvent()` refuses them with the reason given to `setKickReason`. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/playerConnecting/)
 ---@field (server) playerJoining fun(oldID: string) # Triggered when a player has their final server id, which `source` holds; `oldID` is the temporary id of `playerConnecting`. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#playerjoining)
 ---@field (server) playerDropped fun(reason: string, resourceName: string, clientDropReason: integer) # Triggered when a player leaves the server; `source` is the player. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/playerDropped/)
----@field (server) playerEnteredScope fun(data: PlayerScopeData) # Triggered when a player enters the scope of another player. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#playerenteredscope)
----@field (server) playerLeftScope fun(data: PlayerScopeData) # Triggered when a player leaves the scope of another player. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#playerleftscope)
----@field (server) entityCreating fun(handle: integer) # Triggered when an entity is being created; `CancelEvent()` stops it. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#entitycreating)
----@field (server) entityCreated fun(handle: integer) # Triggered when an entity has been created. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#entitycreated)
----@field (server) serverEntityCreated fun(handle: integer) # Triggered when a server script has created an entity, which may have no network owner yet.
----@field (server) entityRemoved fun(entity: integer) # Triggered when an entity is removed. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#entityremoved)
+---@field (server) playerEnteredScope fun(data: PlayerScopeData) # Triggered when a player enters the scope of another player. Needs OneSync. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#playerenteredscope)
+---@field (server) playerLeftScope fun(data: PlayerScopeData) # Triggered when a player leaves the scope of another player. Needs OneSync. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#playerleftscope)
+---@field (server) entityCreating fun(handle: integer) # Triggered when an entity is being created; `CancelEvent()` deletes it, unless it is the ped of a player. Needs OneSync. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#entitycreating)
+---@field (server) entityCreated fun(handle: integer) # Triggered when an entity has been created. Needs OneSync. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#entitycreated)
+---@field (server) entityRemoved fun(entity: integer) # Triggered when an entity is removed. Needs OneSync. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#entityremoved)
+---@field (server) serverEntityCreated fun(handle: integer) # Queued when a server script creates an entity, which may have no owner yet, unlike in `entityCreated`. Needs OneSync.
 ---@field (server) onPedHealthChanged fun(ped: integer, oldHealth: integer, health: integer, oldArmour: integer, armour: integer, attacker: integer, weaponHash: integer) # Triggered when the health or armour of a ped changes; `attacker` and `weaponHash` are 0 when unknown.
 ---@field (server) onPedDeath fun(ped: integer, attacker: integer, weaponHash: integer) # Triggered when a ped dies; `attacker` and `weaponHash` are 0 when unknown.
 ---@field (server) onEntityBucketChange fun(entity: integer, bucket: integer, oldBucket: integer) # Triggered when an entity moves to another routing bucket. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onEntityBucketChange/)
 ---@field (server) onPlayerBucketChange fun(player: string, bucket: integer, oldBucket: integer) # Triggered when a player moves to another routing bucket. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/onPlayerBucketChange/)
----@field (server) weaponDamageEvent fun(sender: string, data: WeaponDamageEventData) # Triggered when a client wants to damage an entity that another player owns; `CancelEvent()` blocks the damage. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#weapondamageevent)
----@field (server) weaponDamageReply fun(sender: string, data: WeaponDamageReplyData) # Triggered when a client answers a `weaponDamageEvent` with the health of the entity hit.
----@field (server) startProjectileEvent fun(sender: string, data: StartProjectileEventData) # Triggered when a client creates a projectile; `CancelEvent()` blocks it. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#startprojectileevent)
----@field (server) ptFxEvent fun(sender: string, data: PtFxEventData) # Triggered when a client creates a particle effect; `CancelEvent()` blocks it. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#ptfxevent)
----@field (server) fireEvent fun(sender: string, data: [FireEventFire[]]) # Triggered when a client starts fires; `CancelEvent()` blocks them.
----@field (server) explosionEvent fun(sender: string, data: ExplosionEventData) # Triggered when a client creates an explosion; `CancelEvent()` blocks it.
----@field (server) removeAllWeaponsEvent fun(sender: string, data: RemoveAllWeaponsEventData) # Triggered when a client removes all weapons from a ped that another player owns; `CancelEvent()` blocks it. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#removeallweaponsevent)
----@field (server) giveWeaponEvent fun(sender: string, data: GiveWeaponEventData) # Triggered when a client gives a weapon to a ped that another player owns; `CancelEvent()` blocks it.
----@field (server) removeWeaponEvent fun(sender: string, data: RemoveWeaponEventData) # Triggered when a client removes a weapon from a ped that another player owns; `CancelEvent()` blocks it.
----@field (server) clearPedTasksEvent fun(sender: string, data: ClearPedTasksEventData) # Triggered when a client clears the tasks of a ped that another player owns; `CancelEvent()` blocks it.
----@field (server) givePedScriptedTaskEvent fun(sender: string, data: GivePedScriptedTaskEventData) # Triggered when a client gives a scripted task to a ped that another player owns; `CancelEvent()` blocks it.
----@field (server) respawnPlayerPedEvent fun(sender: string, data: RespawnPlayerPedEventData) # Triggered when a player respawns. Needs OneSync. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/respawnPlayerPedEvent/)
----@field (server) respawnPlayerPedReply fun(sender: string, data: RespawnPlayerPedReplyData) # Triggered when a client answers a `respawnPlayerPedEvent`.
----@field (server) vehicleComponentControlEvent fun(sender: string, data: VehicleComponentControlEventData) # Triggered when a ped takes control of a component of a vehicle, such as a seat. Needs OneSync. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/vehicleComponentControlEvent/)
----@field (server) vehicleComponentControlReply fun(sender: string, data: VehicleComponentControlReplyData) # Triggered when a client answers a `vehicleComponentControlEvent`.
----@field (server) requestNetworkSyncedSceneEvent fun(sender: string, data: NetworkSyncedSceneEventData) # Triggered when a client asks to start a synchronised scene; `CancelEvent()` blocks it.
----@field (server) startNetworkSyncedSceneEvent fun(sender: string, data: StartNetworkSyncedSceneEventData) # Triggered when a client starts a synchronised scene; `CancelEvent()` blocks it.
----@field (server) updateNetworkSyncedSceneEvent fun(sender: string, data: UpdateNetworkSyncedSceneEventData) # Triggered when a client changes the rate of a synchronised scene; `CancelEvent()` blocks it.
----@field (server) stopNetworkSyncedSceneEvent fun(sender: string, data: NetworkSyncedSceneEventData) # Triggered when a client stops a synchronised scene; `CancelEvent()` blocks it.
+---@field (server) weaponDamageEvent fun(sender: string, data: WeaponDamageEventData) # Triggered when a client wants to damage an entity that another player owns; `CancelEvent()` blocks the damage. Needs OneSync; `sender` is the player, as `source` is empty. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#weapondamageevent)
+---@field (server) startProjectileEvent fun(sender: string, data: StartProjectileEventData) # Triggered when a client creates a projectile; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#startprojectileevent)
+---@field (server) ptFxEvent fun(sender: string, data: PtFxEventData) # Triggered when a client creates a particle effect; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#ptfxevent)
+---@field (server) removeAllWeaponsEvent fun(sender: string, data: RemoveAllWeaponsEventData) # Triggered when a client removes all weapons from a ped that another player owns; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty. [Docs](https://docs.fivem.net/docs/scripting-reference/events/server-events/#removeallweaponsevent)
+---@field (server) respawnPlayerPedEvent fun(sender: string, data: RespawnPlayerPedEventData) # Triggered when a player respawns. Needs OneSync; `sender` is the player, as `source` is empty. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/respawnPlayerPedEvent/)
+---@field (server) vehicleComponentControlEvent fun(sender: string, data: VehicleComponentControlEventData) # Triggered when a ped takes control of a component of a vehicle, such as a seat. Needs OneSync; `sender` is the player, as `source` is empty. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/vehicleComponentControlEvent/)
+---@field (server) fireEvent fun(sender: string, data: FireEventData) # Triggered when a client starts fires; `CancelEvent()` blocks them. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) explosionEvent fun(sender: string, data: ExplosionEventData) # Triggered when a client creates an explosion; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) clearPedTasksEvent fun(sender: string, data: ClearPedTasksEventData) # Triggered when a client clears the tasks of a ped that another player owns; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) giveWeaponEvent fun(sender: string, data: GiveWeaponEventData) # Triggered when a client gives a weapon to a ped that another player owns; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) removeWeaponEvent fun(sender: string, data: RemoveWeaponEventData) # Triggered when a client removes a weapon from a ped that another player owns; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) givePedScriptedTaskEvent fun(sender: string, data: GivePedScriptedTaskEventData) # Triggered when a client gives a scripted task to a ped that another player owns; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) requestNetworkSyncedSceneEvent fun(sender: string, data: NetworkSyncedSceneEventData) # Triggered when a client requests a networked synchronized scene; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) startNetworkSyncedSceneEvent fun(sender: string, data: StartNetworkSyncedSceneEventData) # Triggered when a client starts a networked synchronized scene; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) updateNetworkSyncedSceneEvent fun(sender: string, data: UpdateNetworkSyncedSceneEventData) # Triggered when a client changes the rate of a networked synchronized scene; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) stopNetworkSyncedSceneEvent fun(sender: string, data: NetworkSyncedSceneEventData) # Triggered when a client stops a networked synchronized scene; `CancelEvent()` blocks it. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) weaponDamageReply fun(sender: string, data: WeaponDamageReplyData) # Triggered when the owner of a damaged entity replies to `weaponDamageEvent`; `CancelEvent()` blocks the reply. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) respawnPlayerPedReply fun(sender: string, data: RespawnPlayerPedReplyData) # Triggered when a client replies to `respawnPlayerPedEvent`; `CancelEvent()` blocks the reply. Needs OneSync; `sender` is the player, as `source` is empty.
+---@field (server) vehicleComponentControlReply fun(sender: string, data: VehicleComponentControlReplyData) # Triggered when a client replies to `vehicleComponentControlEvent`; `CancelEvent()` blocks the reply. Needs OneSync; `sender` is the player, as `source` is empty.
 ---@field (server) rconCommand fun(command: string, arguments: string[]) # Deprecated: use `RegisterCommand` with `restricted` instead. Triggered when a command is executed over RCON. [Docs](https://docs.fivem.net/docs/scripting-reference/events/list/rconCommand/)
 
 ---The functions of `populationPedCreating` that change the ped being created.
@@ -71,8 +215,8 @@
 ---What a client sends with `weaponDamageEvent`. Some fields differ between game builds.
 ---@class WeaponDamageEventData
 ---@field damageType integer
----@field weaponType integer # The hash of the weapon.
----@field weaponDamage number
+---@field weaponType integer # The hash of the weapon, unsigned, so one of 0x80000000 or more differs from the hash of the same name in backticks.
+---@field weaponDamage integer
 ---@field damageFlags integer
 ---@field damageTime integer
 ---@field willKill boolean
@@ -100,12 +244,6 @@
 ---@field impactDirZ number
 ---@field [string] any
 
----What a client answers a `weaponDamageEvent` with.
----@class WeaponDamageReplyData
----@field health integer # The health of the entity hit.
----@field time integer
----@field f131 boolean
-
 ---What a client sends with `startProjectileEvent`.
 ---@class StartProjectileEventData
 ---@field ownerId integer # The network id of the entity that fires.
@@ -125,9 +263,9 @@
 
 ---What a client sends with `ptFxEvent`.
 ---@class PtFxEventData
----@field effectHash integer
----@field assetHash integer
----@field posX number
+---@field effectHash integer # An unsigned hash, so one of 0x80000000 or more differs from the hash of the same name in backticks.
+---@field assetHash integer # An unsigned hash, as `effectHash` is.
+---@field posX number # Cut down to a whole number, as are the other positions and offsets.
 ---@field posY number
 ---@field posZ number
 ---@field offsetX number
@@ -142,68 +280,16 @@
 ---@field entityNetId integer
 ---@field [string] any
 
----A fire that a client starts with `fireEvent`.
----@class FireEventFire
----@field isEntity boolean # Whether the fire burns on an entity.
----@field entityGlobalId integer # The network id of the entity that burns, or 0.
----@field posX number
----@field posY number
----@field posZ number
----@field maxChildren integer
----@field weaponHash integer # The hash of the weapon that started the fire, or 0.
----@field fireId integer
----@field [string] any
-
----What a client sends with `explosionEvent`.
----@class ExplosionEventData
----@field ownerNetId integer # The network id of the entity that causes the explosion.
----@field explosionType integer
----@field damageScale number
----@field posX number
----@field posY number
----@field posZ number
----@field cameraShake number
----@field isAudible boolean
----@field isInvisible boolean
----@field [string] any
-
 ---What a client sends with `removeAllWeaponsEvent`.
 ---@class RemoveAllWeaponsEventData
 ---@field pedId integer # The network id of the ped.
 
----What a client sends with `giveWeaponEvent`.
----@class GiveWeaponEventData
----@field pedId integer # The network id of the ped.
----@field weaponType integer # The hash of the weapon.
----@field ammo integer
----@field unk1 boolean # Whether `ammo` is negative.
----@field givenAsPickup boolean
-
----What a client sends with `removeWeaponEvent`.
----@class RemoveWeaponEventData
----@field pedId integer # The network id of the ped.
----@field weaponType integer # The hash of the weapon.
-
----What a client sends with `clearPedTasksEvent`.
----@class ClearPedTasksEventData
----@field pedId integer # The network id of the ped.
----@field immediately boolean
-
----What a client sends with `givePedScriptedTaskEvent`.
----@class GivePedScriptedTaskEventData
----@field entityNetId integer # The network id of the ped.
----@field taskId integer
-
 ---What a client sends with `respawnPlayerPedEvent`. Some fields differ between game builds.
 ---@class RespawnPlayerPedEventData
----@field posX number
+---@field posX number # Cut down to a whole number, as are `posY` and `posZ`.
 ---@field posY number
 ---@field posZ number
 ---@field [string] any
-
----What a client answers a `respawnPlayerPedEvent` with.
----@class RespawnPlayerPedReplyData
----@field respawnFailedResult boolean
 
 ---What a client sends with `vehicleComponentControlEvent`.
 ---@class VehicleComponentControlEventData
@@ -214,24 +300,68 @@
 ---@field componentIsSeat boolean
 ---@field pedInSeat integer # The network id of the ped in the seat, or 0.
 
----What a client answers a `vehicleComponentControlEvent` with.
----@class VehicleComponentControlReplyData
----@field isGranted boolean
----@field componentIsSeat boolean
----@field pedGlobalId integer # The network id of the ped in the seat, or 0.
+---What a client sends with `fireEvent`: an array whose first entry lists the fires, as `data[1][i]`.
+---@class FireEventData
+---@field [1] FireEventFire[]
+
+---A fire of `fireEvent`.
+---@class FireEventFire
+---@field isEntity boolean # Whether the fire burns on an entity.
+---@field entityGlobalId integer # The network id of the entity on fire, or 0.
+---@field posX number
+---@field posY number
+---@field posZ number
+---@field maxChildren integer
+---@field weaponHash integer # The hash of the weapon that started the fire, or 0.
+---@field fireId integer
+---@field [string] any
+
+---What a client sends with `explosionEvent`.
+---@class ExplosionEventData
+---@field ownerNetId integer # The network id of the entity that owns the explosion.
+---@field explosionType integer
+---@field damageScale number
+---@field posX number
+---@field posY number
+---@field posZ number
+---@field cameraShake number
+---@field isAudible boolean
+---@field isInvisible boolean
+---@field [string] any
+
+---What a client sends with `clearPedTasksEvent`.
+---@class ClearPedTasksEventData
+---@field pedId integer # The network id of the ped.
+---@field immediately boolean
+
+---What a client sends with `giveWeaponEvent`.
+---@class GiveWeaponEventData
+---@field pedId integer # The network id of the ped.
+---@field weaponType integer # The hash of the weapon.
+---@field ammo integer
+---@field givenAsPickup boolean
+---@field unk1 boolean # Whether `ammo` is negative.
+
+---What a client sends with `removeWeaponEvent`.
+---@class RemoveWeaponEventData
+---@field pedId integer # The network id of the ped.
+---@field weaponType integer # The hash of the weapon.
+
+---What a client sends with `givePedScriptedTaskEvent`.
+---@class GivePedScriptedTaskEventData
+---@field entityNetId integer # The network id of the ped.
+---@field taskId integer
 
 ---What a client sends with `requestNetworkSyncedSceneEvent` and `stopNetworkSyncedSceneEvent`.
 ---@class NetworkSyncedSceneEventData
 ---@field sceneId integer
 
 ---What a client sends with `updateNetworkSyncedSceneEvent`.
----@class UpdateNetworkSyncedSceneEventData
----@field sceneId integer
+---@class UpdateNetworkSyncedSceneEventData : NetworkSyncedSceneEventData
 ---@field rate number
 
 ---What a client sends with `startNetworkSyncedSceneEvent`.
----@class StartNetworkSyncedSceneEventData
----@field sceneId integer
+---@class StartNetworkSyncedSceneEventData : NetworkSyncedSceneEventData
 ---@field startTime integer
 ---@field isActive boolean
 ---@field scenePosX number
@@ -251,6 +381,52 @@
 ---@field phase number
 ---@field cameraAnimHash integer
 ---@field animDictHash integer
----@field pedEntities table[]
----@field nonPedEntities table[]
----@field mapEntities table[]
+---@field pedEntities SyncedScenePed[]
+---@field nonPedEntities SyncedSceneObject[]
+---@field mapEntities SyncedSceneMapEntity[]
+
+---A ped of `startNetworkSyncedSceneEvent`.
+---@class SyncedScenePed
+---@field objectId integer # The network id of the ped.
+---@field animPartialHash integer
+---@field blendIn number
+---@field blendOut number
+---@field moverBlendIn number
+---@field flags integer
+---@field ragdollBlockingFlags integer
+---@field ikFlags integer
+
+---An entity other than a ped, of `startNetworkSyncedSceneEvent`.
+---@class SyncedSceneObject
+---@field objectId integer # The network id of the entity.
+---@field animHash integer
+---@field blendIn number
+---@field blendOut number
+---@field flags integer
+
+---A map entity of `startNetworkSyncedSceneEvent`.
+---@class SyncedSceneMapEntity
+---@field nameHash integer
+---@field posX number
+---@field posY number
+---@field posZ number
+---@field blendIn number
+---@field blendOut number
+---@field flags integer
+---@field animHash integer
+
+---What the owner of a damaged entity sends with `weaponDamageReply`.
+---@class WeaponDamageReplyData
+---@field health integer # The health of the entity hit.
+---@field time integer
+---@field f131 boolean
+
+---What a client sends with `respawnPlayerPedReply`.
+---@class RespawnPlayerPedReplyData
+---@field respawnFailedResult boolean
+
+---What a client sends with `vehicleComponentControlReply`.
+---@class VehicleComponentControlReplyData
+---@field isGranted boolean
+---@field componentIsSeat boolean
+---@field pedGlobalId integer # The network id of the ped in the seat, or 0.

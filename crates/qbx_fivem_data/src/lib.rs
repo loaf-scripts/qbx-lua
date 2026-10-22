@@ -447,8 +447,10 @@ mod tests {
         {
             assert_eq!(side(name), Some(Side::Server), "{name}");
         }
+        assert_eq!(side("onPlayerDropped"), Some(Side::Client));
+        assert_eq!(side("CEventGunShot"), Some(Side::Client));
         assert_eq!(side("setModel"), None, "the fields of other classes are no events");
-        assert_eq!(builtin_events().len(), 46);
+        assert_eq!(builtin_events().len(), 189);
     }
 
     #[cfg(feature = "docs")]
