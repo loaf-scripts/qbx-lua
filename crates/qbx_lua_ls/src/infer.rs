@@ -580,6 +580,30 @@ impl<'a> DeclCollector<'a> {
     }
 }
 
+/// A lookup that a cycle can run through: of the type of a local, or of the value that one of its
+/// origins gives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lookup {
+    Local(LocalId),
+    Origin(LocalId, u32),
+}
+
+impl Lookup {
+    fn local(self) -> LocalId {
+        match self {
+            Lookup::Local(id) | Lookup::Origin(id, _) => id,
+        }
+    }
+}
+
+/// Whether what a lookup found is kept, as `Infer::settle` tells.
+enum Settled {
+    Yes,
+    No,
+    /// It is kept once the lookup that comes first in the cycle it ran through is.
+    After(Lookup),
+}
+
 #[derive(Clone, Debug)]
 pub struct MemberInfo {
     pub name: SmolStr,
@@ -603,11 +627,17 @@ pub struct Infer<'a> {
     /// Guarded regions, which narrow the side of the calls in them for `(server)` overloads.
     regions: OnceCell<SideRegions>,
     locals: RefCell<FxHashMap<LocalId, Type>>,
-    in_progress: RefCell<FxHashSet<LocalId>>,
+    /// The lookups of the types of locals, and of the values their origins give them, that have yet
+    /// to end, in the order they began.
+    running: RefCell<Vec<Lookup>>,
+    /// The running lookups that the lookups since the innermost `complete` or `settle` read again
+    /// through another local, as a function that calls back the function calling it does, each with
+    /// the lookup of that cycle that comes first. What such a lookup finds depends on where the cycle
+    /// was entered, so it is not cached.
+    cut: RefCell<Vec<(Lookup, Lookup)>>,
     /// The types of the values that the declarations and assignments of locals give them, by the
     /// local and the origin of the value.
     origins: RefCell<FxHashMap<(LocalId, u32), Type>>,
-    origins_in_progress: RefCell<FxHashSet<(LocalId, u32)>>,
     /// The types of the values that each set of `Origin::Others` of a local stands for, each once,
     /// by the local and the origin of the set.
     others: RefCell<SetTypes>,
@@ -698,9 +728,9 @@ impl<'a> Infer<'a> {
             side,
             regions: OnceCell::new(),
             locals: RefCell::new(FxHashMap::default()),
-            in_progress: RefCell::new(FxHashSet::default()),
+            running: RefCell::new(Vec::new()),
+            cut: RefCell::new(Vec::new()),
             origins: RefCell::new(FxHashMap::default()),
-            origins_in_progress: RefCell::new(FxHashSet::default()),
             others: RefCell::new(FxHashMap::default()),
             stored: RefCell::new(FxHashMap::default()),
             storing: RefCell::new(FxHashSet::default()),
@@ -829,13 +859,18 @@ impl<'a> Infer<'a> {
     }
 
     /// What `f` gives, and whether it is complete: a lookup that `MAX_DEPTH` cut short may find
-    /// more when it starts from a shallower point, so it is not cached.
+    /// more when it starts from a shallower point, and one that read a running lookup again through
+    /// another local depends on where that cycle was entered, so neither is cached.
     fn complete<T>(&self, f: impl FnOnce() -> T) -> (T, bool) {
         let outer = self.truncated.replace(false);
+        let outer_cut = self.cut.take();
         let out = f();
         let truncated = self.truncated.get();
         self.truncated.set(outer || truncated);
-        (out, !truncated)
+        let cut = self.cut.replace(outer_cut);
+        let complete = !truncated && cut.is_empty();
+        self.cut.borrow_mut().extend(cut);
+        (out, complete)
     }
 
     pub fn expr(&self, expr: &Expr) -> Type {
@@ -1678,18 +1713,96 @@ impl<'a> Infer<'a> {
         if let Some(ty) = self.locals.borrow().get(&id) {
             return ty.clone();
         }
-        if !self.in_progress.borrow_mut().insert(id) {
+        // A local read while its own type is being found, as a function that calls itself or calls
+        // back the function calling it, is unknown there.
+        let key = Lookup::Local(id);
+        let running = self.running.borrow().iter().position(|lookup| *lookup == key);
+        if let Some(start) = running {
+            self.cut_at(start);
             return Type::Unknown;
         }
-        // A type that `MAX_DEPTH` cut short may be found whole from a shallower point, as the local
-        // at the end of a long chain of locals read from each other is, so it is not cached: which
-        // local the cut fell on would depend on which was read first.
-        let (ty, complete) = self.complete(|| self.guarded(|| self.compute_local(id)));
-        self.in_progress.borrow_mut().remove(&id);
-        if complete {
-            self.locals.borrow_mut().insert(id, ty.clone());
+        let (ty, settled) = self.settle(key, || {}, || self.guarded(|| self.compute_local(id)));
+        match settled {
+            Settled::Yes => {
+                self.locals.borrow_mut().insert(id, ty.clone());
+                ty
+            }
+            Settled::After(first) if self.look_up(first) => self.local_type(id),
+            Settled::After(_) | Settled::No => ty,
         }
-        ty
+    }
+
+    /// Runs `before` and then `find`, the lookup `key`, and tells whether what `find` finds is kept.
+    /// A lookup that `MAX_DEPTH` cut short may find more when it starts from a shallower point, as
+    /// the local at the end of a long chain of locals read from each other does, and one that read
+    /// a running lookup again through another local depends on which lookup of that cycle began
+    /// first, so neither is kept. A cycle of lookups, as of functions that call each other, is found
+    /// from the lookup of it that comes first, wherever it is entered, so that each lookup of it
+    /// finds the same whichever began first: when `key` is not that one, what it finds is kept once
+    /// that one is, and `key` runs again after it.
+    fn settle<T>(&self, key: Lookup, before: impl FnOnce(), find: impl FnOnce() -> T) -> (T, Settled) {
+        self.running.borrow_mut().push(key);
+        let outer_cut = self.cut.take();
+        before();
+        // What `before` finds is kept or not on its own; the lookups around `key` still depend on
+        // the running lookups other than `key` that it read again.
+        let before_cut: Vec<_> = self.cut.take().into_iter().filter(|(target, _)| *target != key).collect();
+        let outer_truncated = self.truncated.replace(false);
+        let found = find();
+        self.running.borrow_mut().pop();
+        let truncated = self.truncated.get();
+        self.truncated.set(outer_truncated || truncated);
+        let (own, other): (Vec<_>, Vec<_>) =
+            self.cut.replace(outer_cut).into_iter().partition(|(target, _)| *target == key);
+        self.cut.borrow_mut().extend(before_cut);
+        if truncated || !other.is_empty() {
+            self.cut.borrow_mut().extend(other);
+            return (found, Settled::No);
+        }
+        let first = own.into_iter().map(|(_, first)| first).min_by_key(|lookup| self.lookup_order(*lookup));
+        match first.filter(|first| *first != key) {
+            Some(first) => (found, Settled::After(first)),
+            None => (found, Settled::Yes),
+        }
+    }
+
+    /// Notes that a lookup read again the running lookup at `start` of `running`, which it is cut
+    /// short at, when the cycle runs through another local. The values that the origins of one
+    /// local give, as the assignments of a loop do, leave out those not known yet by design, as
+    /// `origin_type` tells.
+    fn cut_at(&self, start: usize) {
+        let running = self.running.borrow();
+        let cycle = &running[start..];
+        let target = cycle[0];
+        if cycle.iter().all(|lookup| lookup.local() == target.local()) {
+            return;
+        }
+        let first = cycle.iter().copied().min_by_key(|lookup| self.lookup_order(*lookup)).unwrap_or(target);
+        self.cut.borrow_mut().push((target, first));
+    }
+
+    /// Runs `lookup` and tells whether what it found is kept.
+    fn look_up(&self, lookup: Lookup) -> bool {
+        match lookup {
+            Lookup::Local(id) => {
+                self.local_type(id);
+                self.locals.borrow().contains_key(&id)
+            }
+            Lookup::Origin(id, origin) => {
+                self.origin_type(id, origin);
+                self.origins.borrow().contains_key(&(id, origin))
+            }
+        }
+    }
+
+    /// The order of the lookups of a cycle: by where their local is declared, the type of a local
+    /// before the values its origins give it, and those in the order they are written.
+    fn lookup_order(&self, lookup: Lookup) -> (u32, Option<u32>) {
+        let declared = self.ctx.resolution.local(lookup.local()).decl.start;
+        match lookup {
+            Lookup::Local(_) => (declared, None),
+            Lookup::Origin(_, origin) => (declared, Some(origin)),
+        }
     }
 
     fn compute_local(&self, id: LocalId) -> Type {
@@ -1752,20 +1865,29 @@ impl<'a> Infer<'a> {
             return Some(ty.clone());
         }
         // Origins are numbered in the order they are written.
-        let later = |(local, other): &(LocalId, u32)| *local == id && *other <= origin;
-        if self.origins_in_progress.borrow().iter().any(later) {
+        let later =
+            |lookup: &Lookup| matches!(lookup, Lookup::Origin(local, other) if *local == id && *other <= origin);
+        let running: Vec<usize> =
+            self.running.borrow().iter().enumerate().filter(|(_, lookup)| later(lookup)).map(|(at, _)| at).collect();
+        if !running.is_empty() {
+            running.into_iter().for_each(|start| self.cut_at(start));
             return None;
         }
-        self.origins_in_progress.borrow_mut().insert(key);
-        for earlier in self.ctx.flow().chained(id).iter().take_while(|earlier| **earlier < origin) {
-            self.origin_type(id, *earlier);
+        let before = || {
+            for earlier in self.ctx.flow().chained(id).iter().take_while(|earlier| **earlier < origin) {
+                self.origin_type(id, *earlier);
+            }
+        };
+        let (ty, settled) =
+            self.settle(Lookup::Origin(id, origin), before, || self.guarded(|| self.compute_origin(id, origin)));
+        match settled {
+            Settled::Yes => {
+                self.origins.borrow_mut().insert(key, ty.clone());
+                Some(ty)
+            }
+            Settled::After(first) if self.look_up(first) => self.origin_type(id, origin),
+            Settled::After(_) | Settled::No => Some(ty),
         }
-        let (ty, complete) = self.complete(|| self.guarded(|| self.compute_origin(id, origin)));
-        self.origins_in_progress.borrow_mut().remove(&key);
-        if complete {
-            self.origins.borrow_mut().insert(key, ty.clone());
-        }
-        Some(ty)
     }
 
     fn compute_origin(&self, id: LocalId, origin: u32) -> Type {

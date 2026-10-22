@@ -3259,6 +3259,78 @@ check({})
 }
 
 #[test]
+fn functions_that_call_each_other_have_the_same_types_whichever_is_read_first() {
+    let mut client = Client::start(fixture_root());
+    client.set_strict(true);
+    let text = |entry: &str| {
+        format!(
+            "local strfind = string.find
+
+local function skip(str, pos)
+    return strfind(str, '%S', pos)
+end
+
+local parse, parseTable
+
+local function start(str)
+    return {entry}
+end
+
+parseTable = function(kind, str, first)
+    local tbl = {{}}
+    local pos = first + 1
+    while true do
+        local key, value, err
+        key, pos, err = parse(str, pos)
+        if err then return nil, pos, err end
+        if str == ':' then
+            value, pos, err = parse(str, pos)
+            tbl[key] = value
+        end
+        print(kind, tbl)
+    end
+end
+
+parse = function(str, pos)
+    pos = skip(str, pos)
+    if str == '{{' then
+        return parseTable('object', str, pos)
+    end
+    return nil, pos, 'no value'
+end
+
+local _, given = parseTable('object', '{{', 0)
+---@type boolean
+local probe = given
+print(start('{{'), probe)
+"
+        )
+    };
+    let mut seen = Vec::new();
+    for (version, entry) in ["parse(str, 1)", "parseTable('object', str, 0)"].into_iter().enumerate() {
+        let source = text(entry);
+        match version {
+            0 => client.open_with(CLIENT, &source),
+            _ => client.change(CLIENT, version as i32 + 1, &source),
+        }
+        let found = findings(&mut client, CLIENT, &["cast-local-type", "assign-type-mismatch"]);
+        let types: Vec<String> =
+            found.iter().filter_map(|(_, _, message)| message.split('`').nth(1)).map(str::to_string).collect();
+        assert_eq!(types.len(), 3, "{found:?}");
+        assert!(
+            types.iter().all(|ty| *ty == types[0]),
+            "`parseTable` returns the `pos` that `parse` gives it, entered from {entry}: {found:?}"
+        );
+        // A hover finds the types again, from the function it shows.
+        let (l, c) = pos(&source, "parseTable = function", 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(&format!("): nil, {}, ", types[0])), "{hover}");
+        seen.push((types, hover));
+    }
+    assert_eq!(seen[0], seen[1], "the cycle is found from `parse`, declared first, whichever is read first");
+}
+
+#[test]
 fn guards_narrow_the_fields_of_locals_until_something_may_change_them() {
     let mut client = Client::start(fixture_root());
     let text = "\
