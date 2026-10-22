@@ -3183,6 +3183,82 @@ check()
 }
 
 #[test]
+fn guards_narrow_globals_as_lua_language_server_does() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Probe.Upload
+---@field player? { identifier: string }
+
+---@type string?
+ProbeTabletId = nil
+
+local function other() end
+
+---@param upload Probe.Upload
+local function check(upload)
+    if ProbeTabletId then
+        upload.player = { identifier = ProbeTabletId } -- held
+    end
+    if ProbeTabletId then
+        other()
+        upload.player = { identifier = ProbeTabletId } -- called
+    end
+    if ProbeTabletId then
+        Wait(0)
+        upload.player = { identifier = ProbeTabletId } -- waited
+    end
+    if ProbeTabletId then
+        CreateThread(function()
+            upload.player = { identifier = ProbeTabletId } -- later
+        end)
+    end
+    if ProbeTabletId then
+        ProbeTabletId = nil
+        upload.player = { identifier = ProbeTabletId } -- assigned
+    end
+    if ProbeTabletId ~= nil then
+        upload.player = { identifier = ProbeTabletId } -- compared
+    end
+    if type(ProbeTabletId) == 'string' then
+        upload.player = { identifier = ProbeTabletId } -- kind
+    end
+    upload.player = { identifier = ProbeTabletId } -- unguarded
+    if not ProbeTabletId then return end
+    upload.player = { identifier = ProbeTabletId } -- returned
+end
+check({})
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("ProbeTabletId } -- held", "ProbeTabletId: string\n"),
+        ("ProbeTabletId } -- waited", "ProbeTabletId: string\n"),
+        ("ProbeTabletId } -- assigned", "ProbeTabletId: string?\n"),
+        ("ProbeTabletId } -- unguarded", "ProbeTabletId: string?\n"),
+        ("ProbeTabletId } -- returned", "ProbeTabletId: string\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let mismatch = |needle: &str| {
+        let message = "Cannot assign `string?` to field `identifier` of type `string`".to_string();
+        ("assign-type-mismatch".to_string(), line(needle), message)
+    };
+    assert_eq!(
+        findings(&mut client, CLIENT, &["assign-type-mismatch"]),
+        [mismatch("-- assigned"), mismatch("-- unguarded")],
+        "the guards hold through calls, yields and functions created after them, as lua-language-server reads them"
+    );
+    client.set_strict(true);
+    assert_eq!(
+        findings(&mut client, CLIENT, &["assign-type-mismatch"]),
+        [mismatch("-- waited"), mismatch("-- later"), mismatch("-- assigned"), mismatch("-- unguarded")],
+        "with `strict`, another thread or a function that runs later may find the global holding anything"
+    );
+}
+
+#[test]
 fn guards_narrow_the_fields_of_locals_until_something_may_change_them() {
     let mut client = Client::start(fixture_root());
     let text = "\

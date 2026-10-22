@@ -381,6 +381,27 @@ TypeScript takes them, although the code of another file may assign the fields o
 by `impossible-comparison` as [for locals](#locals-that-are-assigned-again), and an assignment to a
 field still has to store a value of the type the field is declared with.
 
+### Globals
+
+A guard on a global, as `if TabletId then` or `if not TabletId then return end`, narrows it like a
+local, as in lua-language-server, until the global is assigned again:
+
+```lua
+---@type string?
+TabletId = nil
+
+local function upload(method)
+    if TabletId then
+        method.player = { identifier = TabletId } -- TabletId is a string
+    end
+end
+```
+
+What the guards tell still holds after a call, after a call that yields, as `Wait(0)`, and in a
+function created after them, as lua-language-server reads it. With `strict`, it holds only through
+calls that do not yield, as TypeScript reads a variable that other code may assign: another thread
+may change the global while the code waits, and a function created inside the guard runs later.
+
 ### Casts
 
 A `---@cast` line changes the type of a local from its line on, as in lua-language-server:

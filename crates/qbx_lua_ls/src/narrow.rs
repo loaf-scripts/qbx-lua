@@ -390,7 +390,10 @@ fn name_root(resolution: &Resolution, name: &Name) -> Root {
 /// known to, the local or global, a table the field is read through, a local copied from one of them
 /// or a table built with them; a call that yields; or the start of a function, which runs later.
 /// Another call that may run code of a script changes the fields of any table as `Flow::counts`
-/// tells.
+/// tells. A global itself, as `TabletId`, is narrowed the same way, as a field read through no
+/// keys, except that what the guards told about it still holds after a call that yields and in a
+/// function created after them, as lua-language-server reads it, unless `strict` asks for what
+/// TypeScript reads there.
 #[derive(Debug)]
 pub struct Flow<'a> {
     origins: Vec<Origin<'a>>,
@@ -501,6 +504,14 @@ impl<'a> Flow<'a> {
         };
         keys.push(SmolStr::new(key));
         self.path_of(&root, &keys)
+    }
+
+    /// The number that the global `name` is tracked under, when guards test it.
+    pub fn global(&self, name: &str) -> Option<LocalId> {
+        if self.paths.is_empty() {
+            return None;
+        }
+        self.path_of(&Root::Global(SmolStr::new(name)), &[])
     }
 
     fn path_of(&self, root: &Root, keys: &[SmolStr]) -> Option<LocalId> {
@@ -969,9 +980,28 @@ impl<'a, 'r> Walker<'a, 'r> {
         let fields: Vec<LocalId> =
             self.fields.iter().copied().chain(delta.keys().copied().filter(|id| self.is_path(*id))).collect();
         for field in fields {
-            delta.insert(field, self.flow.declared.clone());
+            let values = self.released(field, &self.values_in(&delta, field));
+            delta.insert(field, values);
         }
         delta
+    }
+
+    /// What the field `field`, which holds `values`, may hold once other code may run before it is
+    /// read again, as while a call yields or before a function created here runs: anything for a
+    /// field of a table. A global keeps what the guards told about it, as lua-language-server reads
+    /// it, and with `strict` may also hold any value, as TypeScript reads a variable another function
+    /// may assign.
+    fn released(&mut self, field: LocalId, values: &Values) -> Values {
+        if !self.is_global_path(field) {
+            return self.flow.declared.clone();
+        }
+        let fresh = self.ran_origin(None, Ran::Yield);
+        with_value(values, fresh)
+    }
+
+    /// Whether `id` is the number of a global, which is tracked as a field read through no keys.
+    fn is_global_path(&self, id: LocalId) -> bool {
+        self.is_path(id) && self.paths.borrow()[(id - self.first_path) as usize].1.is_empty()
     }
 
     /// `delta`, once the function being walked makes a call that may run code of a script: the
@@ -1071,12 +1101,16 @@ impl<'a, 'r> Walker<'a, 'r> {
         }
     }
 
-    /// The local `expr` names, or the number of the field of a local it reads.
+    /// The local `expr` names, or the number of the global it names or of the field it reads.
     fn place(&self, expr: &Expr) -> Option<LocalId> {
         if let Some(local) = self.local(expr) {
             return Some(local);
         }
-        let (root, keys) = field_path(self.resolution, expr)?;
+        let (root, keys) = match &expr.unparen().kind {
+            // A global is tracked as a field read through no keys.
+            ExprKind::Name(name) => (Root::Global(name.text.clone()), Vec::new()),
+            _ => field_path(self.resolution, expr)?,
+        };
         let key = (root, keys.into_boxed_slice());
         if let Some(id) = self.path_ids.borrow().get(&key) {
             return Some(*id);
@@ -1887,7 +1921,8 @@ impl<'a, 'r> Walker<'a, 'r> {
         // It runs later, when its fields may hold anything.
         let fields: Vec<LocalId> = self.fields.iter().copied().collect();
         for field in fields {
-            self.set(field, at, self.flow.declared.clone());
+            let values = self.released(field, &self.values(field));
+            self.set(field, at, values);
         }
         self.frames.push(Frame { others, ..Frame::new(id) });
         self.live = true;
@@ -2001,12 +2036,15 @@ impl<'a, 'r> Walker<'a, 'r> {
     fn facts(&self, cond: &Expr, holds: bool, out: &mut Facts) {
         let cond = cond.unparen();
         match &cond.kind {
-            ExprKind::Name(_) => {
-                if let Some(local) = self.local(cond) {
+            ExprKind::Name(_) => match self.local(cond) {
+                Some(local) => {
                     out.push((local, if holds { Fact::Truthy } else { Fact::Falsy }));
                     self.aliased(local, holds, out);
                 }
-            }
+                None => {
+                    out.extend(self.place(cond).map(|global| (global, if holds { Fact::Truthy } else { Fact::Falsy })))
+                }
+            },
             ExprKind::Field { .. } | ExprKind::Index { .. } if field_path(self.resolution, cond).is_some() => {
                 out.extend(self.place(cond).map(|field| (field, if holds { Fact::Truthy } else { Fact::Falsy })));
                 if holds {

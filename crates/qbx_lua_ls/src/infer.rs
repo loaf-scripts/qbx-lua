@@ -934,7 +934,10 @@ impl<'a> Infer<'a> {
     fn name(&self, name: &Name) -> Type {
         match self.ctx.resolution.resolve_at(name.span.start) {
             Some(Resolved::Local(id)) => self.local_type_at(id, name.span.start),
-            _ => self.global_type_at(&name.text, Some(name.span.start)),
+            _ => {
+                let ty = self.global_type_at(&name.text, Some(name.span.start));
+                self.global_narrowed(&name.text, name.span.start, ty, false)
+            }
         }
     }
 
@@ -1271,6 +1274,13 @@ impl<'a> Infer<'a> {
         self.path_narrowed(field, expr.span.start, ty, through_calls)
     }
 
+    /// `ty`, the type of the global `name` where it is read at `offset`, as `field_narrowed` gives
+    /// it for a field.
+    pub fn global_narrowed(&self, name: &str, offset: u32, ty: Type, through_calls: bool) -> Type {
+        let Some(global) = self.ctx.flow().global(name) else { return ty };
+        self.path_narrowed(global, offset, ty, through_calls)
+    }
+
     /// `ty`, the type of the field `key` read from `base`, as `field_narrowed` gives it.
     pub fn member_narrowed(&self, base: &Expr, key: &str, ty: Type) -> Type {
         let flow = self.ctx.flow();
@@ -1280,23 +1290,32 @@ impl<'a> Infer<'a> {
 
     /// `ty`, the type of the field tracked as `field`, where it is read at `offset`: for each value
     /// that may reach the read and `Flow::counts` picks `through_calls`, `ty`, or the part of it that
-    /// the assignment which gives the value stores, without what the guards since rule out.
+    /// the assignment which gives the value stores, without what the guards since rule out. As for a
+    /// local, a value that the guards rule out entirely is left out, unless they rule out every one.
     fn path_narrowed(&self, field: LocalId, offset: u32, ty: Type, through_calls: bool) -> Type {
         let flow = self.ctx.flow();
         let values = flow.at(field, offset);
         let counted = values.iter().filter(|value| flow.counts(value.origin, self.strict(), through_calls));
-        let types = counted.map(|value| {
+        let (mut whole, mut kept, mut taken) = (Vec::new(), Vec::new(), Some(Vec::new()));
+        for value in counted {
             let base = match value.origin {
                 DECLARATION => ty.clone(),
                 origin => self.bounded(&ty, &self.stored_value(origin)),
             };
             let facts = value.facts.iter().filter(|(at, _)| *at <= offset).map(|(_, fact)| fact);
             match self.facts_left(&base, facts) {
-                Ok(left) | Err(Some(left)) => left,
-                Err(None) => base,
+                Ok(left) => kept.push(left),
+                Err(Some(as_is)) => taken.iter_mut().for_each(|taken| taken.push(as_is.clone())),
+                Err(None) => taken = None,
             }
-        });
-        merge_versions(types.collect())
+            whole.push(base);
+        }
+        let types = match (kept.is_empty(), taken) {
+            (false, _) => kept,
+            (true, Some(taken)) if !taken.is_empty() => taken,
+            _ => whole,
+        };
+        merge_versions(types)
     }
 
     /// The type of the value that the assignment of `origin` stores in a field, or `unknown` while

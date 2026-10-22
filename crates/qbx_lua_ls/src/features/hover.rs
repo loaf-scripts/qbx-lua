@@ -643,6 +643,8 @@ fn global_hover(
         Type::Unknown => symbol.ty.clone(),
         resolved => resolved,
     };
+    // What the guards around the read tell, as for `if TabletId then`.
+    let ty = infer.global_narrowed(name, at, ty, false);
     let mut out = lua_block(&describe_value(infer, detail, "(global) ", name, &ty, symbol.literal.as_deref()));
     if let Some(doc) = &symbol.doc {
         out.push_str("\n\n");
