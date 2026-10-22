@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use lsp_types::Range;
 use qbx_fivem_data::{native, Side};
-use qbx_lua_analysis::env::{argument_doc_anchor, leading_doc_lines};
+use qbx_lua_analysis::env::{argument_doc_anchor, leading_doc_lines, trailing_doc_line};
 use qbx_lua_analysis::scope::{LocalId, LocalKind, Resolution, Resolved};
 use qbx_lua_analysis::side_guard::SideRegions;
 use qbx_lua_syntax::ast::*;
@@ -174,6 +174,9 @@ pub struct FileContext<'a> {
     /// The metatables that `setmetatable(name, metatable)` calls give each local, with where each
     /// call ends.
     set_metatables: FxHashMap<LocalId, Vec<(u32, &'a Expr)>>,
+    /// Where each `local` statement and assignment ends, by its start: a doc comment after it on
+    /// its last line is its own too.
+    statement_ends: FxHashMap<u32, u32>,
     docs: RefCell<FxHashMap<u32, Rc<DocGroup>>>,
     flow: OnceCell<Flow<'a>>,
     casts: OnceCell<Casts>,
@@ -190,6 +193,7 @@ impl<'a> FileContext<'a> {
             functions: FxHashMap::default(),
             index_writes: Vec::new(),
             set_metatables: Vec::new(),
+            statement_ends: FxHashMap::default(),
             enclosing: Vec::new(),
         };
         collector.block(&chunk.block);
@@ -210,6 +214,7 @@ impl<'a> FileContext<'a> {
             functions: collector.functions,
             index_writes: collector.index_writes,
             set_metatables,
+            statement_ends: collector.statement_ends,
             docs: RefCell::new(FxHashMap::default()),
             flow: OnceCell::new(),
             casts: OnceCell::new(),
@@ -240,7 +245,10 @@ impl<'a> FileContext<'a> {
         if let Some(doc) = self.docs.borrow().get(&stmt_start) {
             return doc.clone();
         }
-        let lines = leading_doc_lines(self.source, &self.chunk.comments, stmt_start);
+        let mut lines = leading_doc_lines(self.source, &self.chunk.comments, stmt_start);
+        if let Some(end) = self.statement_ends.get(&stmt_start) {
+            lines.extend(trailing_doc_line(self.source, &self.chunk.comments, *end));
+        }
         let doc = Rc::new(parse_doc_lines(&lines));
         self.docs.borrow_mut().insert(stmt_start, doc.clone());
         doc
@@ -332,6 +340,7 @@ struct DeclCollector<'a> {
     functions: FxHashMap<u32, Expected<'a>>,
     index_writes: Vec<(&'a Expr, &'a Expr)>,
     set_metatables: Vec<(&'a Name, u32, &'a Expr)>,
+    statement_ends: FxHashMap<u32, u32>,
     /// The functions whose bodies are being walked, innermost last, with their doc comments.
     enclosing: Vec<(&'a FuncBody, Option<u32>)>,
 }
@@ -359,6 +368,7 @@ impl<'a> DeclCollector<'a> {
         let anchor = Some(stmt.span.start);
         match &stmt.kind {
             StmtKind::Local { names, exprs, in_unpack } => {
+                self.statement_ends.insert(stmt.span.start, stmt.span.end);
                 for (index, name) in names.iter().enumerate() {
                     self.decls.insert(name.name.span.start, Decl::Local { stmt, index });
                 }
@@ -382,6 +392,7 @@ impl<'a> DeclCollector<'a> {
                 self.func(func, anchor, Some(Expected::Member { stmt }));
             }
             StmtKind::Assign { targets, exprs } => {
+                self.statement_ends.insert(stmt.span.start, stmt.span.end);
                 targets.iter().for_each(|e| self.expr(e, None));
                 for (target, value) in targets.iter().zip(exprs) {
                     match &target.kind {

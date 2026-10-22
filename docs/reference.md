@@ -945,7 +945,9 @@ an escrowed one, are not checked; see
 ## Typed variables
 
 `assign-type-mismatch` also covers variables whose type is declared. A `local` or an assignment
-with a `---@type` above it has to store values of that type. A later assignment to a local
+with a `---@type` above it has to store values of that type. As in lua-language-server, a doc
+comment after the last statement of a line belongs to that statement too, so
+`local mail = data ---@type table` types `mail` as the line above would. A later assignment to a local
 declared with `---@type`, or to a parameter documented with `@param`, has to store them too, and
 as lua-language-server reports it as [`cast-local-type`](#local-types), so does qbx-lua-ls, and
 the suppressions written for lua-language-server silence it:

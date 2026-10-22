@@ -153,6 +153,18 @@ pub fn leading_doc_lines<'a>(source: &'a str, comments: &[Comment], offset: u32)
     lines
 }
 
+/// The `---` doc line written after the code that ends at `offset`, on the same line, with the `---`
+/// prefix removed: the `@type table` of `local data = value ---@type table`, which
+/// lua-language-server reads as the doc comment of that statement.
+pub fn trailing_doc_line<'a>(source: &'a str, comments: &[Comment], offset: u32) -> Option<&'a str> {
+    let comment = comments.get(comments.partition_point(|c| c.span.start < offset))?;
+    let gap = &source[offset as usize..comment.span.start as usize];
+    if gap.contains('\n') || !gap.trim_matches(|c: char| c.is_whitespace() || c == ';').is_empty() {
+        return None;
+    }
+    comment.span.text(source).strip_prefix("---")
+}
+
 /// Where the doc comment of a function passed to a call is read: the `---` lines right above the
 /// argument at `arg_start`, when the function starts a line of its own below them, as
 /// lua-language-server binds them, or else those above `anchor`, the call or the statement it is
@@ -252,6 +264,20 @@ mod tests {
         assert_eq!(leading_doc_lines(source, &chunk.comments, f), [" first", "@deprecated"]);
         let g = chunk.block.stmts[2].span.start;
         assert!(leading_doc_lines(source, &chunk.comments, g).is_empty());
+        let x = chunk.block.stmts[1].span.end;
+        assert_eq!(trailing_doc_line(source, &chunk.comments, x), Some(" trailing"));
+        assert_eq!(trailing_doc_line(source, &chunk.comments, chunk.block.stmts[0].span.end), None);
+    }
+
+    #[test]
+    fn trailing_doc_lines_follow_their_statement_only() {
+        let source = "local a = 1; local b = {} ---@type table\nlocal c = 2 -- note\nlocal d = {\n} ---@type table";
+        let chunk = parse(source);
+        let end = |index: usize| chunk.block.stmts[index].span.end;
+        assert_eq!(trailing_doc_line(source, &chunk.comments, end(0)), None);
+        assert_eq!(trailing_doc_line(source, &chunk.comments, end(1)), Some("@type table"));
+        assert_eq!(trailing_doc_line(source, &chunk.comments, end(2)), None);
+        assert_eq!(trailing_doc_line(source, &chunk.comments, end(3)), Some("@type table"));
     }
 
     #[test]

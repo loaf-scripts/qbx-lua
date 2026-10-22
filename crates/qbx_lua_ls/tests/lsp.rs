@@ -5639,6 +5639,38 @@ print(tag, build)
 }
 
 #[test]
+fn a_type_written_after_a_statement_is_its_own() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Mail { to: string }
+
+---@param data Test.Mail
+local function send(data)
+    local trailing = data ---@type table
+    trailing.id = 1
+    local plain = data
+    plain.id = 2
+    local same = data; local other = data ---@type table
+    same.id = 3
+    other.id = 4
+    Shared = data ---@type table
+    Shared.id = 5
+end
+
+send({ to = 'a' })
+";
+    client.open_with(CLIENT, text);
+    let lines: Vec<u64> =
+        findings(&mut client, CLIENT, &["inject-field"]).into_iter().map(|(_, line, _)| line).collect();
+    assert_eq!(
+        lines,
+        [pos(text, "plain.id", 0).0 as u64, pos(text, "same.id", 0).0 as u64],
+        "as in lua-language-server, a `---@type` after the last statement of a line types it"
+    );
+    assert!(client.hover_text(CLIENT, 4, 12).contains("table"), "{}", client.hover_text(CLIENT, 4, 12));
+}
+
+#[test]
 fn undefined_field_reports_fields_read_from_values_whose_type_lacks_them() {
     let mut client = Client::start(fixture_root());
     let text = "\
