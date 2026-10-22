@@ -191,28 +191,6 @@ impl FiveM<'_, '_> {
         );
     }
 
-    fn check_core_object(&mut self, expr: &Expr, base: &Expr, method: &Name) {
-        if method.text != "GetCoreObject" {
-            return;
-        }
-        let resource = match &base.kind {
-            ExprKind::Field { base, name, .. } if base.dotted_path().as_deref() == Some("exports") => {
-                Some(name.text.clone())
-            }
-            ExprKind::Index { base, index, .. } if base.dotted_path().as_deref() == Some("exports") => {
-                index.as_string().cloned()
-            }
-            _ => None,
-        };
-        if resource.is_some_and(|r| r == "qb-core") {
-            self.sink.report(
-                rules::LEGACY_CORE_OBJECT,
-                expr.span,
-                "the QBCore object is a compatibility bridge; use exports.qbx_core and the qbx_core modules instead",
-            );
-        }
-    }
-
     fn check_infinite_loop(&mut self, stmt: &Stmt, body: &Block) {
         let mut scan = LoopScan {
             checker: self,
@@ -324,7 +302,6 @@ impl<'ast> Visitor<'ast> for FiveM<'_, '_> {
                 }
                 return;
             }
-            ExprKind::MethodCall { base, method, .. } => self.check_core_object(expr, base, method),
             _ => {}
         }
         visit::walk_expr(self, expr);

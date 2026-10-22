@@ -92,7 +92,7 @@ TypeScript's strict mode does; see [Strict mode](reference.md#strict-mode).
 | `fivem/hash-literal` | info | A literal `GetHashKey` argument can become a compile-time hash. Fix available in valid value positions. |
 | `fivem/legacy-native-pattern` | info | Use of `GetPlayerPed(-1)`, `GetDistanceBetweenCoords`, `Vdist`, or `Vdist2`. A fix is available for `GetPlayerPed(-1)`. |
 | `qbox/prefer-cache` | hint | A native lookup has a corresponding ox_lib cache value. |
-| `qbox/legacy-core-object` | hint | Use of the QBCore compatibility core object. |
+| `qbox/legacy-core-object` | hint | Use of the QBCore compatibility core object in a resource on Qbox: the workspace holds `qbx_core`, or the manifest depends on it. Code that a setting picks at runtime, as the qb-core part of a bridge, is not checked. |
 | `fivem/event-argument-count` | warning | More event arguments than known handlers accept. A local `TriggerEvent` is not checked, since other resources that listen may take what the handlers leave out. |
 | `fivem/event-missing-arguments` | info | Fewer arguments than known handlers require: all their parameters, or, when the doc comment above a registration documents them, those up to the last one it requires, as `missing-parameter` counts them, so a `---@param model? string` may be left out. |
 | `fivem/event-wrong-side` | warning | Known handlers exist only on the other side, or a handler waits for a FiveM event of the other side, such as `playerDropped` in client code. |

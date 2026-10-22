@@ -147,6 +147,59 @@ fn events_are_checked_against_their_handlers() {
 }
 
 #[test]
+fn legacy_core_object_only_on_qbox() {
+    /// Lints `source` as the client script `client.lua` of the resource `shop`, whose manifest is
+    /// `manifest`, in a workspace that also holds `others` (resource, source).
+    fn lint(source: &str, manifest: &str, others: &[(&str, &str)]) -> Vec<&'static str> {
+        let chunk = parse(source);
+        let resolution = resolve(&chunk);
+        let summary = summarize(source, &chunk, &resolution);
+        let mut crossrefs = CrossRefs::default();
+        crossrefs.collect(source, &chunk, Some(Side::Client), Some("shop"));
+        for (resource, other) in others {
+            crossrefs.collect(other, &parse(other), Some(Side::Server), Some(resource));
+        }
+        let env = qbx_lua_analysis::project::ResourceEnv::default();
+        let manifest = qbx_lua_analysis::manifest::Manifest::from_chunk(&parse(manifest));
+        let resource = qbx_lua_analysis::ResourceInput {
+            name: "shop",
+            env: &env,
+            manifest: &manifest,
+            started_before: None,
+            installed: None,
+            fxv2_natives: false,
+        };
+        let config = FileConfig::default();
+        let input = FileInput {
+            source,
+            chunk: &chunk,
+            resolution: &resolution,
+            summary: &summary,
+            config: &config,
+            side: Some(Side::Client),
+            resource: Some(resource),
+            crossrefs: Some(&crossrefs),
+            locale: None,
+            relative_path: "client.lua",
+            value_count: None,
+            native_arg: None,
+        };
+        check_file(&input).into_iter().map(|d| d.code).filter(|code| *code == "qbox/legacy-core-object").collect()
+    }
+    let none = Vec::<&str>::new();
+    let manifest = "client_script 'client.lua'";
+    let source = "local QBCore = exports['qb-core']:GetCoreObject()\nprint(QBCore)";
+    let qbox = [("qbx_core", "print('core')")];
+    assert_eq!(lint(source, manifest, &qbox), ["qbox/legacy-core-object"]);
+    assert_eq!(lint(source, manifest, &[]), none, "on plain qb-core the object is no bridge");
+    assert_eq!(lint(source, "client_script 'client.lua'\ndependency 'qbx_core'", &[]), ["qbox/legacy-core-object"]);
+    let bridge = format!("if Config.Framework ~= 'qb' then\n    return\nend\n\n{source}");
+    assert_eq!(lint(&bridge, manifest, &qbox), none, "the qb-core part of a bridge");
+    let branch = "if Config.Framework == 'qb' then\n    QB = exports['qb-core']:GetCoreObject()\nend";
+    assert_eq!(lint(branch, manifest, &qbox), none);
+}
+
+#[test]
 fn handlers_of_builtin_events_of_the_other_side() {
     let none = Vec::<&str>::new();
     let dropped = "AddEventHandler('playerDropped', function() end)";

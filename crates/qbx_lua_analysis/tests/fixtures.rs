@@ -67,6 +67,7 @@ fn bad_resource_reports_every_rule() {
                 | "self-comparison"
                 | "builtin-overwrite"
                 | "qbox/prefer-cache"
+                | "qbox/legacy-core-object"
                 | "manifest/missing-field"
                 | "fivem/event-argument-count"
                 | "fivem/event-missing-arguments"

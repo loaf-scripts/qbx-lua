@@ -37,7 +37,6 @@ server/main.lua:8:24 warning unbalanced-assignments
 server/main.lua:9:5 warning unbalanced-assignments
 server/main.lua:13:1 warning deprecated
 server/main.lua:24:16 info manifest/missing-dependency
-server/main.lua:24:16 hint qbox/legacy-core-object
 shared/config.lua:3:1 warning self-assignment
 shared/config.lua:4:1 warning lowercase-global
 shared/config.lua:13:11 warning duplicate-doc-alias

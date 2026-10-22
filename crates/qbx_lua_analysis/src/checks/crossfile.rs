@@ -25,6 +25,8 @@ pub(super) fn check(input: &FileInput, sink: &mut Sink) {
     checker.visit_block(&input.chunk.block);
 }
 
+const QBOX_CORE: &str = "qbx_core";
+
 const BRIDGE_FOLDERS: &[&str] = &["bridge", "bridges", "framework", "frameworks", "compat", "integrations"];
 
 /// Per-framework files such as `bridge/esx/server.lua` are picked by a loader at runtime: either
@@ -244,6 +246,34 @@ impl CrossFile<'_, '_> {
         }
     }
 
+    /// `exports['qb-core']:GetCoreObject()` in a resource that runs on Qbox, where `qb-core` is the
+    /// bridge that qbx_core provides. Code that a setting picks at runtime, as the qb-core part of a
+    /// resource that supports several frameworks, runs on plain qb-core too, where the object is no
+    /// bridge.
+    fn core_object(&mut self, expr: &Expr, base: &Expr, method: &Name) {
+        if method.text != "GetCoreObject" || self.selected_at_runtime > 0 || !self.runs_on_qbox() {
+            return;
+        }
+        if self.exported_resource(base).is_some_and(|(resource, _)| resource == "qb-core") {
+            self.sink.report(
+                rules::LEGACY_CORE_OBJECT,
+                expr.span,
+                "the QBCore object is a compatibility bridge; use exports.qbx_core and the qbx_core modules instead",
+            );
+        }
+    }
+
+    /// Whether the resource runs on Qbox: the workspace holds `qbx_core`, or the manifest depends
+    /// on it or loads one of its files.
+    fn runs_on_qbox(&self) -> bool {
+        let in_workspace = self.input.crossrefs.is_some_and(|refs| refs.resources.contains(QBOX_CORE));
+        let required = self.input.resource.is_some_and(|own| {
+            own.manifest.dependencies.iter().any(|d| d.value.trim_start_matches('/') == QBOX_CORE)
+                || own.manifest.imports().any(|s| s.pattern.starts_with(&format!("@{QBOX_CORE}/")))
+        });
+        in_workspace || required
+    }
+
     fn dependency(&mut self, resource: &SmolStr, at: &Expr) {
         let Some(own) = self.input.resource else { return };
         let listed = own.manifest.dependencies.iter().any(|d| d.value.trim_start_matches('/') == resource.as_str());
@@ -368,7 +398,10 @@ impl<'ast> Visitor<'ast> for CrossFile<'_, '_> {
                     return;
                 }
             }
-            ExprKind::MethodCall { base, method, args, .. } => self.export_call(expr, base, method, args),
+            ExprKind::MethodCall { base, method, args, .. } => {
+                self.core_object(expr, base, method);
+                self.export_call(expr, base, method, args);
+            }
             _ => {}
         }
         visit::walk_expr(self, expr);
