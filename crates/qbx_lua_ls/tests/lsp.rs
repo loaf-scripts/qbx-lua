@@ -9628,6 +9628,61 @@ fn qbxlint_toml_sets_strict_per_folder_over_the_editor() {
 }
 
 #[test]
+fn nested_qbxlint_toml_files_combine_with_those_of_the_folders_above() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-nested-config-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    let write = |relative: &str, text: &str| {
+        let path = fixture.0.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("qbxlint.toml", "globals = ['ServerGlobal']\n");
+    write("resource_a/qbxlint.toml", "globals = ['OnlyA']\n");
+    write("resource_b/qbxlint.toml", "globals = ['OnlyB']\n[format]\nquote_style = 'double'\n");
+    let text = "print(ServerGlobal, OnlyA, OnlyB)\n";
+    for resource in ["resource_a", "resource_b"] {
+        write(
+            &format!("{resource}/fxmanifest.lua"),
+            "fx_version 'cerulean'\ngame 'gta5'\nclient_script 'client.lua'\n",
+        );
+        write(&format!("{resource}/client.lua"), text);
+    }
+    let mut client = Client::start(fixture.0.clone());
+    let undefined = |client: &mut Client, file: &str| -> Vec<String> {
+        let found = findings(client, file, &["undefined-global"]);
+        found.into_iter().map(|(_, _, message)| message.split('\'').nth(1).unwrap().to_string()).collect()
+    };
+    assert_eq!(undefined(&mut client, "resource_a/client.lua"), ["OnlyB"]);
+    assert_eq!(undefined(&mut client, "resource_b/client.lua"), ["OnlyA"]);
+    client.open_with("resource_a/client.lua", text);
+    client.open_with("resource_b/client.lua", text);
+    assert_eq!(undefined(&mut client, "resource_a/client.lua"), ["OnlyB"], "the same once it is open");
+    assert_eq!(client.request("qbx/quote", json!({ "uri": client.uri("resource_a/client.lua") })), "'");
+    assert_eq!(client.request("qbx/quote", json!({ "uri": client.uri("resource_b/client.lua") })), "\"");
+
+    write("resource_a/qbxlint.toml", "globals = ['OnlyA', 'OnlyB']\n");
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": client.uri("resource_a/qbxlint.toml"), "type": 2 }] }),
+    );
+    assert!(undefined(&mut client, "resource_a/client.lua").is_empty(), "a changed nested file applies");
+    assert_eq!(undefined(&mut client, "resource_b/client.lua"), ["OnlyA"]);
+}
+
+#[test]
 fn casts_of_locals_assigned_again_compare_the_values_that_reach_them() {
     let mut client = Client::start(fixture_root());
     let text = "\

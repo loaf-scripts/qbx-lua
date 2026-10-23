@@ -274,8 +274,8 @@ impl Server {
     }
 
     fn log_config_notes(&self) {
-        for note in &self.ws.lint_config.notes {
-            self.log(note.clone());
+        for note in self.ws.lint_config.notes().into_iter().chain(self.ws.lint_config.errors()) {
+            self.log(note);
         }
     }
 
@@ -712,7 +712,7 @@ impl Server {
         }
         if config_changed {
             if let Some(root) = self.ws.roots.first() {
-                self.ws.lint_config = qbx_lua_analysis::Config::discover(root).ok().flatten().unwrap_or_default();
+                self.ws.lint_config = qbx_lua_analysis::Config::discover(root);
             }
             self.ws.resync_sides();
             self.log_config_notes();
@@ -854,12 +854,12 @@ impl Server {
             req::Formatting::METHOD => {
                 let p: DocumentFormattingParams = params(raw)?;
                 let doc = self.doc(&p.text_document.uri)?;
-                let mut options = self.ws.lint_config.format.clone();
                 // Without a qbxlint.toml the editor's own indentation settings decide.
-                if !self.ws.lint_config.format_configured {
-                    options.indent_width = p.options.tab_size.max(1) as usize;
-                    options.use_tabs = !p.options.insert_spaces;
-                }
+                let options = self.ws.lint_config.format_for(&doc.path).unwrap_or_else(|| qbx_lua_fmt::FormatOptions {
+                    indent_width: p.options.tab_size.max(1) as usize,
+                    use_tabs: !p.options.insert_spaces,
+                    ..qbx_lua_fmt::FormatOptions::default()
+                });
                 match qbx_lua_fmt::format(&doc.text, &options) {
                     Ok(text) if text == doc.text => reply(Vec::<TextEdit>::new()),
                     Ok(text) => {

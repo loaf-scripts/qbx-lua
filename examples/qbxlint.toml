@@ -1,5 +1,9 @@
 # Every key is optional. Place this file at the repository root.
 
+# Files in the folders below combine with this one, theirs taking precedence. Set this to stop the
+# qbxlint.toml files in the folders above this one from applying.
+root = false
+
 # Extra glob patterns to skip, relative to this file.
 exclude = ["web/**", "**/vendor/**"]
 

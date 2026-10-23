@@ -93,8 +93,9 @@ pub fn is_silenced(ws: &Workspace, path: &Path) -> bool {
 /// whose diagnostics are reported follow it, so third-party classes stay loose unless they say
 /// otherwise.
 fn strict_by_default(ws: &Workspace, file: FileId) -> bool {
-    ws.lint_config.strict_classes
-        && ws.index.file(file).is_some_and(|f| f.origin == FileOrigin::Workspace && !is_silenced(ws, &f.path))
+    ws.index.file(file).is_some_and(|f| {
+        f.origin == FileOrigin::Workspace && ws.lint_config.strict_classes_at(&f.path) && !is_silenced(ws, &f.path)
+    })
 }
 
 /// What the type checks of one file share: one inference, whose cache of the types of locals each
@@ -106,6 +107,8 @@ struct CheckInput<'a> {
     payloads: OnceCell<Vec<Payload<'a>>>,
     /// The inline comments that suppress rules in the file.
     suppressions: Suppressions,
+    /// The `ignore_unused_prefix` of the file, whose names `no-unknown` leaves alone too.
+    unused_prefix: String,
 }
 
 impl<'a> CheckInput<'a> {
@@ -146,7 +149,7 @@ fn type_diagnostics<'a>(
         (PARAM_TYPE_MISMATCH, |input| mismatched_arguments(input.infer, &input.doc.chunk, input.payloads())),
         (UNDECLARED_FIELD, |input| {
             // Without a strict class there is nothing to find, so no assignment needs its type inferred.
-            if !input.ws.lint_config.strict_classes && !input.ws.index.has_strict_class() {
+            if !input.ws.lint_config.strict_classes_anywhere() && !input.ws.index.has_strict_class() {
                 return Vec::new();
             }
             undeclared_fields(input.infer, &input.doc.chunk, |file| strict_by_default(input.ws, file))
@@ -169,7 +172,7 @@ fn type_diagnostics<'a>(
         (MISSING_PARAMETER, |input| missing_payloads(input.infer, input.payloads())),
         (REDUNDANT_PARAMETER, |input| redundant_payloads(input.payloads())),
         (NO_UNKNOWN, |input| {
-            let prefix = &input.ws.lint_config.ignore_unused_prefix;
+            let prefix = &input.unused_prefix;
             let mut out = unknown_types(input.infer, prefix);
             out.extend(unknown_values(input.infer, &input.doc.chunk, input.payloads(), prefix));
             out
@@ -184,7 +187,8 @@ fn type_diagnostics<'a>(
         }),
     ];
     let suppressions = Suppressions::parse(&doc.text, &doc.chunk.comments, &doc.lines);
-    let input = CheckInput { ws, doc, infer, payloads: OnceCell::new(), suppressions };
+    let unused_prefix = config.ignore_unused_prefix.clone();
+    let input = CheckInput { ws, doc, infer, payloads: OnceCell::new(), suppressions, unused_prefix };
     // A parameter typed by what its function is written as, such as the `fun(source: number, ...)`
     // of a callback wrapper, needs no `@param` of its own. The linter only knows the function types
     // that the functions of its resource document.

@@ -57,7 +57,8 @@ struct Cli {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Path to a qbxlint.toml; by default it is searched for upwards from the first path.
+    /// Path to a qbxlint.toml that applies to every file; by default each file follows those in its
+    /// folder and the folders above it.
     #[arg(short, long)]
     config: Option<PathBuf>,
 
@@ -102,7 +103,7 @@ enum Command {
         #[arg(long)]
         check: bool,
 
-        /// Path to a qbxlint.toml.
+        /// Path to a qbxlint.toml that applies to every file.
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
@@ -129,6 +130,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, config: Option<&PathBuf>) -> Result<E
     }
     files.sort();
     files.dedup();
+    check_config(&config)?;
 
     let (mut changed, mut failed) = (0usize, 0usize);
     for file in &files {
@@ -141,7 +143,7 @@ fn run_fmt(paths: &[PathBuf], check: bool, config: Option<&PathBuf>) -> Result<E
                 continue;
             }
         };
-        match qbx_lua_fmt::format(&source, &config.format) {
+        match qbx_lua_fmt::format(&source, &config.format_for(file).unwrap_or_default()) {
             Ok(formatted) if formatted == source => {}
             Ok(formatted) => {
                 changed += 1;
@@ -211,13 +213,31 @@ fn load_config(cli: &Cli) -> Result<Config, String> {
     discover_config(cli.paths.first().cloned().unwrap_or_else(|| PathBuf::from(".")))
 }
 
+/// The configuration files of each path's folder and those above it. Those above `start` are read
+/// first, so that one that cannot be read fails the run before anything is analyzed.
 fn discover_config(start: PathBuf) -> Result<Config, String> {
     let start = std::path::absolute(&start).unwrap_or(start);
-    let config = Config::discover(&start)?.unwrap_or_default();
-    for note in &config.notes {
+    let config = Config::discover(&start);
+    fail_on_unreadable(&config)?;
+    Ok(config)
+}
+
+/// Prints which LuaLS or EmmyLua files discovery fell back to, and fails when a configuration file
+/// it found later, such as one in a folder below the first path, could not be read.
+fn check_config(config: &Config) -> Result<(), String> {
+    for note in config.notes() {
         eprintln!("qbx-lint: {note}");
     }
-    Ok(config)
+    fail_on_unreadable(config)
+}
+
+fn fail_on_unreadable(config: &Config) -> Result<(), String> {
+    let errors = config.errors();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
 }
 
 fn run(cli: &Cli) -> Result<ExitCode, String> {
@@ -236,6 +256,7 @@ fn run(cli: &Cli) -> Result<ExitCode, String> {
 
     let started = Instant::now();
     let mut reports = lint_paths(&cli.paths, &config);
+    check_config(&config)?;
     let mut fixed = 0usize;
     if cli.fix {
         for report in &reports {

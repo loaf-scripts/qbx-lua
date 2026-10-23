@@ -347,3 +347,68 @@ fn lua_ls_settings_apply_when_no_qbxlint_toml_exists() {
         assert_eq!(codes, ["undefined-global"], "{args:?}: {json}");
     }
 }
+
+#[test]
+fn nested_qbxlint_toml_files_combine_with_those_above_wherever_the_run_starts() {
+    let fixture = Fixture::new();
+    fixture.write("server/qbxlint.toml", "globals = ['ServerGlobal']\n[rules]\n'fivem/citizen-prefix' = 'off'\n");
+    fixture.write("server/resource_a/qbxlint.toml", "globals = ['OnlyA']\n");
+    fixture.write("server/resource_b/qbxlint.toml", "globals = ['OnlyB']\n[rules]\n'fivem/citizen-prefix' = 'error'\n");
+    for resource in ["resource_a", "resource_b"] {
+        let manifest = "fx_version 'cerulean'\ngame 'gta5'\nclient_script 'client.lua'\n";
+        fixture.write(&format!("server/{resource}/fxmanifest.lua"), manifest);
+        fixture.write(&format!("server/{resource}/client.lua"), "print(ServerGlobal, OnlyA, OnlyB)\nCitizen.Wait(0)\n");
+    }
+    let findings = |args: &[&str]| {
+        let output = fixture.run(&[&["--format", "json", "--no-fail"], args].concat());
+        assert_success(&output);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mut found: Vec<String> = Vec::new();
+        for file in json["files"].as_array().unwrap() {
+            for diagnostic in file["diagnostics"].as_array().unwrap() {
+                let path = file["path"].as_str().unwrap().replace('\\', "/");
+                found.push(format!("{path} {} {}", diagnostic["code"], diagnostic["severity"]));
+            }
+        }
+        found.sort();
+        found
+    };
+    let expected = findings(&["server"]);
+    assert_eq!(
+        expected,
+        [
+            "server/resource_a/client.lua \"undefined-global\" \"warning\"",
+            "server/resource_b/client.lua \"fivem/citizen-prefix\" \"error\"",
+            "server/resource_b/client.lua \"undefined-global\" \"warning\"",
+        ]
+    );
+    assert_eq!(findings(&["server/resource_a", "server/resource_b"]), expected);
+    assert_eq!(findings(&["server/resource_b/client.lua", "server/resource_a/client.lua"]), expected);
+}
+
+#[test]
+fn a_nested_qbxlint_toml_that_cannot_be_read_fails_the_run() {
+    let fixture = Fixture::new();
+    fixture.write("server/qbxlint.toml", "globals = ['ServerGlobal']\n");
+    fixture.write("server/res/qbxlint.toml", "[rules]\n'nope' = 'off'\n");
+    fixture.write("server/res/main.lua", "print(ServerGlobal)\n");
+    for args in [vec!["server"], vec!["fmt", "server"]] {
+        let output = fixture.run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr).replace('\\', "/");
+        assert!(stderr.contains("server/res/qbxlint.toml") && stderr.contains("unknown rule 'nope'"), "{stderr}");
+    }
+}
+
+#[test]
+fn fmt_formats_each_file_with_the_options_of_its_folders() {
+    let fixture = Fixture::new();
+    fixture.write("qbxlint.toml", "[format]\nindent_width = 2\nquote_style = 'single'\n");
+    fixture.write("res/qbxlint.toml", "[format]\nquote_style = 'double'\n");
+    let source = "if a then\nprint(\"x\", 'y')\nend\n";
+    fixture.write("main.lua", source);
+    fixture.write("res/main.lua", source);
+    assert_success(&fixture.run(&["fmt", "."]));
+    assert_eq!(String::from_utf8(fixture.read("main.lua")).unwrap(), "if a then\n  print('x', 'y')\nend\n");
+    assert_eq!(String::from_utf8(fixture.read("res/main.lua")).unwrap(), "if a then\n  print(\"x\", \"y\")\nend\n");
+}

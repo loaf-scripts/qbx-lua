@@ -13,14 +13,23 @@ constructors (`{ .police, .ambulance }`), `defer` blocks, and `/* ... */` commen
 
 ## Configuration files
 
-`qbx-lint` loads one configuration per invocation. Without `--config`, it searches upward from
-the first input file or directory for `qbxlint.toml` or `.qbxlint.toml`. An explicit configuration
-path can be relative or absolute. Exclusion and override patterns use the configuration directory
-as their base.
+A `qbxlint.toml` or `.qbxlint.toml` applies to the files in its folder and the folders below it.
+Each file follows every one in its own folder and the folders above it, combined as
+[Combining configuration files](#combining-configuration-files) describes, so a server's
+`qbxlint.toml` holds what its resources share and a resource's own adds to it. A file with
+`root = true` ends the search: the ones above it do not apply to its folder. The language server
+finds them the same way. Which files apply depends only on where a file is, so `qbx-lint server`
+and `qbx-lint server/resource_a` check `resource_a` with the same settings.
 
-All settings are optional. Unknown keys and rule names are errors.
+`--config` applies one file to every file instead, and no other configuration file is read. The
+path can be relative or absolute. Exclusion and override patterns use the folder of the file they
+are written in as their base.
+
+All settings are optional. Unknown keys and rule names are errors, also in a file found in a
+folder below the input path, which fails the run once it is read.
 
 ```toml
+root = false
 exclude = ["web/**", "**/vendor/**"]
 ignore_diagnostics = ['\[standalone\]/', 'third_party/']
 globals = ["SomeRuntimeGlobal"]
@@ -51,6 +60,7 @@ quote_style = "preserve"
 
 | Setting | Meaning |
 | --- | --- |
+| `root` | Ends the search for configuration files: those in the folders above this one do not apply. Defaults to `false`. |
 | `exclude` | Additional glob patterns for paths to skip. Skipped files are not analyzed at all, so other files do not see their globals, exports or events. |
 | `ignore_diagnostics` | Gitignore-style patterns for paths that are analyzed but never reported. |
 | `globals` | Names supplied at runtime that the linter cannot discover. |
@@ -67,6 +77,41 @@ The default exclusions include `node_modules`, `.git`, and `[builders]` director
 Directory traversal also skips hidden directories. It follows directory symlinks, as FiveM does,
 except links into the folder it traverses or to a folder above it, and reads a folder that several
 links lead to once, also when one leads to a folder inside the one another leads to.
+
+### Combining configuration files
+
+The configuration files of a file apply from the outermost to the nearest, each with its own
+settings and then its matching `[[overrides]]`. So a nearer file has the last word, also over an
+override in a file above it whose patterns match:
+
+| Setting | Combined as |
+| --- | --- |
+| `exclude` | Each file's patterns skip paths in its folder and below |
+| `ignore_diagnostics` | As with nested `.gitignore` files, the nearest file with a matching pattern decides, so a `!pattern` reports a path again that a file above ignores |
+| `globals`, `imports` | Added together |
+| `rules`, `format` | Key by key, the nearest file that sets a key deciding |
+| `strict`, `strict_classes`, `database`, `ignore_unused_prefix` | The nearest file that sets it decides |
+| `overrides` | Apply after the settings of their own file, with patterns relative to its folder |
+
+With these two files, `server/resource_a` sees `Framework` and `ResourceA`, keeps
+`unused-argument` off and reports `unused-local` as an error, while the other resources only see
+`Framework`:
+
+```toml
+# server/qbxlint.toml
+globals = ["Framework"]
+
+[rules]
+"unused-argument" = "off"
+```
+
+```toml
+# server/resource_a/qbxlint.toml
+globals = ["ResourceA"]
+
+[rules]
+"unused-local" = "error"
+```
 
 ### Ignoring diagnostics
 
@@ -90,18 +135,18 @@ FiveM category folders need escaped brackets: `[standalone]` is a character clas
 one letter, while `\[standalone\]` matches the folder. Write such patterns as TOML literal strings
 in single quotes, because `\[` is not a valid escape in a double-quoted TOML string.
 
-`--rule CODE=LEVEL` changes a rule's base level for the invocation. Matching file overrides are
-applied afterward. `--min-severity hint` includes hints, which the default `info` threshold hides.
+`--rule CODE=LEVEL` gives a rule a level for the invocation, in place of the level every `[rules]`
+table gives it. Matching file overrides still apply over it. `--min-severity hint` includes hints, which the default `info` threshold hides.
 `--max-warnings 0` makes reported warnings fail a lint run.
 
 ### Fallback: LuaLS and EmmyLua settings
 
 Configure qbx-lint with `qbxlint.toml`. Projects that are already set up for LuaLS or EmmyLua get
-a fallback: when no `qbxlint.toml` or `.qbxlint.toml` exists in any parent directory, the nearest
-directory with `.luarc.json`, `.luarc.jsonc` or `.emmyrc.json` supplies the few settings that
+a fallback: for files that no `qbxlint.toml` or `.qbxlint.toml` applies to, the nearest folder
+above them with `.luarc.json`, `.luarc.jsonc` or `.emmyrc.json` supplies the few settings that
 have an equivalent here, and the CLI names the files it used on stderr. Files found together in
-that directory are merged. A `qbxlint.toml` replaces the fallback entirely, so add one as soon as
-qbx-lint needs anything beyond it. `--config` also accepts these files.
+that folder are merged. A `qbxlint.toml` replaces the fallback entirely for the files it applies
+to, so add one as soon as qbx-lint needs anything beyond it. `--config` also accepts these files.
 
 | LuaLS / EmmyLua setting | Used as |
 | --- | --- |

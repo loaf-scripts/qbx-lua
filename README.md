@@ -124,9 +124,10 @@ Both the CLI and language server use `qbxlint.toml` for lint rules and formattin
 The language server also accepts editor settings for library paths, diagnostics, inlay hints
 and semantic tokens; see its [configuration guide](crates/qbx_lua_ls/README.md#configuration).
 
-The CLI searches upward from the first input path for `qbxlint.toml` or `.qbxlint.toml`.
-Use `--config path/to/qbxlint.toml` to select a file explicitly. Paths in configuration patterns
-are relative to that file's directory.
+Each Lua file follows every `qbxlint.toml` or `.qbxlint.toml` in its folder and the folders above
+it, nearer files taking precedence, up to one that says `root = true`. Use
+`--config path/to/qbxlint.toml` to apply one file to everything instead. Paths in configuration
+patterns are relative to the directory of the file they are written in.
 
 ```toml
 exclude = ["web/**", "**/vendor/**"]

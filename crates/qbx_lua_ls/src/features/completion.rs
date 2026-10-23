@@ -716,13 +716,18 @@ fn leaves_value_open(rest: &str) -> bool {
         || matches!(word, "then" | "do" | "and" | "or" | "end" | "else" | "elseif" | "until")
 }
 
-/// The quote that inserted strings use: the formatter's `quote_style`, or else the one that most
-/// strings of the document use, and `'` when it has none or there is no document.
+/// The quote that inserted strings use: the formatter's `quote_style` for the document, or without
+/// one for the first workspace folder, or else the one that most strings of the document use, and
+/// `'` when it has none or there is no document.
 pub fn quote_of(ws: &Workspace, doc: Option<&Document>) -> char {
-    match ws.lint_config.format.quote_style {
-        QuoteStyle::Single => return '\'',
-        QuoteStyle::Double => return '"',
-        QuoteStyle::Preserve => {}
+    let format = match doc {
+        Some(doc) => ws.lint_config.format_for(&doc.path),
+        None => ws.roots.first().and_then(|root| ws.lint_config.format_in(root)),
+    };
+    match format.map(|format| format.quote_style) {
+        Some(QuoteStyle::Single) => return '\'',
+        Some(QuoteStyle::Double) => return '"',
+        Some(QuoteStyle::Preserve) | None => {}
     }
     let Some(doc) = doc else { return '\'' };
     let (mut single, mut double) = (0, 0);

@@ -124,8 +124,7 @@ impl Workspace {
         let mut stats = ScanStats::default();
         self.index.clear_workspace();
         self.locator = ResourceLocator::default();
-        self.lint_config =
-            self.roots.first().and_then(|root| Config::discover(root).ok().flatten()).unwrap_or_default();
+        self.lint_config = self.roots.first().map(|root| Config::discover(root)).unwrap_or_default();
         let roots: Vec<(PathBuf, FileOrigin)> = self
             .roots
             .iter()
@@ -167,7 +166,8 @@ impl Workspace {
     fn index_dependencies(&mut self) -> usize {
         let mut wanted: Vec<(PathBuf, SmolStr)> = Vec::new();
         for resource in &self.index.resources {
-            let configured = self.lint_config.imports_for(&resource.manifest_path).into_iter().map(|(p, _)| p);
+            let configured = self.lint_config.imports_for(&resource.manifest_path);
+            let configured = configured.iter().map(|(pattern, _)| pattern.as_str());
             let patterns = resource.manifest.imports().map(|s| s.pattern.as_str()).chain(configured);
             let imports = patterns.filter_map(split_import).map(|(name, _)| name);
             let dependencies = resource.manifest.dependencies.iter().map(|d| d.value.as_str());
@@ -455,7 +455,7 @@ impl Workspace {
             }
             let imports = patterns
                 .into_iter()
-                .flat_map(|(pattern, side)| self.import_files(pattern).into_iter().map(move |file| (file, side)))
+                .flat_map(|(pattern, side)| self.import_files(&pattern).into_iter().map(move |file| (file, side)))
                 .collect();
             self.index.resources[id].imports = imports;
         }
@@ -507,8 +507,8 @@ impl Workspace {
             }
         }
         for (pattern, side) in resource_imports(&entry.manifest, &entry.manifest_path, &self.lint_config) {
-            let files = self.import_files(pattern).into_iter().filter_map(|id| self.index.file(id));
-            env.add_import(pattern, side, files.map(|file| &file.index.summary));
+            let files = self.import_files(&pattern).into_iter().filter_map(|id| self.index.file(id));
+            env.add_import(&pattern, side, files.map(|file| &file.index.summary));
         }
         env.set_declarations(self.index.declarations());
         env

@@ -557,7 +557,7 @@ LSP over stdio; `--version` prints the version. It does not need a running FiveM
 
 `qbx-lua-ls --check [<dir>...]` checks folders from the command line, as in CI, with the rules
 that only the server runs, such as `param-type-mismatch` and `need-check-nil`. It reports what the
-editor reports for files that are not open, with the `qbxlint.toml` of the first folder, one
+editor reports for files that are not open, with the `qbxlint.toml` files that apply to each, one
 `path:line:column: level [code] message` line each, as `qbx-lint --format compact` writes them, and
 fails on an error or a warning. `--strict` turns on the `strict` setting, `--library <dir>` indexes
 a folder as `library` does, `--rule CODE=LEVEL` sets a rule's level where `qbxlint.toml` leaves it

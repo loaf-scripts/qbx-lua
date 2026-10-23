@@ -51,9 +51,11 @@ Updates replace the settings object rather than merging individual keys. Send th
 object when preserving other overrides. The server does not request `workspace/configuration`;
 the client must provide settings during initialization or send the notification.
 
-The server discovers `qbxlint.toml` from the first workspace root and its ancestors. Its
-`[format]` section controls formatting. Without a discovered config file, the editor's formatting
-request supplies indentation width and tabs/spaces. The rule levels of the config file, in
+Each file follows the `qbxlint.toml` files of its folder and the folders above it, combined as the
+CLI combines them; see
+[Combining configuration files](../../../docs/reference.md#combining-configuration-files). Their
+`[format]` sections control formatting. For a file that no config file applies to, the editor's
+formatting request supplies indentation width and tabs/spaces. The rule levels of the config file, in
 `[rules]`, in `[[overrides]]` or taken from LuaLS or EmmyLua settings, take precedence over
 `diagnostics.rules` from the client, which sets the level of the remaining rules. Its `strict`,
 also one an `[[overrides]]` entry sets, takes precedence over `diagnostics.strict` in the same way.

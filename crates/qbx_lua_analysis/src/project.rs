@@ -437,8 +437,8 @@ impl ResourceEnv {
 
 /// Every Lua import of a resource with the side it runs on: the `@resource/path` entries of its
 /// manifest, then the `imports` the configuration adds for files it loads at runtime.
-pub fn resource_imports<'a>(manifest: &'a Manifest, manifest_path: &Path, config: &'a Config) -> Vec<(&'a str, Side)> {
-    let own = manifest.imports().filter(|s| s.is_lua()).map(|s| (s.pattern.as_str(), s.side));
+pub fn resource_imports(manifest: &Manifest, manifest_path: &Path, config: &Config) -> Vec<(String, Side)> {
+    let own = manifest.imports().filter(|s| s.is_lua()).map(|s| (s.pattern.to_string(), s.side));
     own.chain(config.imports_for(manifest_path)).collect()
 }
 
@@ -534,7 +534,7 @@ impl ResourceLocator {
         for root in roots.into_iter().filter(|root| root != resource_root) {
             let Some((manifest_path, manifest)) = self.manifest_of(&root) else { continue };
             for (pattern, _) in resource_imports(manifest, manifest_path, config) {
-                match split_import(pattern) {
+                match split_import(&pattern) {
                     Some((imported, path)) if imported.eq_ignore_ascii_case(name) => {
                         found.push((root.clone(), path.to_string()));
                     }
@@ -573,7 +573,7 @@ impl ResourceLocator {
             }
         }
         for (pattern, side) in resource_imports(&manifest, &manifest_path, config) {
-            env.add_import(pattern, side, self.import_summaries(root, pattern, config));
+            env.add_import(&pattern, side, self.import_summaries(root, &pattern, config));
         }
         self.envs.insert(root.to_path_buf(), env.clone());
         Some(env)
@@ -654,7 +654,7 @@ impl Resource {
             }
         }
         for (pattern, side) in resource_imports(&manifest, &manifest_path, config) {
-            env.add_import(pattern, side, locator.import_summaries(root, pattern, config));
+            env.add_import(&pattern, side, locator.import_summaries(root, &pattern, config));
         }
         // What `loader_env` finds for this resource, for the files it loads from other resources.
         locator.envs.entry(root.to_path_buf()).or_insert_with(|| env.clone());
