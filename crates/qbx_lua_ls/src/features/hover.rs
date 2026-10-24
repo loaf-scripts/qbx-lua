@@ -3,10 +3,12 @@ use std::sync::Arc;
 use lsp_types::{Hover, HoverContents, HoverParams, Position};
 use qbx_fivem_data::{native, native_docs, Side};
 use qbx_lua_analysis::scope::{LocalId, LocalKind, Resolved};
-use qbx_lua_syntax::ast::{Expr, ExprKind};
+use qbx_lua_syntax::ast::{Chunk, Expr, ExprKind, Name, TableField};
+use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::{CommentKind, SmolStr, Span};
 use serde::{Deserialize, Serialize};
 
+use super::class_tables::typed_tables;
 use super::{lua_block, markdown, with_infer};
 use crate::callback_wrappers::{source_skip, target_of, Wrapper};
 use crate::document::Document;
@@ -269,8 +271,25 @@ fn value_overview(
 ) -> (String, Option<Vec<Type>>) {
     let bare = ty.without_nil();
     let owner = table_part(infer, &bare, 0);
-    let members = infer.members(&owner);
-    if members.is_empty() {
+    // An instance that `setmetatable` makes of a class from a table with fields of its own goes by
+    // the class, with the fields the class declares as it declares them, and the others after.
+    let (bare, owner, members) = match instance_parts(&owner) {
+        Some((class, own)) => {
+            let mut members = infer.members(&class);
+            let declared: Vec<SmolStr> = members.iter().map(|member| member.name.clone()).collect();
+            members.extend(infer.members(&Type::union(own)).into_iter().filter(|m| !declared.contains(&m.name)));
+            (class.clone(), class, members)
+        }
+        None => {
+            let members = infer.members(&owner);
+            (bare, owner, members)
+        }
+    };
+    // A value of several classes lists no fields, as one block would mix theirs, as those of a
+    // `vector3` with those of a `Camera`. The tables a file writes out merge, as they hold the same.
+    let several =
+        matches!(&owner, Type::Union(parts) if parts.iter().filter(|part| matches!(part, Type::Named(..))).count() > 1);
+    if members.is_empty() || several {
         let value = literal.map(|l| format!(" = {l}")).unwrap_or_default();
         return (format!("{prefix}{name}: {}{value}", shown_type(infer, ty)), None);
     }
@@ -280,6 +299,9 @@ fn value_overview(
     // as `number|ArrayLike<number>`, unless one is a table whose fields only the overview names.
     let label = match &bare {
         Type::Named(..) => format!("{bare}{optional} "),
+        Type::GlobalTable(path) if instance_class(path).is_some() => {
+            format!("{}{optional} ", instance_class(path).unwrap_or_default())
+        }
         Type::Union(types) if !types.iter().any(is_table_value) => format!("{ty} "),
         _ => String::new(),
     };
@@ -411,6 +433,20 @@ fn shown_type(infer: &Infer, ty: &Type) -> Type {
         },
         _ => ty.clone(),
     }
+}
+
+/// The class and the tables of its own of an instance that `setmetatable` makes of a class from a
+/// table with fields of its own, which `Infer::instance_type` gives as a union of them.
+fn instance_parts(ty: &Type) -> Option<(Type, Vec<Type>)> {
+    let Type::Union(types) = ty else { return None };
+    let is_class = |part: &&Type| match part {
+        Type::GlobalTable(path) => instance_class(path).is_some(),
+        other => matches!(other, Type::Named(..)),
+    };
+    let (classes, own): (Vec<&Type>, Vec<&Type>) = types.iter().partition(is_class);
+    let [class] = classes.as_slice() else { return None };
+    let held = !own.is_empty() && own.iter().all(|part| matches!(part, Type::Shape(_) | Type::Table));
+    held.then(|| ((*class).clone(), own.into_iter().cloned().collect()))
 }
 
 /// The parts of `ty` whose members a hover lists. `"male"|"female"`, or an alias of it, is shown as
@@ -639,6 +675,89 @@ fn native_hover(infer: &Infer, name: &str, side: Option<Side>) -> Option<String>
         out.push_str(&docs);
     }
     Some(out)
+}
+
+/// The hover of the key that a table constructor sets at `offset`, as the `entities` of
+/// `{ entities = {} }`: the field it fills of the type the table has to be, as reading the field
+/// shows it, or else the type of the value, as lua-language-server shows it.
+fn table_key_hover(infer: &Infer, detail: &mut Detail, doc: &Document, offset: u32) -> Option<(String, Span)> {
+    let mut finder = KeyFinder { offset, found: None };
+    finder.visit_block(&doc.chunk.block);
+    let (table, key, value) = finder.found?;
+    let owner = table_owner(infer, &doc.chunk, table);
+    let declared = owner.as_ref().and_then(|owner| Some((owner, infer.member(owner, &key.text)?)));
+    let text = match declared {
+        Some((owner @ Type::Named(..), info)) => member_hover(infer, detail, &info, owner),
+        Some((_, info)) => member_hover(infer, detail, &info, &Type::GlobalTable("%".into())),
+        None => {
+            let literal = matches!(
+                value.unparen().kind,
+                ExprKind::String(_) | ExprKind::Number(_) | ExprKind::True | ExprKind::False
+            );
+            let literal = literal.then(|| &doc.text[value.span.start as usize..value.span.end as usize]);
+            let ty = infer.expr(value).widen();
+            lua_block(&describe_value(infer, detail, "(field) ", &key.text, &ty, literal))
+        }
+    };
+    Some((text, key.span))
+}
+
+/// The key of a table constructor at an offset, with the innermost table that sets it and the value
+/// it is given.
+struct KeyFinder<'a> {
+    offset: u32,
+    found: Option<(&'a Expr, &'a Name, &'a Expr)>,
+}
+
+impl<'a> Visitor<'a> for KeyFinder<'a> {
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        if !expr.span.contains_inclusive(self.offset) {
+            return;
+        }
+        if let ExprKind::Table(fields) = &expr.kind {
+            for field in fields {
+                if let TableField::Named { name, value } = field {
+                    if name.span.contains_inclusive(self.offset) {
+                        self.found = Some((expr, name, value));
+                    }
+                }
+            }
+        }
+        visit::walk_expr(self, expr);
+    }
+}
+
+/// The type that the table constructor `table` has to be: the class or table type that where it is
+/// written declares, as `typed_tables` finds them, or the class that a `setmetatable` call it is
+/// given to makes it an instance of.
+fn table_owner(infer: &Infer, chunk: &Chunk, table: &Expr) -> Option<Type> {
+    let (classes, types) = typed_tables(infer, chunk);
+    if let Some(found) = classes.iter().find(|found| found.table.span == table.span) {
+        let name = TypeName { text: found.class.clone(), origin: Some(found.from) };
+        return Some(Type::Named(name, found.args.clone()));
+    }
+    if let Some(found) = types.iter().find(|found| found.table.span == table.span) {
+        return Some(found.ty.clone());
+    }
+    struct Setmetatable<'a> {
+        table: Span,
+        metatable: Option<&'a Expr>,
+    }
+    impl<'a> Visitor<'a> for Setmetatable<'a> {
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if let ExprKind::Call { callee, args, .. } = &expr.kind {
+                if callee.dotted_path().as_deref() == Some("setmetatable")
+                    && args.first().is_some_and(|first| first.unparen().span == self.table)
+                {
+                    self.metatable = args.get(1);
+                }
+            }
+            visit::walk_expr(self, expr);
+        }
+    }
+    let mut call = Setmetatable { table: table.span, metatable: None };
+    call.visit_block(&chunk.block);
+    infer.instances_made_by(call.metatable?)
 }
 
 /// The hover of the hash that a call of `Citizen.InvokeNative` is given at `offset`: that of the
@@ -1049,7 +1168,8 @@ pub fn hover(ws: &Workspace, doc: &Document, position: Position, level: u32) -> 
     let mut detail = Detail::new(level);
     let (text, span) = with_infer(ws, doc, |infer| {
         let Some(target) = target_at(infer, doc, offset) else {
-            return super::native_argument::hover(ws, doc, offset)
+            return table_key_hover(infer, &mut detail, doc, offset)
+                .or_else(|| super::native_argument::hover(ws, doc, offset))
                 .or_else(|| invoked_hover(infer, doc, offset))
                 .or_else(|| string_hover(ws, infer, doc, offset));
         };

@@ -42,6 +42,13 @@ Available features depend on the editor's LSP client.
 - Definitions, references and rename for locals, globals and fields, including static string
   keys such as `Config['name']` and supported `---@field` declarations.
 - Hover and definitions for the classes, aliases and enums named in LuaCATS annotations.
+- Hover on a key of a table constructor, as `entities` of `{ entities = {} }`, shows the field it
+  fills, with its description, of the class or table type the table has to be where it is written:
+  a `---@type` local or assignment, a parameter, a `return` under `@return`, or the class that
+  `setmetatable(table, Class)` makes it an instance of. A key that nothing declares shows the type
+  of its value. A value that `setmetatable` makes an instance of a class goes by the class, with the
+  fields the class declares as it declares them, and a value of several classes shows them as a
+  union without one list of their fields.
 - Go to type definition: the `---@class`, `---@alias` or `---@enum` of a value's type, through
   unions, arrays, `table<K, V>` and what a function returns, and the classes an alias of a union
   stands for. Go to implementation: where code sets a field or method, without the `---@field`

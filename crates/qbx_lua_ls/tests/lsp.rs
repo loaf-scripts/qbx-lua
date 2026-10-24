@@ -1153,7 +1153,8 @@ end
         ("flagged", &["flagged: string\n"]),
         ("flag in", &["flag: integer|boolean"]),
         ("k1", &["k1: string"]),
-        ("v1", &["coords: vector3", "type GarageKind ="]),
+        // A value of several classes lists none of their fields.
+        ("v1", &["v1: GarageKind|GaragePoint|Garage\n", "type GarageKind ="]),
         ("k2", &["k2: integer|string"]),
         ("v2", &["v2: string|integer"]),
         ("k3", &["k3: string"]),
@@ -3918,6 +3919,63 @@ print(found, groundZ, name, plain, tattoo)
         .find(|action| action["title"] == "Call through Citizen.InvokeNative")
         .expect("the fix is offered");
     assert_eq!(fix["isPreferred"], false);
+}
+
+#[test]
+fn table_keys_show_the_field_they_fill() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@class Thing
+---@field list number[] The numbers it holds
+---@field name string
+Thing = {}
+Thing.__index = Thing
+
+---@type Thing
+local typed = { list = {}, name = 'a' }
+
+---@param thing Thing
+local function use(thing) print(thing) end
+use({ list = {}, name = 'b' })
+
+---@return Thing
+local function make()
+    return { list = {}, name = 'c' }
+end
+
+---@return Thing
+function Thing:New()
+    local self = setmetatable({ list = {}, extra = 5 }, Thing)
+    return self -- instance
+end
+
+local plain = { list = {}, label = 'x' }
+---@type { size: integer }
+local shaped = { size = 1 }
+print(typed, make(), plain, shaped)
+";
+    client.open_with(CLIENT, text);
+    let hover = |client: &mut Client, needle: &str, delta: u32| {
+        let (l, c) = pos(text, needle, delta);
+        client.hover_text(CLIENT, l, c)
+    };
+    // Where the table is written declares what it has to be, or `setmetatable` makes it an instance.
+    for needle in ["list = {}, name = 'a'", "list = {}, name = 'b'", "list = {}, name = 'c'", "list = {}, extra"] {
+        let found = hover(&mut client, needle, 0);
+        assert!(found.contains("(field) Thing.list: number[]\n"), "{needle}: {found}");
+        assert!(found.contains("The numbers it holds"), "{needle}: {found}");
+    }
+    // A key that nothing declares has the type of its value, as lua-language-server shows it.
+    assert!(hover(&mut client, "extra = 5", 0).contains("(field) extra: integer = 5\n"));
+    assert!(hover(&mut client, "list = {}, label", 0).contains("(field) list: table\n"));
+    assert!(hover(&mut client, "label = 'x'", 0).contains("(field) label: string = 'x'\n"));
+    assert!(hover(&mut client, "size = 1", 0).contains("(field) size: integer\n"));
+
+    // An instance goes by its class, with the fields it declares as it declares them.
+    let instance = hover(&mut client, "self -- instance", 0);
+    assert!(instance.contains("local self: Thing {"), "{instance}");
+    assert!(instance.contains("list: number[],"), "{instance}");
+    assert!(instance.contains("extra: integer,"), "{instance}");
 }
 
 #[test]
@@ -14052,7 +14110,7 @@ print(addon, key, name)
         ("handler = Add", "handler: EventHandler {"),
         ("key, name", "key: integer\n"),
         ("name = handler", "name: string\n"),
-        ("size, transform, state, option", "size: vector {"),
+        ("size, transform, state, option", "size: vector\n"),
         ("transform, state, option", "transform: matrix<vector3>\n"),
         ("red, swizzle", "red: number\n"),
         ("swizzle, count", "swizzle: vector3 {"),

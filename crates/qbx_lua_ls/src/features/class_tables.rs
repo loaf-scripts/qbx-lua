@@ -1017,7 +1017,7 @@ pub struct TypedTable<'c> {
 
 /// The table constructors of `chunk` typed as a class, as `class_tables` finds them, together with
 /// those typed as a table type, and the class-typed ones that tables of such types hold.
-fn typed_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> (Vec<ClassTable<'c>>, Vec<TypedTable<'c>>) {
+pub(crate) fn typed_tables<'c>(infer: &Infer, chunk: &'c Chunk) -> (Vec<ClassTable<'c>>, Vec<TypedTable<'c>>) {
     let declared = Some(Declared::keeping_annotations(infer));
     let mut finder = Finder { declared, table_types: Some(Vec::new()), ..Finder::new(infer) };
     finder.visit_block(&chunk.block);

@@ -3076,6 +3076,16 @@ impl<'a> Infer<'a> {
         Type::union(held.into_iter().cloned().chain([class]).chain(owners.into_iter().cloned()))
     }
 
+    /// What a table that `setmetatable` gives `metatable` is an instance of, as `instance_type` takes
+    /// it: the class that the `__index` of the metatable gives, or the instances of its tables.
+    pub(crate) fn instances_made_by(&self, metatable: &Expr) -> Option<Type> {
+        match self.passed_index(metatable) {
+            index if index.is_unknown() => None,
+            index @ Type::Named(..) => Some(index),
+            other => Some(instances_of(other)),
+        }
+    }
+
     /// The tables that the `__index` of the metatable passed to a `setmetatable` call as `metatable`
     /// gives.
     fn passed_index(&self, metatable: &Expr) -> Type {
