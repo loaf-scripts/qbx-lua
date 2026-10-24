@@ -92,7 +92,7 @@ fn pretty(reports: &[FileReport], options: &Options) -> String {
         for located in locate(report, &index) {
             let d = located.diagnostic;
             counts[d.severity as usize] += 1;
-            fixable += usize::from(d.fix.is_some());
+            fixable += usize::from(d.fix.as_ref().is_some_and(|fix| !fix.suggestion));
             let location = palette.paint("1", &format!("{path}:{}:{}", located.line, located.col));
             let code = palette.paint("2", &format!("[{}]", d.code));
             writeln!(out, "{location}: {}{code}: {}", palette.severity(d.severity), d.message).unwrap();
@@ -168,7 +168,7 @@ fn json_report(reports: &[FileReport]) -> String {
                         "column": l.col,
                         "endLine": l.end_line,
                         "endColumn": l.end_col,
-                        "fixable": l.diagnostic.fix.is_some(),
+                        "fixable": l.diagnostic.fix.as_ref().is_some_and(|fix| !fix.suggestion),
                     })
                 })
                 .collect();

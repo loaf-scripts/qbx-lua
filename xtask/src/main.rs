@@ -9,6 +9,11 @@ mod references;
 const SOURCES: &[&str] =
     &["https://static.cfx.re/natives/natives.json", "https://static.cfx.re/natives/natives_cfx.json"];
 
+/// alloc8or's gta5-nativedb-data, which knows game natives with more parameters than FiveM declares,
+/// as the `float p1` of `SET_VEHICLE_ON_GROUND_PROPERLY`. Only the names and types of those
+/// parameters are taken from it, never its comments.
+const NATIVEDB: &str = "https://raw.githubusercontent.com/alloc8or/gta5-nativedb-data/master/natives.json";
+
 struct Native {
     side: char,
     ns: String,
@@ -61,6 +66,22 @@ fn generate_natives() {
         native.params = mark_optional(&native.params);
         if let Some(server) = &mut native.server {
             server.params = mark_optional(&server.params);
+        }
+    }
+    eprintln!("fetching {NATIVEDB}");
+    let body = ureq::get(NATIVEDB).call().expect("request failed").into_string_with_limit();
+    let game: Value = serde_json::from_str(&body).expect("invalid nativedb json");
+    let game_params: BTreeMap<String, &Vec<Value>> = game
+        .as_object()
+        .expect("namespace map")
+        .values()
+        .flat_map(|entries| entries.as_object().expect("native map"))
+        .filter_map(|(hash, native)| Some((hash.to_ascii_uppercase(), native["params"].as_array()?)))
+        .collect();
+    for native in natives.values_mut() {
+        if let Some(params) = game_params.get(&native.hash.to_ascii_uppercase()) {
+            let extra = game_extras(&native.params, params);
+            native.params.extend(extra);
         }
     }
 
@@ -281,6 +302,32 @@ fn mark_optional(params: &[(String, String)]) -> Vec<(String, String)> {
     params
 }
 
+/// The parameters that the game native takes after the `declared` ones of FiveM, as NativeDB lists
+/// them in `game`, written `+name`: FiveM's Lua wrapper does not pass them, and only
+/// `Citizen.InvokeNative` does. A pointer among them is written `+*name`, as a call has to give it
+/// a `Citizen.PointerValue*` marker.
+fn game_extras(declared: &[(String, String)], game: &[Value]) -> Vec<(String, String)> {
+    let mut extras = Vec::new();
+    for (index, param) in game.iter().enumerate().skip(declared.len()) {
+        let ty = param["type"].as_str().unwrap_or("Any").trim_start_matches("const ");
+        let mut name = sanitize_param(param["name"].as_str().unwrap_or("arg"));
+        let taken = |name: &str| {
+            declared
+                .iter()
+                .chain(&extras)
+                .any(|(other, _)| other.trim_start_matches(['+', '*', '&']).trim_end_matches('?') == name)
+        };
+        if taken(&name) {
+            name = format!("p{index}");
+        }
+        extras.push(match is_pointer(ty) {
+            true => (format!("+*{name}"), pointer_type(ty)),
+            false => (format!("+{name}"), lua_type(ty)),
+        });
+    }
+    extras
+}
+
 /// Mirrors the name mangling of the official FiveM Lua native codegen.
 fn lua_name(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase().replace("0x", "n_0x");
@@ -369,5 +416,20 @@ mod tests {
         assert_eq!(marked(&[("x", "number"), ("*z", "boolean"), ("w", "boolean")]), ["x", "*z", "w?"]);
         assert_eq!(marked(&[("x", "number"), ("a", "boolean"), ("&e?", "Entity")]), ["x", "a?", "&e?"]);
         assert_eq!(marked(&[("x", "number"), ("&b", "boolean")]), ["x", "&b"]);
+    }
+
+    #[test]
+    fn game_parameters_after_the_declared_ones_are_extras() {
+        let declared = [("vehicle".to_string(), "Vehicle".to_string())];
+        let game: Vec<Value> = serde_json::from_str(
+            r#"[{"type": "Vehicle", "name": "vehicle"}, {"type": "float", "name": "p1"},
+                {"type": "const char*", "name": "vehicle"}, {"type": "Vector3*", "name": "out"}]"#,
+        )
+        .unwrap();
+        let extras = game_extras(&declared, &game);
+        let expected = [("+p1", "number"), ("+p2", "string"), ("+*out", "vector3")];
+        let expected: Vec<(String, String)> = expected.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
+        assert_eq!(extras, expected, "a name that is taken is replaced by its position");
+        assert!(game_extras(&declared, &game[..1]).is_empty());
     }
 }

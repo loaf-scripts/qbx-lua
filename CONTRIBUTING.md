@@ -82,6 +82,10 @@ data endpoints:
 cargo xtask natives
 ```
 
+The generator also reads [NativeDB](https://github.com/alloc8or/gta5-nativedb-data) for the
+parameters that a game native takes beyond those FiveM declares, which `natives.tsv` writes
+`+name`. It takes only their names and types, never NativeDB's comments.
+
 The generator rejects a download that would reduce the native count by more than 10%. Inspect
 the data diff even when generation succeeds. The [natives workflow](.github/workflows/natives.yml)
 also proposes updates.

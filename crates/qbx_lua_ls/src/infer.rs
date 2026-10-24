@@ -6,6 +6,7 @@ use std::sync::Arc;
 use lsp_types::Range;
 use qbx_fivem_data::{native, Side};
 use qbx_lua_analysis::env::{argument_doc_anchor, leading_doc_lines, trailing_doc_line};
+use qbx_lua_analysis::invoke;
 use qbx_lua_analysis::scope::{LocalId, LocalKind, Resolution, Resolved};
 use qbx_lua_analysis::side_guard::SideRegions;
 use qbx_lua_syntax::ast::*;
@@ -672,7 +673,7 @@ pub struct Infer<'a> {
 pub(crate) const NATIVE_HANDLE_TYPES: &[&str] =
     &["Vehicle", "Ped", "Entity", "Object", "Player", "Hash", "Cam", "Blip", "Pickup", "ScrHandle", "FireId"];
 
-fn native_type(name: &str) -> Type {
+pub(crate) fn native_type(name: &str) -> Type {
     if NATIVE_HANDLE_TYPES.contains(&name) {
         return Type::Handle(SmolStr::new(name));
     }
@@ -777,6 +778,18 @@ impl<'a> Infer<'a> {
     /// Whether the resource of the file calls the fxv2 natives; see `ResourceEntry::uses_fxv2_natives`.
     pub fn uses_fxv2_natives(&self) -> bool {
         self.index.resource_of(self.ctx.file).is_some_and(ResourceEntry::uses_fxv2_natives)
+    }
+
+    /// The native that a call of `base` with `args` invokes by its hash, as
+    /// `Citizen.InvokeNative(0x49733E92263139D1, vehicle)` invokes `SetVehicleOnGroundProperly`,
+    /// read as `read_native` reads it, when `base` is the runtime's `Citizen.InvokeNative`.
+    pub fn invoked_native(&self, base: &Expr, args: &[Expr]) -> Option<qbx_fivem_data::Native> {
+        let ExprKind::Field { base: root, .. } = &base.kind else { return None };
+        let ExprKind::Name(root) = &root.kind else { return None };
+        if !matches!(self.ctx.resolution.resolve_at(root.span.start), Some(Resolved::Global(_))) {
+            return None;
+        }
+        invoke::invoked_native(base, args).map(|native| self.read_native(native))
     }
 
     /// `native` as this file reads its parameters: with `strict`, a call passes each but the pointer
@@ -3585,6 +3598,9 @@ impl<'a> Infer<'a> {
         if method.is_none() && matches!(base.dotted_path().as_deref(), Some("tonumber" | "tostring")) {
             return Some(1);
         }
+        if method.is_none() && invoke::is_invoker(base) {
+            return invoke::returned(args).map(|values| values.len());
+        }
         if method.is_none() && base.dotted_path().as_deref() == Some("table.unpack") {
             if let Some(values) = self.unpacked(args) {
                 return (!values.is_empty()).then_some(values.len());
@@ -3655,6 +3671,14 @@ impl<'a> Infer<'a> {
                 (Some(name @ ("pcall" | "xpcall")), Some(_)) => {
                     if let Some(returned) = self.protected_call(args, if name == "pcall" { 1 } else { 2 }) {
                         return returned;
+                    }
+                }
+                (Some("Citizen.InvokeNative" | "Citizen.InvokeNative2"), Some(_)) => {
+                    if let Some(values) = invoke::returned(args) {
+                        return Returned {
+                            values: values.into_iter().map(invoked_value).collect(),
+                            ..only(Type::Nil, true)
+                        };
                     }
                 }
                 (Some("table.unpack"), Some(_)) => match self.unpacked(args) {
@@ -5526,6 +5550,19 @@ pub fn assigned_value(
             Some(last) if last.is_multi_value() => value_at(multi(last), index + 1 - exprs.len()).unwrap_or_default(),
             _ => Type::Nil,
         },
+    }
+}
+
+/// The type of a value that a call of `Citizen.InvokeNative` returns: the result of the native as an
+/// integer, or `false` for 0, unless a marker asks for it as another value.
+fn invoked_value(value: invoke::ReturnedValue) -> Type {
+    match value {
+        invoke::ReturnedValue::Default => Type::union([Type::Integer, Type::BooleanLit(false)]),
+        invoke::ReturnedValue::As(invoke::Value::Integer) => Type::Integer,
+        invoke::ReturnedValue::As(invoke::Value::Float) => Type::Number,
+        invoke::ReturnedValue::As(invoke::Value::String) => Type::String,
+        invoke::ReturnedValue::As(invoke::Value::Vector) => Type::named("vector3"),
+        invoke::ReturnedValue::As(invoke::Value::Object) => Type::Any,
     }
 }
 

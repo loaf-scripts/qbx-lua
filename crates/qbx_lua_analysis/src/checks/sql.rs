@@ -290,7 +290,7 @@ fn report(input: &FileInput, sink: &mut Sink, word: &str, span: Span) {
         TextEdit { span: Span::new(span.start, span.start), new_text: "`".to_string() },
         TextEdit { span: Span::new(span.end, span.end), new_text: "`".to_string() },
     ];
-    let fix = Fix { title: format!("Quote '{word}' with backticks"), edits };
+    let fix = Fix { title: format!("Quote '{word}' with backticks"), edits, suggestion: false };
     sink.report_with(code, span, message, None, Some(fix));
 }
 

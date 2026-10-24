@@ -645,6 +645,36 @@ argument only when it is the native's one pointer and comes last, as an optional
 like the `entity` of `GetEntityPlayerIsFreeAimingAt(player, entity)`. Natives that release a handle,
 such as `DeleteEntity`, still need theirs.
 
+`Citizen.InvokeNative`, and the client's `Citizen.InvokeNative2`, call the native whose hash they
+are given, written as a number or a string, as `0x49733E92263139D1`, and pass each argument after
+it as it is. Such a call takes the parameters of that native in the order the game declares them,
+which hover and signature help show on the hash:
+
+- Each pointer, including those the Lua wrapper fills, takes a `Citizen.PointerValue*` marker of
+  its type, such as `Citizen.PointerValueFloat()` for the `groundZ` of `GetGroundZFor_3dCoord`, a
+  null pointer, or a string or table, which passes a pointer to its data, as a struct buffer does.
+  Pointer markers after a last parameter that is a pointer fill the struct it points to, one for
+  each field, as for `GetPedHeadBlendData`. No other parameter takes a marker. `Citizen.ResultAs*`
+  and `Citizen.ReturnResultAnyway()` fill no parameter.
+- A hash parameter takes no string, which nothing hashes, and a string parameter no number or
+  boolean, which nothing turns into text. A vector fills a number parameter for each of its parts.
+- `missing-parameter` reports a call that leaves out what the Lua wrapper may not leave out, or a
+  pointer, as FiveM passes 0 for each value left out. `redundant-parameter` reports values past
+  the last parameter.
+- The call returns the result of the native as an integer, or `false` for 0, unless a
+  `Citizen.ResultAs*` marker asks for another type, and then the value of each pointer, without the
+  result unless such a marker or `Citizen.ReturnResultAnyway()` asks for it.
+
+A call with a hash that no native has, such as one of RedM, is not checked.
+
+Some game natives take more parameters than FiveM declares, which its Lua wrapper does not pass,
+as the `p1` of `SetVehicleOnGroundProperly`. Their names and types come from
+[NativeDB](https://github.com/alloc8or/gta5-nativedb-data). A call of `Citizen.InvokeNative` may
+pass them, or leave them out, and hover on the native names them. A call of the Lua function that
+passes them gets a `redundant-parameter` finding that says so, and the editor offers to call the
+native through `Citizen.InvokeNative`, with the result marker that the Lua function passes, when
+the function converts none of its arguments.
+
 The functions natives call back take the parameters their documentation gives: the handler of
 `RegisterCommand` takes `source: integer, args: string[], rawCommand: string`, and those of
 `AddStateBagChangeHandler`, `AddConvarChangeListener`, `RegisterConsoleListener` and
@@ -1623,7 +1653,9 @@ with comments the printer cannot place are retained verbatim. Syntax errors also
 whose findings `--min-severity` leaves out, such as the removal of the whitespace `trailing-space`
 reports at the end of lines. The candidate output must parse before it is written. A source file
 that changed after analysis is not overwritten. Hash literal replacements are offered in value
-positions; a standalone `GetHashKey('adder')` call cannot become a bare hash statement.
+positions; a standalone `GetHashKey('adder')` call cannot become a bare hash statement. A fix that
+changes what the code does, such as calling a native through `Citizen.InvokeNative`, is only
+offered in the editor.
 
 Editing commands can process several files before encountering an error; they are not a
 transaction over the entire input. Review the resulting diff.

@@ -5,6 +5,7 @@ pub mod diagnostic;
 pub mod directives;
 pub mod env;
 pub mod glob;
+pub mod invoke;
 pub mod lint;
 pub mod locale;
 pub mod lua_ls_config;

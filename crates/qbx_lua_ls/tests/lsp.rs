@@ -3834,6 +3834,93 @@ print(GetDistanceBetweenCoords(x, y, z, table.unpack(vector2(1.0, 2.0))))
 }
 
 #[test]
+fn invoke_native_calls_the_native_of_its_hash() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local ped = PlayerPedId()
+local coords = GetEntityCoords(ped, false)
+local found, groundZ = Citizen.InvokeNative(0xC906A7DAB05C8D2B, coords, Citizen.PointerValueFloat(), false, \
+                Citizen.ReturnResultAnyway())
+local name = Citizen.InvokeNative(0x6D0DE6A7B5DA71F8, PlayerId(), Citizen.ResultAsString())
+local plain = Citizen.InvokeNative(0x49733E92263139D1, GetVehiclePedIsIn(ped, false), 5.0)
+Citizen.InvokeNative(0xC906A7DAB05C8D2B, 1.0, 2.0, 3.0, 0.5)
+Citizen.InvokeNative(0xC906A7DAB05C8D2B, 1.0, 2.0, 3.0, Citizen.PointerValueInt())
+Citizen.InvokeNative(0x9A294B2138ABB884, 'prop_bin_01a', 1.0, 2.0, 3.0)
+Citizen.InvokeNative(0x49733E92263139D1, Citizen.PointerValueInt())
+SetVehicleOnGroundProperly(GetVehiclePedIsIn(ped, false), 5.0)
+local buffer = string.rep('x', 64)
+local tattoo = Citizen.InvokeNative(0xFF56381874F82086, 3, 1, buffer)
+Citizen.InvokeNative(0x2746BD9D88C5C5D0, 1, Citizen.PointerValueIntInitialized(0))
+print(found, groundZ, name, plain, tattoo)
+";
+    client.open_with(CLIENT, text);
+    // What the call returns follows the markers it is given.
+    for (needle, expected) in [
+        ("found, groundZ", "local found: integer|false\n"),
+        ("groundZ = Citizen", "local groundZ: number\n"),
+        ("name = Citizen", "local name: string\n"),
+        ("plain = Citizen", "local plain: integer|false\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    // A string passes a pointer to its data, as a struct buffer, and a handle is an integer.
+    let line = |needle: &str| pos(text, needle, 0).0 as u64;
+    let mismatch = |needle: &str, message: &str| ("param-type-mismatch".to_string(), line(needle), message.to_string());
+    assert_eq!(
+        findings(&mut client, CLIENT, &["param-type-mismatch"]),
+        [
+            mismatch("3.0, 0.5", "Parameter `groundZ` is a pointer to `number`: pass `Citizen.PointerValueFloat()`"),
+            mismatch(
+                "3.0, Citizen.PointerValueInt",
+                "Pointer `groundZ` holds a `number`, which `Citizen.PointerValueInt()` does not mark: pass \
+                 `Citizen.PointerValueFloat()`"
+            ),
+            mismatch(
+                "'prop_bin_01a'",
+                "Cannot pass a string to parameter `modelHash` of type `Hash` through `Citizen.InvokeNative`, which does \
+                 not hash it: pass `` `prop_bin_01a` ``"
+            ),
+            mismatch(
+                "0x49733E92263139D1, Citizen.PointerValueInt",
+                "Parameter `vehicle` of type `Vehicle` is no pointer, but `Citizen.PointerValueInt()` passes one"
+            ),
+        ]
+    );
+
+    // The hash shows the native it calls, with the parameter that only the game native takes.
+    let (l, c) = pos(text, "0x49733E92263139D1, GetVehicle", 2);
+    let hover = client.hover_text(CLIENT, l, c);
+    assert!(hover.contains("function SetVehicleOnGroundProperly(vehicle: Vehicle): boolean"), "{hover}");
+    assert!(hover.contains("The game native also takes `p1: number`"), "{hover}");
+    let (l, c) = pos(text, "0x49733E92263139D1, GetVehicle", 20);
+    let help = client.request("textDocument/signatureHelp", client.position_params(CLIENT, l, c));
+    let label = help["signatures"][0]["label"].as_str().unwrap_or_default();
+    assert!(label.contains("hash: integer, vehicle: Vehicle, p1?: number"), "{label}");
+    let documentation = help["signatures"][0]["documentation"]["value"].as_str().unwrap_or_default();
+    assert!(documentation.starts_with("Calls `SetVehicleOnGroundProperly`."), "{documentation}");
+
+    // The value that the Lua function drops can go through `Citizen.InvokeNative`, which the editor
+    // offers, though as no preferred fix, as it changes what the call does.
+    client.diagnostics_for(CLIENT);
+    let uri = client.uri(CLIENT).to_string();
+    let diagnostics = client.diagnostics[&uri].clone();
+    let (l, _) = pos(text, "SetVehicleOnGroundProperly(GetVehicle", 0);
+    let actions = client.request(
+        "textDocument/codeAction",
+        json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": l, "character": 0 }, "end": { "line": l, "character": 0 } }, "context": { "diagnostics": diagnostics } }),
+    );
+    let fix = actions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["title"] == "Call through Citizen.InvokeNative")
+        .expect("the fix is offered");
+    assert_eq!(fix["isPreferred"], false);
+}
+
+#[test]
 fn values_that_a_spread_return_gives_have_its_type() {
     let mut client = Client::start(fixture_root());
     let text = "\

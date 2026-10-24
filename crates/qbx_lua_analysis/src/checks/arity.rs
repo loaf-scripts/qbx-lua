@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use qbx_fivem_data::{native, ArgKind, Native, ParamKind, Side, WrapperParam};
+use qbx_fivem_data::{native, ArgKind, InvokeParam, Native, ParamKind, Side, WrapperParam};
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::{NumberValue, SmolStr, Span};
@@ -10,7 +10,9 @@ use rustc_hash::FxHashMap;
 
 use super::crossfile::{passed_count, plural};
 use super::{FileInput, Sink};
+use crate::diagnostic::{Fix, TextEdit};
 use crate::env::{builtins, leading_doc_lines};
+use crate::invoke;
 use crate::project::ResourceEnv;
 use crate::rules;
 use crate::scope::{LocalId, LocalKind, Resolved};
@@ -150,6 +152,15 @@ impl<'i, 'a> Callees<'i, 'a> {
             return None;
         }
         self.runtime_native(&path, side)
+    }
+
+    /// The native that a call of `callee`, a function of `invoke::INVOKERS` whose root is `root`, with
+    /// `args` invokes by its hash, read as the file's `strict` reads it.
+    fn invoked_native(&self, callee: &Expr, root: &Name, args: &[Expr]) -> Option<Native> {
+        if !matches!(self.input.resolution.resolve_at(root.span.start)?, Resolved::Global(_)) {
+            return None;
+        }
+        invoke::invoked_native(callee, args).map(|native| native.strictly(self.input.config.strict()))
     }
 
     /// What `arg`, passed to a native, is: as the types of the language server tell, or else as its
@@ -333,12 +344,17 @@ impl Calls<'_, '_, '_, '_> {
         span: Span,
         display: &str,
     ) {
+        if let ExprKind::Call { callee, .. } = &call.kind {
+            if let Some(native) = self.callees.invoked_native(callee, root, args) {
+                return self.invoked(native, args, span, display);
+            }
+        }
         // Any definition or overload may be the one that runs.
         let Some(signatures) = self.callees.signatures(call, root, fields) else { return };
         let signatures: Vec<&FunType> = signatures.iter().map(|fun| fun.as_ref()).collect();
         let native = self.callees.native_called(call, root, fields);
         self.missing(&signatures, args, via_colon, span, display, native);
-        self.redundant(&signatures, args, via_colon, display);
+        self.redundant(&signatures, call, native, via_colon, display);
     }
 
     /// `missing-parameter`, for the signature that needs the fewest arguments. A call at the end
@@ -418,9 +434,89 @@ impl Calls<'_, '_, '_, '_> {
         (spread.filled, native.spread(&widest).filled)
     }
 
+    /// `missing-parameter` and `redundant-parameter` for a call of `Citizen.InvokeNative` that
+    /// invokes `native`, whose arguments after the hash fill the parameters that
+    /// `Native::invoke_params` lists: a result marker fills none, and a vector one for each of its
+    /// parts, as `Citizen.InvokeNative` spreads it whatever the manifest and `strict` say. A value of
+    /// no known kind for a number parameter may be a vector of up to four parts.
+    fn invoked(&mut self, native: Native, args: &[Expr], span: Span, display: &str) {
+        let params: Vec<InvokeParam> = native.invoke_params().collect();
+        // A table or a function takes a form that the Lua wrapper would make of it.
+        if params.iter().any(|param| matches!(param.kind, ParamKind::Object | ParamKind::Function)) {
+            return;
+        }
+        let passed = args.get(1..).unwrap_or_default();
+        let (mut filled, mut most, mut open, mut beyond) = (0, 0, false, None);
+        for (i, arg) in passed.iter().enumerate() {
+            let (least, widest) = match invoke::marker(arg) {
+                Some(marker) => (marker.slots(), marker.slots()),
+                None if i + 1 == passed.len() && arg.is_multi_value() => {
+                    let count = arg.is_call().then(|| self.callees.input.value_count.and_then(|count| count(arg)));
+                    let count = count.flatten();
+                    open = count.is_none();
+                    (count.unwrap_or(1), count.unwrap_or(1))
+                }
+                None => match self.callees.arg_kind(arg) {
+                    ArgKind::Vector(parts) => (usize::from(parts), usize::from(parts)),
+                    ArgKind::Unknown if params.get(filled).is_some_and(|param| param.ty == "number") => (1, 4),
+                    _ => (1, 1),
+                },
+            };
+            if least > 0 && filled >= params.len() && beyond.is_none() {
+                beyond = Some(i);
+            }
+            filled += least;
+            most += widest;
+        }
+        let name = native.name;
+        let required = params.iter().rposition(|param| !param.optional).map_or(0, |last| last + 1);
+        if let Some(param) = params[filled.min(required)..required].iter().find(|param| !param.optional) {
+            if !open && most < required {
+                let unset = if param.is_pointer() { "a null pointer" } else { "0" };
+                self.sink.report(
+                    rules::MISSING_PARAMETER,
+                    span,
+                    format!(
+                        "'{display}' passes {filled} value{} to '{name}', which needs {required}; '{}' ({}) will be {unset}",
+                        plural(filled),
+                        param.name,
+                        param.ty
+                    ),
+                );
+            }
+        }
+        // Pointer markers after a last parameter that is a pointer fill the struct it points to, as
+        // FiveM keeps the values of pointer markers next to each other: `GetPedHeadBlendData` takes
+        // one for each field.
+        let fields = params.last().is_some_and(InvokeParam::is_pointer)
+            && beyond.is_some_and(|i| passed[i..].iter().all(|arg| invoke::marker(arg).is_some()));
+        if let (Some(first), Some(last), false) = (beyond.map(|i| &passed[i]), passed.last(), fields) {
+            self.sink.report(
+                rules::REDUNDANT_PARAMETER,
+                first.span.to(last.span),
+                format!(
+                    "'{display}' passes {filled} value{} to '{name}', which takes at most {}",
+                    plural(filled),
+                    params.len()
+                ),
+            );
+        }
+    }
+
     /// `redundant-parameter`, for the signature that takes the most arguments, at the arguments
     /// after them. A call or `...` among those counts as one argument.
-    fn redundant(&mut self, signatures: &[&FunType], args: &[Expr], via_colon: bool, display: &str) {
+    /// For a call of a `native`, the arguments after them may go to the parameters that only the
+    /// game native takes, which the Lua wrapper drops but `Citizen.InvokeNative` passes, and the
+    /// call is offered as a call of it.
+    fn redundant(
+        &mut self,
+        signatures: &[&FunType],
+        call: &Expr,
+        native: Option<Native>,
+        via_colon: bool,
+        display: &str,
+    ) {
+        let (ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. }) = &call.kind else { return };
         let mut most = 0;
         for fun in signatures {
             let Some(count) = most_arguments(fun, via_colon) else { return };
@@ -431,11 +527,73 @@ impl Calls<'_, '_, '_, '_> {
             0 => "takes none".to_string(),
             most => format!("takes at most {most}"),
         };
-        self.sink.report(
-            rules::REDUNDANT_PARAMETER,
-            first.span.to(last.span),
-            format!("'{display}' is called with {} argument{}, but {takes}", args.len(), plural(args.len())),
-        );
+        let mut message =
+            format!("'{display}' is called with {} argument{}, but {takes}", args.len(), plural(args.len()));
+        let extras: Vec<InvokeParam> = native.iter().flat_map(Native::extra_params).collect();
+        let passed = extras.get(..args.len() - most).filter(|passed| !passed.is_empty());
+        let fix = match (native, passed) {
+            (Some(native), Some(passed)) => {
+                let named: Vec<String> =
+                    passed.iter().map(|param| format!("`{}` ({})", param.name, param.ty)).collect();
+                message.push_str(&format!(
+                    ": FiveM's Lua function drops the rest, though the game native also takes {}, which \
+                     `Citizen.InvokeNative` passes",
+                    listed(&named)
+                ));
+                self.invoke_fix(call, native, passed)
+            }
+            _ => None,
+        };
+        self.sink.report_with(rules::REDUNDANT_PARAMETER, first.span.to(last.span), message, None, fix);
+    }
+
+    /// The fix that calls `native` through `Citizen.InvokeNative`, which passes its arguments to the
+    /// `extras` that only the game native takes as well, and returns what the Lua wrapper returns,
+    /// as the result marker the wrapper passes tells: none for a `BOOL`, which the default gives.
+    /// The wrapper converts no argument of such a call: it fills no pointer, and hashes no string
+    /// for a `Hash` and turns no other value into text for a `string`.
+    fn invoke_fix(&self, call: &Expr, native: Native, extras: &[InvokeParam]) -> Option<Fix> {
+        let ExprKind::Call { callee, args, style: CallStyle::Paren, .. } = &call.kind else { return None };
+        if extras.iter().any(InvokeParam::is_pointer) {
+            return None;
+        }
+        for (param, arg) in native.wrapper_params().zip(args) {
+            let kind = self.callees.arg_kind(arg);
+            let unchanged = match param.kind {
+                ParamKind::Value => true,
+                ParamKind::Hash => kind != ArgKind::String,
+                ParamKind::String => matches!(kind, ArgKind::String | ArgKind::Zero),
+                ParamKind::Object | ParamKind::Function | ParamKind::Pointer | ParamKind::Filled => false,
+            };
+            if !unchanged {
+                return None;
+            }
+        }
+        let marker = match native.returns_result().then(|| native.returns().next()).flatten() {
+            None | Some("boolean" | "any") => None,
+            Some("number") => Some("Citizen.ResultAsFloat()"),
+            Some("string") => Some("Citizen.ResultAsString()"),
+            Some("vector3") => Some("Citizen.ResultAsVector()"),
+            Some("table") => return None,
+            Some(_) => Some("Citizen.ResultAsInteger()"),
+        };
+        let mut edits = vec![
+            TextEdit { span: callee.span, new_text: "Citizen.InvokeNative".into() },
+            TextEdit { span: Span::empty(args.first()?.span.start), new_text: format!("{}, ", native.hash) },
+        ];
+        if let Some(marker) = marker {
+            edits.push(TextEdit { span: Span::empty(args.last()?.span.end), new_text: format!(", {marker}") });
+        }
+        Some(Fix { title: "Call through Citizen.InvokeNative".into(), edits, suggestion: true })
+    }
+}
+
+/// `names` listed as a sentence does, as "`x`, `y` and `z`".
+fn listed(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 

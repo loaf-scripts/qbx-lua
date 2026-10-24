@@ -45,7 +45,8 @@
 
 use std::sync::Arc;
 
-use qbx_fivem_data::{ArgKind, Native, ParamKind, Passed, Spread, WrapperParam};
+use qbx_fivem_data::{ArgKind, InvokeParam, Native, ParamKind, Passed, Spread, WrapperParam};
+use qbx_lua_analysis::invoke;
 use qbx_lua_analysis::scope::{LocalKind, Resolved};
 use qbx_lua_analysis::signature::{most_arguments, Requirement};
 use qbx_lua_syntax::ast::*;
@@ -57,7 +58,7 @@ use super::class_tables::Classes;
 use super::comparisons::Declared;
 use super::unknown_types::is_typed;
 use crate::index::{FileId, FileOrigin};
-use crate::infer::{substitute, Infer, NATIVE_HANDLE_TYPES};
+use crate::infer::{native_type, substitute, Infer, NATIVE_HANDLE_TYPES};
 use crate::types::{FunType, Param, Type};
 
 /// Each argument whose parameter does not take it, with the message naming both types, also among
@@ -125,6 +126,14 @@ impl<'c> Visitor<'c> for Calls<'_, '_> {
 
 impl Calls<'_, '_> {
     fn check(&mut self, call: &Expr, base: &Expr, method: Option<&Name>, args: &[Expr]) {
+        if let Some(native) = method.is_none().then(|| self.infer.invoked_native(base, args)).flatten() {
+            if self.unknowns.is_none() {
+                let values: Vec<Type> = args.iter().map(|arg| self.value(arg)).collect();
+                let found = self.invoke_mismatches(native, args, &values);
+                self.out.extend(found);
+            }
+            return;
+        }
         // A native's arguments are checked as the runtime converts them, which `no-unknown` leaves out.
         let native = match method {
             None if !args.is_empty() => self.declared.native_called(base),
@@ -307,6 +316,88 @@ impl Calls<'_, '_> {
         out
     }
 
+    /// Each argument after the hash of a call of `Citizen.InvokeNative` that the parameter of
+    /// `native` it fills does not take, as `Citizen.InvokeNative` passes it as it is: a pointer
+    /// takes a `Citizen.PointerValue*` marker of its type, or a null pointer, and no other parameter
+    /// takes a marker; a hash parameter takes no string, which nothing hashes, and a string
+    /// parameter no number or boolean, which nothing turns into text; a vector fills a number
+    /// parameter for each of its parts. The values after one of no known kind for a number
+    /// parameter are not checked, as it may be a vector.
+    fn invoke_mismatches(&self, native: Native, args: &[Expr], values: &[Type]) -> Vec<(Span, String)> {
+        let params: Vec<InvokeParam> = native.invoke_params().collect();
+        if params.iter().any(|param| matches!(param.kind, ParamKind::Object | ParamKind::Function)) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut slot = 0;
+        for (arg, given) in args.iter().zip(values).skip(1) {
+            let marker = invoke::marker(arg);
+            if matches!(marker, Some(invoke::Marker::Result(_) | invoke::Marker::ResultAnyway)) {
+                continue;
+            }
+            let Some(param) = params.get(slot) else { break };
+            let kind = native_arg_kind(self.infer, &self.declared, arg);
+            let pointer = pointer_marker(param.ty);
+            let message = match (marker, param.is_pointer()) {
+                (Some(invoke::Marker::Pointer(value)), true) if Some(value) != pointer.map(|(value, _)| value) => {
+                    Some(format!(
+                        "Pointer `{}` holds a `{}`, which `{}` does not mark{}",
+                        param.name,
+                        param.ty,
+                        source_text(self.infer.ctx.source, arg),
+                        pointer.map(|(_, marker)| format!(": pass `{marker}`")).unwrap_or_default()
+                    ))
+                }
+                (Some(_), true) => None,
+                (Some(_), false) => Some(format!(
+                    "Parameter `{}` of type `{}` is no pointer, but `{}` passes one",
+                    param.name,
+                    param.ty,
+                    source_text(self.infer.ctx.source, arg)
+                )),
+                // A string or a table passes a pointer to its data, as a struct buffer does.
+                (None, true) if !matches!(kind, ArgKind::Vector(_)) && !is_number_or_boolean(given) => None,
+                (None, true) => Some(format!(
+                    "Parameter `{}` is a pointer to `{}`{}",
+                    param.name,
+                    param.ty,
+                    pointer.map_or(", which takes a pointer marker".to_string(), |(_, marker)| format!(
+                        ": pass `{marker}`"
+                    ))
+                )),
+                (None, false) => match (param.kind, kind) {
+                    (_, ArgKind::Unknown) if param.ty == "number" && args.len() - 1 < params.len() => break,
+                    (_, ArgKind::Vector(parts)) if param.ty == "number" => {
+                        slot += usize::from(parts) - 1;
+                        None
+                    }
+                    (ParamKind::Hash, ArgKind::String) => Some(format!(
+                        "Cannot pass a string to parameter `{}` of type `Hash` through `Citizen.InvokeNative`, which \
+                         does not hash it: pass {}",
+                        param.name,
+                        arg.as_string().map_or("its hash".to_string(), |name| format!("`` `{name}` ``"))
+                    )),
+                    (ParamKind::String, ArgKind::Value)
+                        if !matches!(given.without_nil(), Type::String | Type::StringLit(_)) =>
+                    {
+                        Some(format!(
+                            "Cannot pass `{given}` to parameter `{}` of type `string` through `Citizen.InvokeNative`, \
+                             which does not turn it into text",
+                            param.name
+                        ))
+                    }
+                    _ => {
+                        let param = Param { name: param.name.into(), ty: native_type(param.ty), ..Param::default() };
+                        native_mismatch(&self.classes, &param, arg, given, self.infer.strict())
+                    }
+                },
+            };
+            out.extend(message.map(|message| (arg.span, message)));
+            slot += 1;
+        }
+        out
+    }
+
     /// What is wrong with spreading the vector `args[i]` of `parts` parts over the parameters of
     /// `native`, its signature `fun`, from the one `spread` sends it to: too few parameters left for
     /// its `x`, `y` and `z`, one that takes no number, or a parameter after it that the runtime gives
@@ -418,6 +509,23 @@ pub fn native_arg_kind(infer: &Infer, declared: &Declared, arg: &Expr) -> ArgKin
 }
 
 /// `names` listed as a sentence does, as "`x`, `y` and `z`".
+/// Whether a value of type `given` is a number, a handle or a boolean, which is no pointer.
+fn is_number_or_boolean(given: &Type) -> bool {
+    matches!(given.without_nil().widen(), Type::Number | Type::Integer | Type::Boolean | Type::Handle(_))
+}
+
+/// The marker that a pointer to a value of type `ty` takes in a call of `Citizen.InvokeNative`, and
+/// what it holds: a float for a `number`, a vector for a `vector3`, and an integer for an integer, a
+/// boolean, a handle or a hash.
+fn pointer_marker(ty: &str) -> Option<(invoke::Value, &'static str)> {
+    match ty {
+        "number" => Some((invoke::Value::Float, "Citizen.PointerValueFloat()")),
+        "vector3" => Some((invoke::Value::Vector, "Citizen.PointerValueVector()")),
+        "string" | "table" => None,
+        _ => Some((invoke::Value::Integer, "Citizen.PointerValueInt()")),
+    }
+}
+
 fn listed(names: &[String]) -> String {
     match names {
         [] => String::new(),

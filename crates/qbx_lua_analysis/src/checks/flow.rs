@@ -337,7 +337,7 @@ impl Flow<'_, '_> {
                 "the loop never runs: it counts up from {first} to {last}; did you mean `{first}, {last}, {negative}`?"
             )
         };
-        let fix = Fix { title: format!("Count down with a step of {negative}"), edits: vec![edit] };
+        let fix = Fix { title: format!("Count down with a step of {negative}"), edits: vec![edit], suggestion: false };
         let span = start.span.to(step.unwrap_or(limit).span);
         self.sink.report_with(rules::COUNT_DOWN_LOOP, span, message, None, Some(fix));
     }

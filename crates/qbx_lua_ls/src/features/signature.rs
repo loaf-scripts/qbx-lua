@@ -1,6 +1,7 @@
 use lsp_types::{Documentation, ParameterInformation, ParameterLabel, Position, SignatureHelp, SignatureInformation};
 use qbx_fivem_data::native_docs;
 use qbx_lua_analysis::scope::Resolved;
+use qbx_lua_analysis::signature::invoke_signature;
 use qbx_lua_syntax::ast::{ExprKind, Name, StmtKind};
 
 use super::event_call::{event_call, wrapper_call};
@@ -18,6 +19,16 @@ pub fn signature_help(ws: &Workspace, doc: &Document, position: Position) -> Opt
     let located = locate(&doc.chunk, offset);
     let site = located.call?;
     with_infer(ws, doc, |infer| {
+        // A call of `Citizen.InvokeNative` takes the parameters of the native whose hash it is given.
+        if let Some(native) = site.method.is_none().then(|| infer.invoked_native(site.base, site.args)).flatten() {
+            let name = site.base.dotted_path().unwrap_or_default();
+            let note = format!("Calls `{}`.", native.name);
+            let documentation = native_docs(native.name).map_or(note.clone(), |docs| format!("{note}\n\n{docs}"));
+            let argument = site.active_argument(&doc.text, offset);
+            let signature = information(infer, &invoke_signature(native), &name, argument, false, Some(&documentation));
+            let active_parameter = signature.active_parameter;
+            return Some(SignatureHelp { signatures: vec![signature], active_signature: Some(0), active_parameter });
+        }
         let resolved = infer.callee_fun(site.base, site.method);
         let callee = resolved.as_ref().map(|(fun, _)| fun.as_ref());
         let event = site

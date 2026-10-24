@@ -40,6 +40,7 @@ pub fn check_manifest(input: &ManifestInput) -> Vec<Diagnostic> {
                 Fix {
                     title: "Enable lua54".into(),
                     edits: vec![TextEdit { span: entry.span, new_text: "'yes'".into() }],
+                    suggestion: false,
                 },
             ),
             (None, anchor) => {
@@ -50,6 +51,7 @@ pub fn check_manifest(input: &ManifestInput) -> Vec<Diagnostic> {
                     Fix {
                         title: "Add lua54 'yes'".into(),
                         edits: vec![TextEdit { span: Span::empty(at), new_text: text }],
+                        suggestion: false,
                     },
                 )
             }

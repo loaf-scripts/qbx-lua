@@ -36,6 +36,26 @@ pub struct WrapperParam {
     pub kind: ParamKind,
 }
 
+/// A parameter of a native as `Citizen.InvokeNative` passes it; see `Native::invoke_params`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvokeParam {
+    pub name: &'static str,
+    pub ty: &'static str,
+    /// Whether a call may leave it out, which FiveM then fills with 0.
+    pub optional: bool,
+    /// What it takes, as the Lua wrapper would take it: `Filled` and `Pointer` are pointers, which
+    /// take a `Citizen.PointerValue*` marker.
+    pub kind: ParamKind,
+    /// Whether only the game native takes it, which FiveM does not declare.
+    pub extra: bool,
+}
+
+impl InvokeParam {
+    pub fn is_pointer(&self) -> bool {
+        matches!(self.kind, ParamKind::Filled | ParamKind::Pointer)
+    }
+}
+
 impl WrapperParam {
     /// How many argument slots the native reads for it: three for a `vector3`, and the data and the
     /// length of a table.

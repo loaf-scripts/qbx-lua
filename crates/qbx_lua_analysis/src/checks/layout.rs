@@ -136,8 +136,11 @@ fn trailing_spaces(input: &FileInput, lines: &LineIndex, sink: &mut Sink) {
             continue;
         }
         let message = if code.is_empty() { "line contains only whitespace" } else { "trailing whitespace" };
-        let fix =
-            Fix { title: "Remove trailing whitespace".into(), edits: vec![TextEdit { span, new_text: String::new() }] };
+        let fix = Fix {
+            title: "Remove trailing whitespace".into(),
+            edits: vec![TextEdit { span, new_text: String::new() }],
+            suggestion: false,
+        };
         sink.report_with(rules::TRAILING_SPACE, span, message, None, Some(fix));
     }
 }

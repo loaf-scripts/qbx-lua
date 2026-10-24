@@ -9,7 +9,7 @@ pub use references::{
     control, controls, ped_config_flag, ped_config_flags, Control, PedConfigFlag, CONTROLS_SOURCE_URL,
     PED_CONFIG_FLAGS_SOURCE_URL,
 };
-pub use spread::{ArgKind, Misplaced, ParamKind, Passed, Spread, WrapperParam};
+pub use spread::{ArgKind, InvokeParam, Misplaced, ParamKind, Passed, Spread, WrapperParam};
 
 static NATIVES: &str = include_str!("../data/natives.tsv");
 #[cfg(feature = "docs")]
@@ -116,7 +116,8 @@ impl Native {
     /// wrapper takes `&name`, and one it fills `*name`.
     pub fn wrapper_params(&self) -> impl Iterator<Item = WrapperParam> {
         let (native, strict) = (self.name, self.strict);
-        self.params.split(',').filter_map(|p| p.split_once(':')).map(move |(name, ty)| {
+        let declared = self.params.split(',').filter(|p| !p.starts_with('+'));
+        declared.filter_map(|p| p.split_once(':')).map(move |(name, ty)| {
             let (name, filled) = name.strip_prefix('*').map_or((name, false), |name| (name, true));
             let (name, taken) = name.strip_prefix('&').map_or((name, false), |name| (name, true));
             let (name, optional) = name.strip_suffix('?').map_or((name, false), |name| (name, true));
@@ -134,6 +135,38 @@ impl Native {
             };
             WrapperParam { name, ty, optional, kind }
         })
+    }
+
+    /// The parameters that `Citizen.InvokeNative` passes to the native, each argument as it is
+    /// given: those of its Lua wrapper, with the pointers the wrapper fills, and then those that
+    /// only the game native takes. A call has to give each pointer a `Citizen.PointerValue*`
+    /// marker, and may leave out what the wrapper may leave out, as FiveM fills the arguments a
+    /// call leaves out with 0, and each parameter that only the game takes.
+    pub fn invoke_params(&self) -> impl Iterator<Item = InvokeParam> {
+        let declared = self.wrapper_params().map(|param| InvokeParam {
+            name: param.name,
+            ty: param.ty,
+            optional: param.optional && !matches!(param.kind, ParamKind::Filled | ParamKind::Pointer),
+            kind: param.kind,
+            extra: false,
+        });
+        let extras = self.params.split(',').filter_map(|p| p.strip_prefix('+')?.split_once(':'));
+        declared.chain(extras.map(|(name, ty)| {
+            let (name, pointer) = name.strip_prefix('*').map_or((name, false), |name| (name, true));
+            let kind = match ty {
+                _ if pointer => ParamKind::Filled,
+                "Hash" => ParamKind::Hash,
+                "string" => ParamKind::String,
+                _ => ParamKind::Value,
+            };
+            InvokeParam { name, ty, optional: true, kind, extra: true }
+        }))
+    }
+
+    /// The parameters that only the game native takes, after those FiveM declares, which its Lua
+    /// wrapper does not pass, as the `p1` of `SetVehicleOnGroundProperly`. NativeDB lists them.
+    pub fn extra_params(&self) -> impl Iterator<Item = InvokeParam> {
+        self.invoke_params().filter(|param| param.extra)
     }
 
     /// Whether the first of `returns` is the result of the native, rather than the value of a
@@ -251,6 +284,31 @@ fn native_table() -> &'static LineTable {
 
 pub fn native(name: &str) -> Option<Native> {
     native_table().find(name).and_then(Native::from_line)
+}
+
+/// The native that `Citizen.InvokeNative` calls for `hash`: on the server, the server native of a
+/// name whose client native has another signature, when `hash` is its own.
+pub fn native_by_hash(hash: u64) -> Option<Native> {
+    static HASHES: OnceLock<std::collections::HashMap<u64, (usize, bool)>> = OnceLock::new();
+    let hashes = HASHES.get_or_init(|| {
+        let table = native_table();
+        let parse = |hash: &str| u64::from_str_radix(hash.strip_prefix("0x")?, 16).ok();
+        let mut hashes = std::collections::HashMap::new();
+        for index in 0..table.starts.len() {
+            let Some(native) = Native::from_line(table.line(index)) else { continue };
+            // An alias shares the hash of the native it names.
+            if let Some(hash) = parse(native.hash).filter(|_| native.alias_of.is_none()) {
+                hashes.insert(hash, (index, false));
+            }
+            if let Some(hash) = native.server.and_then(|(hash, ..)| parse(hash)) {
+                hashes.insert(hash, (index, true));
+            }
+        }
+        hashes
+    });
+    let &(index, server) = hashes.get(&hash)?;
+    let native = Native::from_line(native_table().line(index))?;
+    Some(if server { native.on(Some(Side::Server)) } else { native })
 }
 
 pub fn natives() -> impl Iterator<Item = Native> {
@@ -446,6 +504,35 @@ mod tests {
             native("GetEntityPlayerIsFreeAimingAt").unwrap().signature_returning(&["1|false", "Entity"]),
             "function GetEntityPlayerIsFreeAimingAt(player: Player, entity?: Entity): 1|false, Entity"
         );
+    }
+
+    #[test]
+    fn invoke_native_passes_the_parameters_the_game_takes() {
+        let params = |native: Native| {
+            native.invoke_params().map(|p| (p.name, p.ty, p.optional, p.is_pointer(), p.extra)).collect::<Vec<_>>()
+        };
+        // NativeDB knows a parameter that FiveM does not declare, which the Lua wrapper does not pass.
+        let ground = native("SetVehicleOnGroundProperly").unwrap();
+        assert_eq!(params(ground), [("vehicle", "Vehicle", false, false, false), ("p1", "number", true, false, true)]);
+        assert_eq!(ground.signature(), "function SetVehicleOnGroundProperly(vehicle: Vehicle): boolean");
+        assert_eq!(ground.extra_params().map(|p| p.name).collect::<Vec<_>>(), ["p1"]);
+        // Pointers take a marker, so a call leaves none out, but it may leave out trailing booleans.
+        let aiming = native("GetEntityPlayerIsFreeAimingAt").unwrap();
+        assert_eq!(
+            params(aiming),
+            [("player", "Player", false, false, false), ("entity", "Entity", false, true, false)]
+        );
+        let size = native("GetGroupSize").unwrap();
+        assert_eq!(params(size)[1], ("unknown", "integer", false, true, false));
+        let coords = native("GetEntityCoords").unwrap();
+        assert_eq!(params(coords)[1], ("alive", "boolean", true, false, false));
+        assert!(!params(coords.strictly(true))[1].2);
+        // A native is found by the hash that `Citizen.InvokeNative` takes, and the server native of a
+        // name by its own.
+        assert_eq!(native_by_hash(0x49733E92263139D1).map(|n| n.name), Some("SetVehicleOnGroundProperly"));
+        let server = native_by_hash(0x332169F5).unwrap();
+        assert_eq!((server.name, server.side), ("GetAllVehicles", Side::Server));
+        assert!(native_by_hash(0x1234).is_none());
     }
 
     #[test]

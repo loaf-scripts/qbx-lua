@@ -50,6 +50,9 @@ pub const SOURCE: &str = "qbx-lint";
 pub struct FixData {
     pub title: String,
     pub edits: Vec<(lsp_types::Range, String)>,
+    /// Whether it changes what the code does, so that it is no preferred fix; see `Fix::suggestion`.
+    #[serde(default)]
+    pub suggestion: bool,
 }
 
 /// The diagnostic settings of the editor, which apply where the configuration file leaves them out.
@@ -329,6 +332,7 @@ pub(crate) fn diagnostics_with_support(
             let fix = d.fix.as_ref().map(|fix| FixData {
                 title: fix.title.clone(),
                 edits: fix.edits.iter().map(|e| (range(e.span), e.new_text.clone())).collect(),
+                suggestion: fix.suggestion,
             });
             Diagnostic {
                 range: range(d.span),

@@ -38,6 +38,9 @@ pub struct TextEdit {
 pub struct Fix {
     pub title: String,
     pub edits: Vec<TextEdit>,
+    /// Whether only the editor offers it, as it changes what the code does: `apply_fixes`, and so
+    /// `qbx-lint --fix`, leaves it out.
+    pub suggestion: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -50,9 +53,10 @@ pub struct Diagnostic {
     pub fix: Option<Fix>,
 }
 
-/// Applies non-overlapping fixes to `source`; fixes that overlap an earlier one are skipped.
+/// Applies non-overlapping fixes to `source`; fixes that overlap an earlier one are skipped, and so
+/// are suggestions.
 pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic]) -> (String, usize) {
-    let mut fixes: Vec<&Fix> = diagnostics.iter().filter_map(|d| d.fix.as_ref()).collect();
+    let mut fixes: Vec<&Fix> = diagnostics.iter().filter_map(|d| d.fix.as_ref()).filter(|f| !f.suggestion).collect();
     fixes.sort_by_key(|f| f.edits.iter().map(|e| e.span.start).min().unwrap_or(0));
 
     let mut edits: Vec<&TextEdit> = Vec::new();

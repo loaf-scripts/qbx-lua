@@ -78,6 +78,19 @@ pub fn native_signature(native: Native) -> Arc<FunType> {
     Arc::new(FunType { params: params.collect(), ..FunType::default() })
 }
 
+/// The signature of `Citizen.InvokeNative` for a call that invokes `native`: its hash, and then the
+/// parameters that `Native::invoke_params` lists, each pointer with the type of the value it holds.
+pub fn invoke_signature(native: Native) -> Arc<FunType> {
+    let hash = Param { name: "hash".into(), ty: parse_type("integer"), ..Param::default() };
+    let params = native.invoke_params().map(|param| Param {
+        name: param.name.into(),
+        ty: parse_type(param.ty),
+        optional: param.optional,
+        ..Param::default()
+    });
+    Arc::new(FunType { params: std::iter::once(hash).chain(params).collect(), ..FunType::default() })
+}
+
 /// The variable an `a.b.c` or `a['b']` chain starts from, and the field names after it.
 pub fn member_path(expr: &Expr) -> Option<(&Name, Vec<&str>)> {
     let (base, field) = match &expr.kind {

@@ -624,11 +624,30 @@ fn native_hover(infer: &Infer, name: &str, side: Option<Side>) -> Option<String>
         native.namespace,
         native.hash
     ));
+    let extras: Vec<String> = native.extra_params().map(|param| format!("`{}: {}`", param.name, param.ty)).collect();
+    if !extras.is_empty() {
+        out.push_str(&format!(
+            "\n\nThe game native also takes {}, which FiveM's Lua function does not pass, but \
+             `Citizen.InvokeNative({}, ...)` does, as [NativeDB](https://github.com/alloc8or/gta5-nativedb-data) lists \
+             its parameters.",
+            extras.join(", "),
+            native.hash
+        ));
+    }
     if let Some(docs) = native_docs(name) {
         out.push_str("\n\n");
         out.push_str(&docs);
     }
     Some(out)
+}
+
+/// The hover of the hash that a call of `Citizen.InvokeNative` is given at `offset`: that of the
+/// native it calls.
+fn invoked_hover(infer: &Infer, doc: &Document, offset: u32) -> Option<(String, Span)> {
+    let call = locate(&doc.chunk, offset).call?;
+    let hash = call.args.first().filter(|hash| hash.span.contains(offset))?;
+    let native = infer.invoked_native(call.base, call.args)?;
+    Some((native_hover(infer, native.name, Some(native.side))?, hash.span))
 }
 
 fn global_hover(
@@ -1030,7 +1049,9 @@ pub fn hover(ws: &Workspace, doc: &Document, position: Position, level: u32) -> 
     let mut detail = Detail::new(level);
     let (text, span) = with_infer(ws, doc, |infer| {
         let Some(target) = target_at(infer, doc, offset) else {
-            return super::native_argument::hover(ws, doc, offset).or_else(|| string_hover(ws, infer, doc, offset));
+            return super::native_argument::hover(ws, doc, offset)
+                .or_else(|| invoked_hover(infer, doc, offset))
+                .or_else(|| string_hover(ws, infer, doc, offset));
         };
         let called = called_overload(infer, doc, offset);
         let detail = &mut detail;

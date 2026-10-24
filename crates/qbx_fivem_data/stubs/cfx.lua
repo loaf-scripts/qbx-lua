@@ -38,7 +38,7 @@ function Citizen.Await(p) end
 ---@param text string|number
 function Citizen.Trace(text) end
 
----Calls a game native by hash. Arguments may include the pointer and result marker values produced by the other `Citizen.*` helpers.
+---Calls a game native by hash. Arguments may include the pointer and result marker values produced by the other `Citizen.*` helpers. Without a result marker, it returns the result as an integer, or `false` for 0.
 ---@param hash integer|string
 ---@param ... any
 ---@return any ...

@@ -119,6 +119,7 @@ impl FiveM<'_, '_> {
         let fix = Fix {
             title: format!("Replace with '{}'", name.text),
             edits: vec![TextEdit { span: expr.span, new_text: name.text.to_string() }],
+            suggestion: false,
         };
         self.sink.report_with(
             rules::CITIZEN_PREFIX,
@@ -140,6 +141,7 @@ impl FiveM<'_, '_> {
                     let fix = Fix {
                         title: "Convert to a compile-time hash literal".into(),
                         edits: vec![TextEdit { span: expr.span, new_text: format!("`{value}`") }],
+                        suggestion: false,
                     };
                     self.sink.report_with(
                         rules::HASH_LITERAL,
@@ -154,6 +156,7 @@ impl FiveM<'_, '_> {
                 let fix = Fix {
                     title: "Replace with PlayerPedId()".into(),
                     edits: vec![TextEdit { span: expr.span, new_text: "PlayerPedId()".into() }],
+                    suggestion: false,
                 };
                 self.sink.report_with(
                     rules::DEPRECATED_NATIVE_USAGE,

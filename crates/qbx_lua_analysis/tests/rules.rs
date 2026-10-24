@@ -1188,6 +1188,16 @@ fn call_messages_with(
     others: &[(Option<Side>, &str)],
     config: &FileConfig,
 ) -> Vec<String> {
+    call_diagnostics_with(code, source, side, others, config).into_iter().map(|d| d.message).collect()
+}
+
+fn call_diagnostics_with(
+    code: &str,
+    source: &str,
+    side: Option<Side>,
+    others: &[(Option<Side>, &str)],
+    config: &FileConfig,
+) -> Vec<Diagnostic> {
     let chunk = parse(source);
     let resolution = resolve(&chunk);
     let summary = summarize(source, &chunk, &resolution);
@@ -1225,7 +1235,7 @@ fn call_messages_with(
         native_arg: None,
         takes_query: None,
     };
-    check_file(&input).into_iter().filter(|d| d.code == code).map(|d| d.message).collect()
+    check_file(&input).into_iter().filter(|d| d.code == code).collect()
 }
 
 #[test]
@@ -2363,6 +2373,82 @@ fn calls_of_runtime_functions_and_natives_are_counted() {
             "'GetClosestVehicle' is called with 2 arguments, but needs 6; 'z' (number) will be nil",
         ]
     );
+}
+
+#[test]
+fn invoke_native_calls_count_the_values_the_native_of_their_hash_takes() {
+    let config = FileConfig::default();
+    let messages = |code: &str, source: &str| call_messages_with(code, source, Some(Side::Client), &[], &config);
+    let calls = "Citizen.InvokeNative(0x49733E92263139D1)
+                 Citizen.InvokeNative(0x49733E92263139D1, veh, 5.0, Citizen.ResultAsInteger())
+                 Citizen.InvokeNative('0x49733E92263139D1', veh)
+                 Citizen.InvokeNative(0x49733E92263139D1, veh, 5.0, 1)
+                 Citizen.InvokeNative(0xC906A7DAB05C8D2B, vector3(1.0, 2.0, 3.0), Citizen.PointerValueFloat(), false)
+                 Citizen.InvokeNative(0xC906A7DAB05C8D2B, 1.0, 2.0, 3.0)
+                 Citizen.InvokeNative(0x12345678, 1, 2, 3)
+                 Citizen.InvokeNative(0x2746BD9D88C5C5D0, ped, Citizen.PointerValueInt(), Citizen.PointerValueInt(),
+                     Citizen.PointerValueFloat())";
+    assert_eq!(
+        messages("missing-parameter", calls),
+        [
+            "'Citizen.InvokeNative' passes 0 values to 'SetVehicleOnGroundProperly', which needs 1; 'vehicle' (Vehicle) \
+             will be 0",
+            // A pointer takes a marker.
+            "'Citizen.InvokeNative' passes 3 values to 'GetGroundZFor_3dCoord', which needs 4; 'groundZ' (number) will be \
+             a null pointer",
+        ]
+    );
+    // The `p1` that only the game native takes counts, and a result marker fills nothing. Pointer
+    // markers after a last pointer fill the struct it points to, as those of `GetPedHeadBlendData`.
+    assert_eq!(
+        messages("redundant-parameter", calls),
+        ["'Citizen.InvokeNative' passes 3 values to 'SetVehicleOnGroundProperly', which takes at most 2"]
+    );
+}
+
+#[test]
+fn arguments_that_only_the_game_native_takes_are_passed_through_invoke_native() {
+    let config = FileConfig::default();
+    let diagnostics =
+        |source: &str| call_diagnostics_with("redundant-parameter", source, Some(Side::Client), &[], &config);
+    let source = "SetVehicleOnGroundProperly(veh, 5.0)\nprint(GetPedPropIndex(ped, 0, 1))";
+    let found = diagnostics(source);
+    assert_eq!(
+        found[0].message,
+        "'SetVehicleOnGroundProperly' is called with 2 arguments, but takes at most 1: FiveM's Lua function drops the \
+         rest, though the game native also takes `p1` (number), which `Citizen.InvokeNative` passes"
+    );
+    let rewritten = |fix: &qbx_lua_analysis::Fix| {
+        let mut out = source.to_string();
+        let mut edits: Vec<_> = fix.edits.iter().collect();
+        edits.sort_by_key(|edit| std::cmp::Reverse(edit.span.start));
+        for edit in edits {
+            out.replace_range(edit.span.start as usize..edit.span.end as usize, &edit.new_text);
+        }
+        out
+    };
+    let fixes: Vec<_> = found.iter().map(|d| d.fix.clone().unwrap()).collect();
+    assert!(fixes.iter().all(|fix| fix.suggestion && fix.title == "Call through Citizen.InvokeNative"));
+    assert_eq!(
+        rewritten(&fixes[0]),
+        "Citizen.InvokeNative(0x49733E92263139D1, veh, 5.0)\nprint(GetPedPropIndex(ped, 0, 1))"
+    );
+    // It returns what the Lua function returns.
+    assert_eq!(
+        rewritten(&fixes[1]),
+        "SetVehicleOnGroundProperly(veh, 5.0)\nprint(Citizen.InvokeNative(0x898CC20EA75BACD8, ped, 0, 1, \
+         Citizen.ResultAsInteger()))"
+    );
+    assert_eq!(apply_fixes(source, &found), (source.to_string(), 0), "`--fix` applies no suggestion");
+
+    // A model name that the Lua function would hash gets no fix, and more arguments than the game
+    // native takes no hint.
+    let object = diagnostics("CreateObjectNoOffset('prop_bin_01a', 1.0, 2.0, 3.0, true, true, false, 0)");
+    assert!(
+        object[0].message.ends_with("takes `p7` (any), which `Citizen.InvokeNative` passes") && object[0].fix.is_none()
+    );
+    let more = diagnostics("SetVehicleOnGroundProperly(veh, 5.0, 1)");
+    assert_eq!(more[0].message, "'SetVehicleOnGroundProperly' is called with 3 arguments, but takes at most 1");
 }
 
 #[test]

@@ -25,7 +25,7 @@ pub fn code_actions(doc: &Document, diagnostics: &[Diagnostic]) -> Vec<CodeActio
                 kind: Some(CodeActionKind::QUICKFIX),
                 diagnostics: Some(vec![diagnostic.clone()]),
                 edit: Some(edit_for(doc, edits)),
-                is_preferred: Some(true),
+                is_preferred: Some(!fix.suggestion),
                 ..CodeAction::default()
             }));
         }
