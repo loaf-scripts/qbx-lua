@@ -3788,6 +3788,52 @@ print(60 - now.sec, os.time(now), os.time({ year = 2024, month = 1, day = '2' })
 }
 
 #[test]
+fn table_unpack_gives_the_parts_of_a_vector_and_the_items_of_a_tuple() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local coords = GetEntityCoords(PlayerPedId(), false)
+local x, y, z, w = table.unpack(coords)
+---@type [number, string, boolean]
+local tuple = { 1.0, 'a', true }
+local n, s, b, rest = table.unpack(tuple)
+local second, third = table.unpack(tuple, 2)
+local only = table.unpack(tuple, 3, 3)
+local part = table.unpack(vector2(1.0, 2.0), 2)
+print(x, y, z, w, n, s, b, rest, second, third, only, part)
+print(AddBlipForCoord(table.unpack(coords)))
+print(GetDistanceBetweenCoords(x, y, z, table.unpack(vector2(1.0, 2.0))))
+";
+    client.open_with(CLIENT, text);
+    for (needle, expected) in [
+        ("x, y", "local x: number\n"),
+        ("w = table", "local w: unknown\n"),
+        ("n, s", "local n: number\n"),
+        ("s, b", "local s: string\n"),
+        ("b, rest", "local b: boolean\n"),
+        ("rest = table", "local rest: unknown\n"),
+        ("second, third", "local second: string\n"),
+        ("third = table", "local third: boolean\n"),
+        ("only = table", "local only: boolean\n"),
+        // The runtime gives all the parts of a vector, whatever `i` and `j` are.
+        ("part = table", "local part: number\n"),
+    ] {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+    let (line, _) = pos(text, "GetDistanceBetweenCoords", 0);
+    let distance = |needs: usize| {
+        let message = format!(
+            "'GetDistanceBetweenCoords' is called with 5 arguments, but needs {needs}; 'z2' (number) will be nil"
+        );
+        [("missing-parameter".to_string(), line as u64, message)]
+    };
+    assert_eq!(findings(&mut client, CLIENT, &["missing-parameter"]), distance(6));
+    client.set_strict(true);
+    assert_eq!(findings(&mut client, CLIENT, &["missing-parameter"]), distance(7));
+}
+
+#[test]
 fn values_that_a_spread_return_gives_have_its_type() {
     let mut client = Client::start(fixture_root());
     let text = "\
@@ -9923,6 +9969,7 @@ local spots = { vector3(1.0, 2.0, 3.0) }
 for _, spot in pairs(spots) do
     SetEntityCoords(ped, spot, false, false, false, true)
 end
+SetEntityCoords(ped, table.unpack(coords))
 ";
     let strict = "\
 local ped = PlayerPedId()
@@ -9937,6 +9984,7 @@ end
 local function place(target)
     SetEntityCoords(ped, target, false, false, false, true)
 end
+print(AddBlipForCoord(table.unpack(coords)))
 ";
     let resources = [("plain", "", plain), ("fxv2", "use_experimental_fxv2_oal 'yes'\n", fxv2), ("strict", "", strict)];
     for (name, entry, text) in resources {

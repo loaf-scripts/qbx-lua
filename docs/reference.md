@@ -512,8 +512,12 @@ number of arguments, so `missing-parameter` skips them, and qbx-lint skips those
 another call too. qbx-lua-ls counts the values such a call returns when each signature its function
 may use returns the same number of them and none ends with `...T`, so `setVolume(tonumber(x))`
 passes one argument, while a call of a function that returns a different number of values in an
-`@overload` may pass any number. Neither rule checks exports, or methods of objects returned by
-calls, such as `GetPlayer(source):setJob(job)`.
+`@overload` may pass any number. `table.unpack` returns the parts of a vector, each a `number`,
+which the runtime gives whatever `i` and `j` are, and the items of a tuple such as
+`[number, string]` from `i` through `j` when each is left out or written as an integer, so
+`SetEntityCoords(ped, table.unpack(coords))` passes four arguments for a `vector3`, with
+[`strict`](#strict-mode) and the fxv2 natives too. Neither rule checks exports, or methods of
+objects returned by calls, such as `GetPlayer(source):setJob(job)`.
 
 A native takes the parameters of its Lua wrapper, as the native that the call's side runs declares
 them: on the server, `GetEntityCoords` takes an entity alone. A call may leave out the trailing

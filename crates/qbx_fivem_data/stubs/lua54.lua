@@ -798,7 +798,7 @@ function table.remove(list, pos) end
 ---@param comp? fun(a: T, b: T): boolean
 function table.sort(list, comp) end
 
----Returns the elements `list[i]` through `list[j]` as multiple values; defaults are 1 and `#list`.
+---Returns the elements `list[i]` through `list[j]` as multiple values; defaults are 1 and `#list`. A vector or a quaternion gives all its parts, whatever `i` and `j` are.
 ---@generic T
 ---@param list T[]
 ---@param i? integer

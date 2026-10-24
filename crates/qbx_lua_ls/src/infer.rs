@@ -3585,6 +3585,11 @@ impl<'a> Infer<'a> {
         if method.is_none() && matches!(base.dotted_path().as_deref(), Some("tonumber" | "tostring")) {
             return Some(1);
         }
+        if method.is_none() && base.dotted_path().as_deref() == Some("table.unpack") {
+            if let Some(values) = self.unpacked(args) {
+                return (!values.is_empty()).then_some(values.len());
+            }
+        }
         let fun = match self.sided_definition(base, method, &CallArgs::new(args)) {
             Some(fun) => fun?,
             None => self.callee_fun(base, method)?.0,
@@ -3652,6 +3657,11 @@ impl<'a> Infer<'a> {
                         return returned;
                     }
                 }
+                (Some("table.unpack"), Some(_)) => match self.unpacked(args) {
+                    Some(values) if values.is_empty() => return Returned { nothing: true, ..only(Type::Nil, true) },
+                    Some(values) => return Returned { values, ..only(Type::Nil, true) },
+                    None => {}
+                },
                 // `tonumber(n)` gives back a number it is given, and `nil` only for another value.
                 (Some("tonumber"), Some(arg)) if args.len() == 1 => {
                     let ty = match self.expr(arg).widen() {
@@ -3730,6 +3740,39 @@ impl<'a> Infer<'a> {
             inferred: called.inferred.map(|values| after(Type::Boolean, &values)),
             annotated: called.annotated,
         })
+    }
+
+    /// What `table.unpack(list, i, j)` returns when `list` is a vector or a tuple: the parts of a
+    /// vector, each a `number`, which the runtime gives whatever `i` and `j` are, as
+    /// `table.unpack(coords)` gives the `x`, `y` and `z` of a `vector3`, or the items of a tuple
+    /// from `i` through `j`, when each is left out or written as an integer, as `[number, string]`
+    /// gives a `number` and a `string`. `None` for any other list.
+    fn unpacked(&self, args: &[Expr]) -> Option<Vec<Type>> {
+        let items = match self.expand_aliases(&self.expr(args.first()?), 0).without_nil() {
+            Type::Named(name, _) => {
+                let parts = match name.as_str() {
+                    "vector2" => 2,
+                    "vector3" => 3,
+                    "vector4" | "quat" => 4,
+                    _ => return None,
+                };
+                return Some(vec![Type::Number; parts]);
+            }
+            Type::Tuple(items) => items,
+            _ => return None,
+        };
+        let bound = |index: usize, default: i64| match args.get(index).map(|arg| &arg.unparen().kind) {
+            None | Some(ExprKind::Nil) => Some(default),
+            Some(ExprKind::Number(NumberValue::Int(bound))) => Some(*bound),
+            Some(_) => None,
+        };
+        let (first, last) = (bound(1, 1)?, bound(2, items.len() as i64)?);
+        // A range too long to list value by value.
+        if last - first >= 256 {
+            return None;
+        }
+        let item = |at: i64| usize::try_from(at - 1).ok().and_then(|at| items.get(at).cloned());
+        Some((first..=last).map(|at| item(at).unwrap_or(Type::Nil)).collect())
     }
 
     /// What `string.match`, `string.find` and `string.gmatch` return for a pattern written as a
