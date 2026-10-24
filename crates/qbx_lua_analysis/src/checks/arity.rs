@@ -95,7 +95,7 @@ impl<'i, 'a> Callees<'i, 'a> {
                 if defs.is_empty() {
                     defs = self.runtime_defs(&path, side);
                 } else {
-                    defs.extend(runtime_definition(&path, side));
+                    defs.extend(runtime_definition(&path, side, self.input.config.strict()));
                 }
                 // What `---@extend` lines add counts beside the definitions, so a native or a
                 // function the resource does not define keeps the signatures it has.
@@ -118,9 +118,8 @@ impl<'i, 'a> Callees<'i, 'a> {
     }
 
     /// The signatures of the runtime function at `path` that the workspace does not define: those
-    /// its stub declares, such as the `n` that `string.rep` requires, and with `strict` those of the
-    /// native of that name. Scripts leave out trailing native arguments, which FiveM passes as nil,
-    /// so natives are only checked in strict mode.
+    /// its stub declares, such as the `n` that `string.rep` requires, or else those of the native of
+    /// that name, whose optional parameters a call may leave out, fewer with `strict`.
     fn runtime_defs(&self, path: &str, side: Option<Side>) -> Vec<Option<Arc<FunType>>> {
         let stubs: Vec<_> = builtins().functions(path, side).map(|fun| Some(fun.clone())).collect();
         if !stubs.is_empty() {
@@ -129,14 +128,14 @@ impl<'i, 'a> Callees<'i, 'a> {
         self.runtime_native(path, side).map(|found| vec![Some(native_signature(found))]).unwrap_or_default()
     }
 
-    /// With `strict`, the native that a call of the global at `path` runs, when no stub declares a
-    /// runtime function of that name.
+    /// The native that a call of the global at `path` runs, when no stub declares a runtime function
+    /// of that name, read as the file's `strict` reads it.
     fn runtime_native(&self, path: &str, side: Option<Side>) -> Option<Native> {
-        if !self.input.config.strict() || builtins().functions(path, side).next().is_some() {
+        if builtins().functions(path, side).next().is_some() {
             return None;
         }
         let available = |found: &Native| found.side.is_available_on(side.unwrap_or(Side::Shared));
-        native(path).filter(available).map(|found| found.on(side))
+        native(path).filter(available).map(|found| found.on(side).strictly(self.input.config.strict()))
     }
 
     /// The native whose signature `signatures` gives a call of `root.fields`: a global that the
@@ -344,7 +343,8 @@ impl Calls<'_, '_, '_, '_> {
 
     /// `missing-parameter`, for the signature that needs the fewest arguments. A call at the end
     /// passes as many values as it gives, which only the language server tells. A vector passed to
-    /// a `native` fills a parameter for each of its parts where the runtime spreads it.
+    /// a `native` fills a parameter for each of its parts where the runtime spreads it, and one
+    /// with `strict`.
     fn missing(
         &mut self,
         signatures: &[&FunType],
@@ -396,10 +396,11 @@ impl Calls<'_, '_, '_, '_> {
 
     /// How many parameters of `native` `args` fill, and how many they may fill at most: the runtime
     /// spreads a vector over a parameter for each of its parts, unless the fxv2 natives read the
-    /// arguments, and an argument of no known kind for a number parameter may be a vector of up to
-    /// four parts.
+    /// arguments or `strict` reads them as the fxv2 natives do, and an argument of no known kind for
+    /// a number parameter may be a vector of up to four parts.
     fn native_filled(&self, native: Native, args: &[Expr]) -> (usize, usize) {
-        if self.callees.input.resource.is_some_and(|resource| resource.fxv2_natives) {
+        let fxv2 = self.callees.input.resource.is_some_and(|resource| resource.fxv2_natives);
+        if fxv2 || self.callees.input.config.strict() {
             return (args.len(), args.len());
         }
         let kinds: Vec<ArgKind> = args.iter().map(|arg| self.callees.arg_kind(arg)).collect();

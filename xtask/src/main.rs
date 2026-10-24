@@ -57,6 +57,12 @@ fn generate_natives() {
             }
         }
     }
+    for native in natives.values_mut() {
+        native.params = mark_optional(&native.params);
+        if let Some(server) = &mut native.server {
+            server.params = mark_optional(&server.params);
+        }
+    }
 
     let mut signatures = String::new();
     let mut docs = String::new();
@@ -252,6 +258,29 @@ fn same_signature(a: &Native, b: &Native) -> bool {
     a.returns == b.returns && types(a) == types(b)
 }
 
+/// `params` with the trailing booleans that a call may leave out written `name?`: the Lua wrapper
+/// passes a left-out argument on as nil, which the native reads as false. The first parameter is
+/// never left out, as a call that passes nothing has forgotten what it sets, and neither is a
+/// parameter before one that is no boolean.
+fn mark_optional(params: &[(String, String)]) -> Vec<(String, String)> {
+    let mut params = params.to_vec();
+    // The pointers that the wrapper fills take no argument.
+    let taken: Vec<usize> = (0..params.len()).filter(|&i| !params[i].0.starts_with('*')).collect();
+    for &i in taken.iter().skip(1).rev() {
+        let (name, ty) = &params[i];
+        // The pointer that the wrapper takes as an initial value is optional already, and one taken
+        // without `?` is a handle that the native releases.
+        if name.ends_with('?') {
+            continue;
+        }
+        if ty != "boolean" || name.starts_with('&') {
+            break;
+        }
+        params[i].0.push('?');
+    }
+    params
+}
+
 /// Mirrors the name mangling of the official FiveM Lua native codegen.
 fn lua_name(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase().replace("0x", "n_0x");
@@ -318,4 +347,27 @@ fn sanitize_param(name: &str) -> String {
 
 fn escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('\r', "").replace('\n', "\\n").replace('\t', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn marked(params: &[(&str, &str)]) -> Vec<String> {
+        let params: Vec<(String, String)> = params.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect();
+        mark_optional(&params).into_iter().map(|(name, _)| name).collect()
+    }
+
+    #[test]
+    fn trailing_booleans_after_the_first_parameter_are_optional() {
+        assert_eq!(marked(&[("ped", "Ped"), ("a", "boolean"), ("b", "boolean")]), ["ped", "a?", "b?"]);
+        assert_eq!(marked(&[("ped", "Ped"), ("n", "integer"), ("a", "boolean")]), ["ped", "n", "a?"]);
+        assert_eq!(marked(&[("ped", "Ped"), ("a", "boolean"), ("n", "integer")]), ["ped", "a", "n"]);
+        assert_eq!(marked(&[("a", "boolean"), ("b", "boolean")]), ["a", "b?"]);
+        assert_eq!(marked(&[("toggle", "boolean")]), ["toggle"], "a call has to pass something");
+        // Pointers: the wrapper fills `*` ones itself, and takes `&` ones without `?` as handles.
+        assert_eq!(marked(&[("x", "number"), ("*z", "boolean"), ("w", "boolean")]), ["x", "*z", "w?"]);
+        assert_eq!(marked(&[("x", "number"), ("a", "boolean"), ("&e?", "Entity")]), ["x", "a?", "&e?"]);
+        assert_eq!(marked(&[("x", "number"), ("&b", "boolean")]), ["x", "&b"]);
+    }
 }

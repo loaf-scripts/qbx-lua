@@ -395,7 +395,7 @@ fn reference_details_return_documentation_and_safe_lua_insertion_text() {
     assert_eq!(detail["side"], "shared");
     assert_eq!(detail["namespace"], "ENTITY");
     assert_eq!(detail["hash"], "0x3FEF770D40960D5A");
-    assert_eq!(detail["signature"], "function GetEntityCoords(entity: Entity, alive: boolean): vector3");
+    assert_eq!(detail["signature"], "function GetEntityCoords(entity: Entity, alive?: boolean): vector3");
     assert_eq!(
         detail["parameters"],
         json!([{ "name": "entity", "type": "Entity" }, { "name": "alive", "type": "boolean" }])
@@ -535,7 +535,7 @@ fn hover_shows_types_docs_and_natives() {
 
     let (l, c) = pos(&text, "GetEntityCoords", 3);
     let hover = client.hover_text(CLIENT, l, c);
-    assert!(hover.contains("function GetEntityCoords(entity: Entity, alive: boolean): vector3"), "{hover}");
+    assert!(hover.contains("function GetEntityCoords(entity: Entity, alive?: boolean): vector3"), "{hover}");
     assert!(hover.contains("native"), "{hover}");
 
     let (l, c) = pos(&text, "garage:getVehicleCount", 8);
@@ -9910,24 +9910,47 @@ local bin = GetClosestObjectOfType(coords, 2.0, 'prop_bin_01a', false, false, fa
 local hashed = GetClosestObjectOfType(coords, 2.0, `prop_bin_01a`, false, false, false)
 SetEntityHeading(ped, coords)
 print(found, groundZ, bin, hashed, GetDistanceBetweenCoords(coords, coords, true), AddBlipForCoord(spot))
-SetEntityCoords(ped, coords)
+print(GetClosestVehicle(coords, 5.0))
 ";
     let fxv2 = "\
 local ped = PlayerPedId()
 local coords = GetEntityCoords(ped, false)
 SetEntityCoords(ped, coords, false, false, false, true)
 SetEntityCoords(ped, coords.x, coords.y, coords.z, false, false, false, true)
+print(GetClosestVehicle(coords, 5.0, 0, 70))
+print(GetClosestObjectOfType(coords, 2.0, 'prop_bin_01a', false, false, false))
+local spots = { vector3(1.0, 2.0, 3.0) }
+for _, spot in pairs(spots) do
+    SetEntityCoords(ped, spot, false, false, false, true)
+end
 ";
-    for (name, entry, text) in [("plain", "", plain), ("fxv2", "use_experimental_fxv2_oal 'yes'\n", fxv2)] {
+    let strict = "\
+local ped = PlayerPedId()
+local coords = GetEntityCoords(ped, false)
+SetEntityCoords(ped, coords, false, false, false, true)
+SetEntityCoords(ped, coords.x, coords.y, coords.z, false, false, false, true)
+print(GetDistanceBetweenCoords(coords, coords, true))
+local spots = { vector3(1.0, 2.0, 3.0) }
+for _, spot in pairs(spots) do
+    SetEntityCoords(ped, spot, false, false, false, true)
+end
+local function place(target)
+    SetEntityCoords(ped, target, false, false, false, true)
+end
+";
+    let resources = [("plain", "", plain), ("fxv2", "use_experimental_fxv2_oal 'yes'\n", fxv2), ("strict", "", strict)];
+    for (name, entry, text) in resources {
         let dir = fixture.0.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         let manifest = format!("fx_version 'cerulean'\ngame 'gta5'\n{entry}client_script 'main.lua'\n");
         std::fs::write(dir.join("fxmanifest.lua"), manifest).unwrap();
         std::fs::write(dir.join("main.lua"), text).unwrap();
     }
+    std::fs::write(fixture.0.join("strict/qbxlint.toml"), "strict = true\n").unwrap();
     let mut client = Client::start(fixture.0.clone());
     client.open_with("plain/main.lua", plain);
     client.open_with("fxv2/main.lua", fxv2);
+    client.open_with("strict/main.lua", strict);
     let finding = |text: &str, code: &str, needle: &str, message: &str| {
         (code.to_string(), pos(text, needle, 0).0 as u64, message.to_string())
     };
@@ -9970,24 +9993,71 @@ SetEntityCoords(ped, coords.x, coords.y, coords.z, false, false, false, true)
     let vectors = "the fxv2 natives that `use_experimental_fxv2_oal` turns on do not spread vectors";
     assert_eq!(
         findings(&mut client, "fxv2/main.lua", &["param-type-mismatch"]),
-        [finding(
-            fxv2,
-            "param-type-mismatch",
-            "SetEntityCoords(ped, coords,",
-            &format!("Cannot assign `vector3` to parameter `xPos` of type `number`: {vectors}")
-        )]
+        [
+            finding(
+                fxv2,
+                "param-type-mismatch",
+                "SetEntityCoords(ped, coords,",
+                &format!("Cannot assign `vector3` to parameter `xPos` of type `number`: {vectors}")
+            ),
+            finding(
+                fxv2,
+                "param-type-mismatch",
+                "GetClosestVehicle(coords",
+                &format!("Cannot assign `vector3` to parameter `x` of type `number`: {vectors}")
+            ),
+            // The model name, which reaches `z`, is not reported too.
+            finding(
+                fxv2,
+                "param-type-mismatch",
+                "GetClosestObjectOfType(coords",
+                &format!("Cannot assign `vector3` to parameter `x` of type `number`: {vectors}")
+            ),
+            finding(
+                fxv2,
+                "param-type-mismatch",
+                "SetEntityCoords(ped, spot",
+                &format!("Cannot assign `vector3` to parameter `xPos` of type `number`: {vectors}")
+            ),
+        ]
+    );
+    // With `strict`, as the fxv2 natives take them, though the runtime spreads them here.
+    let unspread = "with `strict`, a vector is not spread, as the fxv2 natives do not spread it: pass its parts";
+    assert_eq!(
+        findings(&mut client, "strict/main.lua", &["param-type-mismatch"]),
+        [
+            finding(
+                strict,
+                "param-type-mismatch",
+                "SetEntityCoords(ped, coords,",
+                &format!("Cannot assign `vector3` to parameter `xPos` of type `number`: {unspread}")
+            ),
+            finding(
+                strict,
+                "param-type-mismatch",
+                "GetDistanceBetweenCoords(coords",
+                &format!("Cannot assign `vector3` to parameter `x1` of type `number`: {unspread}")
+            ),
+            // A vector that nothing declares, as what it holds.
+            finding(
+                strict,
+                "param-type-mismatch",
+                "SetEntityCoords(ped, spot",
+                &format!("Cannot assign `vector3` to parameter `xPos` of type `number`: {unspread}")
+            ),
+            // Not the booleans after `target`, of no known type, which may be a vector.
+        ]
     );
 
-    // With `strict`, the arguments of natives are counted with the parts of the vectors spread.
-    client.set_strict(true);
+    // The arguments of natives are counted with the parts of the vectors spread.
     assert_eq!(
         findings(&mut client, "plain/main.lua", &["missing-parameter"]),
         [finding(
             plain,
             "missing-parameter",
-            "SetEntityCoords(ped, coords)",
-            "'SetEntityCoords' is called with 2 arguments, which fill 4 parameters, but needs 8; 'alive' (boolean) will \
-             be nil"
+            "GetClosestVehicle(coords",
+            "'GetClosestVehicle' is called with 2 arguments, which fill 4 parameters, but needs 6; 'modelHash' (Hash) \
+             will be nil"
         )]
     );
     assert_eq!(
@@ -9995,9 +10065,38 @@ SetEntityCoords(ped, coords.x, coords.y, coords.z, false, false, false, true)
         [finding(
             fxv2,
             "missing-parameter",
-            "SetEntityCoords(ped, coords,",
-            "'SetEntityCoords' is called with 6 arguments, but needs 8; 'ragdollFlag' (boolean) will be nil"
+            "GetClosestVehicle(coords",
+            "'GetClosestVehicle' is called with 4 arguments, but needs 6; 'modelHash' (Hash) will be nil"
         )]
+    );
+    assert_eq!(
+        findings(&mut client, "strict/main.lua", &["missing-parameter"]),
+        [
+            finding(
+                strict,
+                "missing-parameter",
+                "SetEntityCoords(ped, coords,",
+                "'SetEntityCoords' is called with 6 arguments, but needs 8; 'ragdollFlag' (boolean) will be nil"
+            ),
+            finding(
+                strict,
+                "missing-parameter",
+                "GetDistanceBetweenCoords(coords",
+                "'GetDistanceBetweenCoords' is called with 3 arguments, but needs 7; 'x2' (number) will be nil"
+            ),
+            finding(
+                strict,
+                "missing-parameter",
+                "SetEntityCoords(ped, spot",
+                "'SetEntityCoords' is called with 6 arguments, but needs 8; 'ragdollFlag' (boolean) will be nil"
+            ),
+            finding(
+                strict,
+                "missing-parameter",
+                "SetEntityCoords(ped, target",
+                "'SetEntityCoords' is called with 6 arguments, but needs 8; 'ragdollFlag' (boolean) will be nil"
+            ),
+        ]
     );
 }
 
@@ -10657,12 +10756,14 @@ if other == true then return end
             .to_string()
         })
     };
-    let views = |result: &str| {
+    // Without `strict`, a call may leave out the boolean, which the native reads as `false`.
+    let views = |result: &str, strict: bool| {
+        let optional = if strict { "" } else { "?" };
         [
-            format!("function IsPedInAnyVehicle(ped: Ped, atGetIn: boolean): {result}"),
+            format!("function IsPedInAnyVehicle(ped: Ped, atGetIn{optional}: boolean): {result}"),
             format!("local inside: {result}"),
-            format!("IsPedInAnyVehicle(ped: Ped, atGetIn: boolean): {result}"),
-            format!("function IsPedInAnyVehicle(ped: Ped, atGetIn: boolean): {result}"),
+            format!("IsPedInAnyVehicle(ped: Ped, atGetIn{optional}: boolean): {result}"),
+            format!("function IsPedInAnyVehicle(ped: Ped, atGetIn{optional}: boolean): {result}"),
         ]
     };
     for (name, _, _) in resources {
@@ -10672,7 +10773,7 @@ if other == true then return end
     for (name, _, _) in resources {
         let file = format!("{name}/main.lua");
         assert_eq!(findings(&mut client, &file, &rules), [], "{name}: a `boolean` without strict");
-        assert_eq!(shown(&mut client, &file), views("boolean"), "{name}");
+        assert_eq!(shown(&mut client, &file), views("boolean", false), "{name}");
     }
 
     client.set_strict(true);
@@ -10691,7 +10792,7 @@ if other == true then return end
             ],
             "{name}: the Lua wrapper gives `1` or `false`"
         );
-        assert_eq!(shown(&mut client, &file), views("1|false"), "{name}");
+        assert_eq!(shown(&mut client, &file), views("1|false", true), "{name}");
     }
     assert_eq!(
         findings(&mut client, "fxv2/main.lua", &rules),
@@ -10701,7 +10802,7 @@ if other == true then return end
         ],
         "the fxv2 natives give `true` or `false`"
     );
-    assert_eq!(shown(&mut client, "fxv2/main.lua"), views("boolean"));
+    assert_eq!(shown(&mut client, "fxv2/main.lua"), views("boolean", true));
 }
 
 #[test]

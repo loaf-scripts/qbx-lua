@@ -1414,10 +1414,13 @@ fn calls_with_more_arguments_than_parameters() {
         "---@param a number\n---@overload fun(a: number, b: string)\nlocal function f(a) end\nf(1, 'x')",
         "local function f(a) end\nf = print\nf(1, 2)",
         "local function f(a) end\n---@diagnostic disable-next-line: redundant-parameter\nf(1, 2)",
-        "SetEntityCoords(PlayerPedId(), 1.0, 2.0, 3.0, false, false, false, true, 1)",
     ] {
         assert_eq!(redundant(source), Vec::<String>::new(), "{source}");
     }
+    assert_eq!(
+        redundant("SetEntityCoords(PlayerPedId(), 1.0, 2.0, 3.0, false, false, false, true, 1)"),
+        ["'SetEntityCoords' is called with 9 arguments, but takes at most 8"]
+    );
 }
 
 #[test]
@@ -1472,8 +1475,12 @@ fn signatures_added_with_extend_count_beside_the_definitions() {
     );
     assert!(redundant_parameters("OnAction('bulk', print, 1)", Some(Side::Server), &both).is_empty());
     assert!(
-        redundant_parameters("print(GetPlayerName(1, 2, 3))", Some(Side::Client), &both).is_empty(),
-        "a function nothing defines keeps the checks it has"
+        redundant_parameters("print(GetPlayerName(1, 2))", Some(Side::Client), &both).is_empty(),
+        "a native takes the signature beside its own"
+    );
+    assert_eq!(
+        redundant_parameters("print(GetPlayerName(1, 2, 3))", Some(Side::Client), &both),
+        ["'GetPlayerName' is called with 3 arguments, but takes at most 2"]
     );
 }
 
@@ -1487,8 +1494,6 @@ fn values_the_linter_cannot_follow_are_not_checked() {
         "local t = {}\n---@param a number\nfunction t.f(a) end\nt.f = nil\nt.f()",
         // A parameter holds whatever the caller passed.
         "---@param cb fun(a: number)\nlocal function run(cb) cb() end",
-        // Natives and runtime functions are not defined by the resource.
-        "SetEntityCoords(PlayerPedId(), 1.0, 2.0, 3.0)",
     ] {
         assert_eq!(missing(source), Vec::<String>::new(), "{source}");
     }
@@ -2303,7 +2308,7 @@ fn whitespace_at_the_end_of_lines() {
 }
 
 #[test]
-fn calls_of_runtime_functions_and_with_strict_natives_are_counted() {
+fn calls_of_runtime_functions_and_natives_are_counted() {
     let client = Some(Side::Client);
     assert_eq!(
         missing_parameters("print(string.rep())", client, &[]),
@@ -2313,38 +2318,105 @@ fn calls_of_runtime_functions_and_with_strict_natives_are_counted() {
         redundant_parameters("print(string.upper('a', 'b'))", client, &[]),
         ["'string.upper' is called with 2 arguments, but takes at most 1"]
     );
-    let natives = "print(GetEntityCoords())\nSetEntityCoords(1, 1.0, 2.0, 3.0)";
-    assert_eq!(missing_parameters(natives, client, &[]), Vec::<String>::new(), "scripts leave out native arguments");
+    let natives = "print(GetEntityCoords())\nprint(GetEntityRotation(1))";
+    let expected = [
+        "'GetEntityCoords' is called with 0 arguments, but needs 1; 'entity' (Entity) will be nil",
+        "'GetEntityRotation' is called with 1 argument, but needs 2; 'rotationOrder' (integer) will be nil",
+    ];
+    assert_eq!(missing_parameters(natives, client, &[]), expected);
+    assert_eq!(
+        redundant_parameters("print(GetPlayerPed(-1, true))", client, &[]),
+        ["'GetPlayerPed' is called with 2 arguments, but takes at most 1"]
+    );
+    let defined = [(client, "function GetEntityCoords() end")];
+    assert_eq!(
+        missing_parameters("print(GetEntityCoords())", client, &defined),
+        Vec::<String>::new(),
+        "a resource's own definition replaces the native"
+    );
+    // A vector fills a parameter for each of its parts, as the runtime spreads it, and an argument
+    // of no known kind may be a vector.
+    let vectors = "print(GetClosestVehicle(vector3(1, 2, 3), 5.0, 0, 70))
+                   print(GetClosestVehicle(vector3(1, 2, 3), 5.0))
+                   print(GetClosestVehicle(coords, 5.0, 0))
+                   print(GetClosestVehicle(pos.x, pos.y))";
+    assert_eq!(
+        missing_parameters(vectors, client, &[]),
+        [
+            "'GetClosestVehicle' is called with 2 arguments, which fill 4 parameters, but needs 6; 'modelHash' (Hash) will be nil",
+            // Values of no known kind that would leave parameters out even as vectors.
+            "'GetClosestVehicle' is called with 2 arguments, but needs 6; 'z' (number) will be nil",
+        ]
+    );
+    // With `strict`, each argument counts as one, as the fxv2 natives take them.
     let strict = {
         let mut config = FileConfig::default();
         config.set_strict_default(true);
         config
     };
     assert_eq!(
-        call_messages_with("missing-parameter", natives, client, &[], &strict),
-        [
-            "'GetEntityCoords' is called with 0 arguments, but needs 2; 'entity' (Entity) will be nil",
-            "'SetEntityCoords' is called with 4 arguments, but needs 8; 'alive' (boolean) will be nil",
-        ]
-    );
-    let defined = [(client, "function GetEntityCoords() end")];
-    assert_eq!(
-        call_messages_with("missing-parameter", "print(GetEntityCoords())", client, &defined, &strict),
-        Vec::<String>::new(),
-        "a resource's own definition replaces the native"
-    );
-    // A vector fills a parameter for each of its parts, as the runtime spreads it, and an argument
-    // of no known kind may be a vector.
-    let vectors = "SetEntityCoords(1, vector3(1, 2, 3), false, false, false, true)
-                   SetEntityCoords(1, vector3(1, 2, 3), false)
-                   SetEntityCoords(1, coords, false, false, false)
-                   SetEntityCoords(ped, pos.x, pos.y, pos.z)";
-    assert_eq!(
         call_messages_with("missing-parameter", vectors, client, &[], &strict),
         [
-            "'SetEntityCoords' is called with 3 arguments, which fill 5 parameters, but needs 8; 'deadFlag' (boolean) will be nil",
-            // Values of no known kind that would leave parameters out even as vectors.
-            "'SetEntityCoords' is called with 4 arguments, but needs 8; 'alive' (boolean) will be nil",
+            "'GetClosestVehicle' is called with 4 arguments, but needs 6; 'modelHash' (Hash) will be nil",
+            "'GetClosestVehicle' is called with 2 arguments, but needs 6; 'z' (number) will be nil",
+            "'GetClosestVehicle' is called with 3 arguments, but needs 6; 'radius' (number) will be nil",
+            "'GetClosestVehicle' is called with 2 arguments, but needs 6; 'z' (number) will be nil",
         ]
+    );
+}
+
+#[test]
+fn calls_may_leave_out_the_optional_parameters_of_natives() {
+    let client = Some(Side::Client);
+    // Booleans after the first parameter: the native reads the nil that the wrapper passes on as
+    // false.
+    let left_out = "print(GetEntityCoords(ped), GetVehiclePedIsIn(ped))
+                    SetEntityCoords(ped, 1.0, 2.0, 3.0)
+                    RegisterCommand('heal', function() end)
+                    SetNuiFocus(false)";
+    assert_eq!(missing_parameters(left_out, client, &[]), Vec::<String>::new());
+    // The first parameter, and those before one that is no boolean.
+    let needed = "SetNuiFocusKeepInput()
+                  print(GetEntityRotation(ped))
+                  print(GetResourceMetadata('res', 'version'))";
+    assert_eq!(
+        missing_parameters(needed, client, &[]),
+        [
+            "'SetNuiFocusKeepInput' is called with 0 arguments, but needs 1; 'keepInput' (boolean) will be nil",
+            "'GetEntityRotation' is called with 1 argument, but needs 2; 'rotationOrder' (integer) will be nil",
+            "'GetResourceMetadata' is called with 2 arguments, but needs 3; 'index' (integer) will be nil",
+        ]
+    );
+    assert_eq!(
+        missing_parameters("print(VerifyPasswordHash(password))", Some(Side::Server), &[]),
+        ["'VerifyPasswordHash' is called with 1 argument, but needs 2; 'hash' (string) will be nil"]
+    );
+
+    // With `strict`, a call passes each but the pointer that the wrapper takes as an initial value.
+    let strict = {
+        let mut config = FileConfig::default();
+        config.set_strict_default(true);
+        config
+    };
+    assert_eq!(
+        call_messages_with("missing-parameter", left_out, client, &[], &strict),
+        [
+            "'GetEntityCoords' is called with 1 argument, but needs 2; 'alive' (boolean) will be nil",
+            "'GetVehiclePedIsIn' is called with 1 argument, but needs 2; 'lastVehicle' (boolean) will be nil",
+            "'SetEntityCoords' is called with 4 arguments, but needs 8; 'alive' (boolean) will be nil",
+            "'RegisterCommand' is called with 2 arguments, but needs 3; 'restricted' (boolean) will be nil",
+            "'SetNuiFocus' is called with 1 argument, but needs 2; 'hasCursor' (boolean) will be nil",
+        ]
+    );
+    let pointer = "print(GetEntityPlayerIsFreeAimingAt(PlayerId()))";
+    assert_eq!(call_messages_with("missing-parameter", pointer, client, &[], &strict), Vec::<String>::new());
+    let defined = [(
+        client,
+        "---@param entity integer\n---@param alive boolean\n---@param extra number\nfunction GetEntityCoords(entity, alive, extra) end",
+    )];
+    assert_eq!(
+        call_messages_with("missing-parameter", "print(GetEntityCoords(ped))", client, &defined, &strict),
+        ["'GetEntityCoords' is called with 1 argument, but needs 2; 'alive' (boolean) will be nil"],
+        "the native keeps its signature beside a redefinition"
     );
 }

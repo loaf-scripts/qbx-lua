@@ -779,13 +779,20 @@ impl<'a> Infer<'a> {
         self.index.resource_of(self.ctx.file).is_some_and(ResourceEntry::uses_fxv2_natives)
     }
 
-    /// The signature of `native`, with the types of the values it returns as `native_return` reads
-    /// them.
+    /// `native` as this file reads its parameters: with `strict`, a call passes each but the pointer
+    /// that the wrapper takes as an initial value; see `Native::strictly`.
+    pub fn read_native(&self, native: qbx_fivem_data::Native) -> qbx_fivem_data::Native {
+        native.strictly(self.strict_natives)
+    }
+
+    /// The signature of `native`, with its parameters as `read_native` and the types of the values
+    /// it returns as `native_return` reads them.
     pub fn native_signature(&self, native: &qbx_fivem_data::Native) -> String {
+        let native = self.read_native(*native);
         let returns: Vec<String> = native
             .returns()
             .enumerate()
-            .map(|(index, ty)| self.native_return(native, index).map_or_else(|| ty.to_string(), |ty| ty.to_string()))
+            .map(|(index, ty)| self.native_return(&native, index).map_or_else(|| ty.to_string(), |ty| ty.to_string()))
             .collect();
         native.signature_returning(&returns.iter().map(String::as_str).collect::<Vec<_>>())
     }
@@ -1642,7 +1649,7 @@ impl<'a> Infer<'a> {
         match native(name) {
             Some(native) => {
                 let side = at.map_or(self.side, |at| self.side_at(at));
-                let native = native.on(side);
+                let native = self.read_native(native.on(side));
                 let mut fun = native_fun_type(&native);
                 for (index, ty) in fun.returns.iter_mut().enumerate() {
                     if let Some(returned) = self.native_return(&native, index) {

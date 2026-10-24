@@ -407,8 +407,10 @@ With `strict`:
 - `param-type-mismatch` counts the `nil` and `false` of a value read from a field or a key, as
   `self.handle` for a `handle? number`, which lua-language-server leaves out because it does not
   narrow fields, and so do `assign-type-mismatch` and `return-type-mismatch`. A native takes no
-  number or boolean for a string parameter, also one written out or a player's server id, and
-  numbers and booleans no longer pass for each other. See [Function arguments](#function-arguments).
+  number or boolean for a string parameter, also one written out or a player's server id, numbers
+  and booleans no longer pass for each other, and a vector is not spread over number parameters,
+  as the fxv2 natives do not spread it, so `SetEntityCoords(ped, coords)` has to pass
+  `coords.x, coords.y, coords.z`. See [Function arguments](#function-arguments).
 - A native documented as `boolean` returns what the runtime gives scripts, in hovers too. The
   generated Lua wrappers of natives give `1` or `false` for a `BOOL` result, so
   `IsPedInAnyVehicle(ped)` is a `1|false`, which a `boolean` parameter does not take and
@@ -418,6 +420,11 @@ With `strict`:
   fxv2 natives instead, which give `true` or `false` for both: there they are `boolean`, and
   `== 1` never equals them. Without `strict`, they are `boolean`, as in lua-language-server,
   and compare with `1` as well. See [Impossible comparisons](#impossible-comparisons).
+- `missing-parameter` and `param-type-mismatch` take every parameter of a native as required, in
+  hovers too, except the pointer that the Lua wrapper takes as an initial value, so
+  `GetEntityCoords(ped)` has to pass its `alive` as well, and a vector counts as one argument.
+  Without `strict`, a call may leave out the trailing booleans after the first parameter. See
+  [Function arguments](#function-arguments).
 - `assign-type-mismatch` reports `field = nil` for a field whose type does not allow `nil`. See
   [Return values](#return-values). A value stored through a union of classes has to fit the field
   of each of them, not only of one. See [Strict classes](#strict-classes).
@@ -427,13 +434,6 @@ With `strict`:
   of generic classes, as `promise` for a `TypedPromise<string>`, and of values that come through
   `exports`, as `exports.qbx_core:GetPlayerData()` for a local typed with a class of your own.
   lua-language-server compares neither, as it does not see exports.
-- `missing-parameter` and `redundant-parameter` also count the arguments of natives, as
-  `SetEntityCoords(ped, x, y, z)` leaves out four. FiveM passes `nil` for those, which scripts rely
-  on, so they are only reported in strict mode. A vector fills a parameter for each of its parts
-  where the runtime spreads it, as `param-type-mismatch` checks it, and a call with an argument of
-  no known type for a number parameter, which may be a vector, is only reported when it would leave
-  a parameter out even as a vector of four parts. qbx-lint, which reads no types, counts the
-  vectors that `vector3(...)` and the like or a native such as `GetEntityCoords` return.
 - `cast-local-type` reports clearing a local declared with a table, as `cache = nil` after
   `local cache = {}`, the `nil` or `false` of a field, as in `total = counter.count`, and a `nil`
   that no annotation declares, such as one a function without `@return` gives. It
@@ -489,8 +489,8 @@ functions are kept as they are.
 An `---@extend` line adds a signature to a function from another file, as
 [the language server's annotations](../crates/qbx_lua_ls/README.md#signatures-from-several-places)
 describe. Both rules count it beside the definitions of a global function or a field of a global
-table, for calls on the side of its file and of its `(server)` or `(client)` attribute. It adds
-nothing to a name the resource does not define, such as a native, which keeps the checks it has.
+table, for calls on the side of its file and of its `(server)` or `(client)` attribute. A name
+that nothing defines gets no signature from it, but a native takes it beside its own.
 
 Calls are checked when the function is:
 
@@ -499,7 +499,9 @@ Calls are checked when the function is:
   assignment types, also through an `@alias` or with `?`, whatever value it is given;
 - a global function defined by a script on the caller's side, or by one of its imports;
 - a field of a global table, or of a local table in the same file, that a `function Utils.round(x)`
-  or `function Utils:round(x)` statement or an assignment defines.
+  or `function Utils:round(x)` statement or an assignment defines;
+- a runtime function or a native that the resource does not define, as `string.rep` or
+  `GetEntityCoords`.
 
 A method defined with `:` and called with `.` needs `self` as its first argument. When a name has
 several definitions, for example a client and a server `Notify`, a call is compared with those its
@@ -510,9 +512,23 @@ number of arguments, so `missing-parameter` skips them, and qbx-lint skips those
 another call too. qbx-lua-ls counts the values such a call returns when each signature its function
 may use returns the same number of them and none ends with `...T`, so `setVolume(tonumber(x))`
 passes one argument, while a call of a function that returns a different number of values in an
-`@overload` may pass any number. Neither rule checks
-natives, runtime functions, exports, or methods of objects returned by calls, such as
-`GetPlayer(source):setJob(job)`.
+`@overload` may pass any number. Neither rule checks exports, or methods of objects returned by
+calls, such as `GetPlayer(source):setJob(job)`.
+
+A native takes the parameters of its Lua wrapper, as the native that the call's side runs declares
+them: on the server, `GetEntityCoords` takes an entity alone. A call may leave out the trailing
+parameters that the native's signature marks with `?`, which the wrapper passes on as `nil` and the
+native reads as 0 or `false`: the pointer that the wrapper takes as an initial value, as the
+`entity` of `GetEntityPlayerIsFreeAimingAt`, and the booleans after the first parameter, as the
+`alive` of `GetEntityCoords` or the `restricted` of `RegisterCommand`. The first parameter is
+always needed, so `SetNuiFocusKeepInput()` is reported, and so is every parameter before one that
+is no boolean, as the `rotationOrder` of `GetEntityRotation`. With [`strict`](#strict-mode), only
+the pointer may be left out. Hover and signature help show the marks. A vector fills a parameter
+for each of its parts where the runtime spreads it, as `param-type-mismatch` checks it, and a call
+with an argument of no known type for a number parameter, which may be a vector, is only reported
+when it would leave a parameter out even as a vector of four parts. qbx-lint, which reads no
+types, counts the vectors that `vector3(...)` and the like or a native such as `GetEntityCoords`
+return. With `strict`, and for the fxv2 natives, each argument counts as one.
 
 qbx-lua-ls also checks the payload of calls to `---@callback await` and `trigger` wrappers. The
 values passed in the wrapper's `...` go to the handler registered under the name the call passes,
@@ -594,9 +610,9 @@ Natives are checked as the runtime passes their arguments on:
   number. Other numbers and booleans are reported: `ReleaseNamedRendertarget(GetHashKey(name))`
   passes a hash, not the name.
 - With [`strict`](#strict-mode), as TypeScript reads the declared types, numbers and booleans no
-  longer pass for each other, and a string parameter takes no number or boolean at all, while `nil`,
-  hashed strings and vectors still pass, and so does a number for the server id of a player, which
-  only the native data calls a string.
+  longer pass for each other, a string parameter takes no number or boolean at all, and a vector is
+  not spread, as the last item tells, while `nil` and hashed strings still pass, and so does a
+  number for the server id of a player, which only the native data calls a string.
 - A hash parameter takes a string, which the wrappers hash.
 - A vector given for a number parameter fills one for each of its parts, as in
   `SetEntityCoords(ped, coords, ...)`, as the runtime spreads it. Each part has to go to a number
@@ -613,7 +629,11 @@ Natives are checked as the runtime passes their arguments on:
   may go to later parameters.
 - A resource whose `fxmanifest.lua` has a `use_experimental_fxv2_oal` entry, whatever its value,
   calls FiveM's fxv2 natives, which take each argument as its parameter and spread no vector, so
-  there a vector for a number parameter is reported.
+  there a vector for a number parameter is reported, and the arguments after it, which go to other
+  parameters than the call means, are not checked. A vector for a number parameter reads as `0`
+  there, so `SetEntityCoords(ped, coords)` moves the ped to 0, 0, 0. With
+  [`strict`](#strict-mode), the arguments of natives are read as the fxv2 natives take them, in
+  every resource: a vector for a number parameter is reported, so that its parts are passed.
 
 The values a native writes through its pointers are returned after its result, as FiveM's Lua
 wrappers return them: `local _, size = GetGroupSize(group)`. The wrappers take a pointer as an

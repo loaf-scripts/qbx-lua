@@ -50,14 +50,14 @@ pub fn undocumented(func: &FuncBody, is_method: bool) -> Arc<FunType> {
 }
 
 /// What the runtime defines at the dotted `path` for code on `side`, as one more definition of a
-/// global function: the signature of a function of the stubs or of a native, `Some(None)` for another
-/// runtime value, and `None` where the runtime defines nothing.
-pub fn runtime_definition(path: &str, side: Option<Side>) -> Option<Option<Arc<FunType>>> {
+/// global function: the signature of a function of the stubs or of a native, read `strict`ly or
+/// not, `Some(None)` for another runtime value, and `None` where the runtime defines nothing.
+pub fn runtime_definition(path: &str, side: Option<Side>, strict: bool) -> Option<Option<Arc<FunType>>> {
     if let Some(fun) = builtins().functions(path, side).next() {
         return Some(Some(fun.clone()));
     }
     if let Some(native) = native(path) {
-        return Some(Some(native_signature(native.on(side))));
+        return Some(Some(native_signature(native.on(side).strictly(strict))));
     }
     let defined = match path.split_once('.') {
         Some((table, field)) => builtins().get(table).is_some_and(|global| global.fields.contains(field)),

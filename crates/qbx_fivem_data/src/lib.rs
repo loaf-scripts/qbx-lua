@@ -48,6 +48,8 @@ pub struct Native {
     /// The hash, returned values and parameters of the server native of the same name, when they
     /// differ from those of the client one: `GetAllVehicles` returns a table on the server.
     server: Option<(&'static str, &'static str, &'static str)>,
+    /// Whether it is read as `strict` reads it; see `strictly`.
+    strict: bool,
 }
 
 impl Native {
@@ -68,7 +70,14 @@ impl Native {
             (Some(hash), Some(returns), Some(params)) => Some((hash, returns, params)),
             _ => None,
         };
-        Some(Self { name, side, namespace, hash, returns, params, alias_of, server })
+        Some(Self { name, side, namespace, hash, returns, params, alias_of, server, strict: false })
+    }
+
+    /// The native as `strict` reads it, when `strict` holds: every parameter is required but the
+    /// pointer that the wrapper takes as an initial value, as the native data declares no other
+    /// optional, and a call has to pass the `false` of a boolean that it may otherwise leave out.
+    pub fn strictly(self, strict: bool) -> Self {
+        Self { strict, ..self }
     }
 
     /// The native that code on `side` calls: on the server, the server native of the same name
@@ -92,9 +101,11 @@ impl Native {
         })
     }
 
-    /// `(name, type, optional)` triples of the parameters that the Lua wrapper takes. An optional
-    /// parameter is the pointer that the wrapper takes as an initial value, which nil leaves 0. A
-    /// function parameter has the LuaCATS type of `CALLBACK_TYPES` where that table gives one.
+    /// `(name, type, optional)` triples of the parameters that the Lua wrapper takes. A call may
+    /// leave out an optional parameter, which the native then reads as 0 or false: the pointer that
+    /// the wrapper takes as an initial value, and, unless the native is read `strictly`, the
+    /// trailing booleans after the first parameter. A function parameter has the LuaCATS type of
+    /// `CALLBACK_TYPES` where that table gives one.
     pub fn params(&self) -> impl Iterator<Item = (&'static str, &'static str, bool)> {
         let params = self.wrapper_params().filter(|param| param.kind != ParamKind::Filled);
         params.map(|param| (param.name, param.ty, param.optional))
@@ -104,11 +115,12 @@ impl Native {
     /// on, with the pointers the wrapper fills itself. The table writes the pointer that the
     /// wrapper takes `&name`, and one it fills `*name`.
     pub fn wrapper_params(&self) -> impl Iterator<Item = WrapperParam> {
-        let native = self.name;
+        let (native, strict) = (self.name, self.strict);
         self.params.split(',').filter_map(|p| p.split_once(':')).map(move |(name, ty)| {
             let (name, filled) = name.strip_prefix('*').map_or((name, false), |name| (name, true));
             let (name, taken) = name.strip_prefix('&').map_or((name, false), |name| (name, true));
             let (name, optional) = name.strip_suffix('?').map_or((name, false), |name| (name, true));
+            let optional = optional && (taken || !strict);
             let callback = CALLBACK_TYPES.iter().find(|(owner, param, _)| *owner == native && *param == name);
             let ty = callback.map_or(ty, |(_, _, ty)| ty);
             let kind = match ty {
@@ -434,6 +446,38 @@ mod tests {
             native("GetEntityPlayerIsFreeAimingAt").unwrap().signature_returning(&["1|false", "Entity"]),
             "function GetEntityPlayerIsFreeAimingAt(player: Player, entity?: Entity): 1|false, Entity"
         );
+    }
+
+    #[test]
+    fn calls_may_leave_out_trailing_parameters_that_mean_0_or_false() {
+        let optional = |name: &str, side| {
+            let native = native(name).unwrap().on(side);
+            native.params().map(|(name, _, optional)| (name, optional)).collect::<Vec<_>>()
+        };
+        assert_eq!(optional("GetEntityCoords", None), [("entity", false), ("alive", true)]);
+        assert_eq!(optional("GetEntityCoords", Some(Side::Server)), [("entity", false)]);
+        assert_eq!(
+            native("GetEntityCoords").unwrap().signature(),
+            "function GetEntityCoords(entity: Entity, alive?: boolean): vector3"
+        );
+        let coords = optional("SetEntityCoords", None);
+        assert_eq!(coords.iter().filter(|(_, optional)| *optional).count(), 4, "{coords:?}");
+        assert_eq!(optional("SetNuiFocus", None), [("hasFocus", false), ("hasCursor", true)]);
+        // The first parameter, and those before one that is no boolean, are needed.
+        assert_eq!(optional("SetNuiFocusKeepInput", None), [("keepInput", false)]);
+        assert_eq!(optional("GetEntityRotation", None), [("entity", false), ("rotationOrder", false)]);
+        assert_eq!(optional("GetResourceMetadata", None).last(), Some(&("index", false)));
+
+        // Read strictly, only the pointer that the wrapper takes stays optional.
+        let strictly = |name: &str| {
+            let native = native(name).unwrap().strictly(true);
+            native.params().map(|(name, _, optional)| (name, optional)).collect::<Vec<_>>()
+        };
+        assert_eq!(strictly("GetEntityCoords"), [("entity", false), ("alive", false)]);
+        assert_eq!(strictly("GetEntityPlayerIsFreeAimingAt"), [("player", false), ("entity", true)]);
+        let coords = native("GetEntityCoords").unwrap().strictly(true);
+        assert_eq!(coords.signature(), "function GetEntityCoords(entity: Entity, alive: boolean): vector3");
+        assert_eq!(coords.on(Some(Side::Client)).params().nth(1), Some(("alive", "boolean", false)));
     }
 
     #[test]

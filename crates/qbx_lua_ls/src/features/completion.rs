@@ -1561,7 +1561,7 @@ fn scope_items(
                 break;
             }
             count += 1;
-            let native = native.on(Some(side));
+            let native = infer.read_native(native.on(Some(side)));
             let mut out = item(native.name, CompletionItemKind::FUNCTION, 5);
             out.detail = Some(infer.native_signature(&native));
             out.data = Some(json!({ "native": native.name, "server": side == Side::Server }));

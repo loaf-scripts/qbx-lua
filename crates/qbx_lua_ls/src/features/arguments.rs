@@ -21,15 +21,18 @@
 //! for a number parameter fills one for each of its parts, as the runtime spreads it, where the
 //! Lua wrapper of the native, which binds the arguments by position before, still passes each
 //! after it where it is meant to go (`Native::spread`). The fxv2 natives that
-//! `use_experimental_fxv2_oal` turns on spread no vector. The native wrappers turn `nil`, `0` and `false` into
+//! `use_experimental_fxv2_oal` turns on spread no vector, so there a vector for a number parameter
+//! is reported, and the arguments after it, which go to other parameters than the call means, are
+//! not checked. The native wrappers turn `nil`, `0` and `false` into
 //! NULL for string parameters, and only for those, and other values into their text, so a string
 //! parameter takes a number or a boolean written out, and the server id of a player, but not
 //! another number, such as a hash. A value of unknown type that may be a vector leaves where the
 //! values after it go unknown, when the call passes fewer values than the native takes. With
 //! `strict`, as TypeScript reads the declared types, numbers and booleans no longer pass for each
-//! other, and a string parameter takes no number or boolean, also one written out, while `nil`,
-//! hashed strings and vectors still pass as the runtime takes them, and so does the number of a
-//! player's server id, which only the native data calls a string.
+//! other, a string parameter takes no number or boolean, also one written out, and a vector for a
+//! number parameter is reported as it is for the fxv2 natives, which do not spread it, while `nil`
+//! and hashed strings still pass as the runtime takes them, and so does the number of a player's
+//! server id, which only the native data calls a string.
 //!
 //! Parameters typed with a generic of the function called are left out, as the arguments of the
 //! call bind them, unless the parameter is typed with the generic alone and another argument
@@ -256,36 +259,48 @@ impl Calls<'_, '_> {
     /// Each of `args` that the parameter of `native` it goes to does not take, with `fun` its
     /// signature or one that an `---@extend` line adds. A vector given for a number parameter of the
     /// native's own signature fills one for each of its parts, as `Native::spread` finds, unless
-    /// the resource calls the fxv2 natives, which take each argument as it is.
+    /// the resource calls the fxv2 natives, which take each argument as it is, or `strict` reads
+    /// the arguments as the fxv2 natives take them. There such a vector is reported, and the
+    /// arguments after it, which go to other parameters than the call means, are not checked.
     fn native_mismatches(&self, native: Native, fun: &FunType, args: &[Expr], values: &[Type]) -> Vec<(Span, String)> {
         let fxv2 = self.infer.uses_fxv2_natives();
+        let whole = fxv2 || self.infer.strict();
         let kinds: Vec<ArgKind> = args.iter().map(|arg| native_arg_kind(self.infer, &self.declared, arg)).collect();
         let taken: Vec<WrapperParam> =
             native.wrapper_params().filter(|param| param.kind != ParamKind::Filled).collect();
         let own = fun.params.iter().map(|param| param.name.as_str()).eq(taken.iter().map(|param| param.name));
-        let spread = (own && !fxv2).then(|| native.spread(&kinds));
+        let spread = (own && !whole).then(|| native.spread(&kinds));
         let mut out = Vec::new();
         for (i, (arg, given)) in args.iter().zip(values).enumerate() {
             let target = spread.as_ref().map_or(i, |spread| spread.targets[i]);
             let Some(param) = fun.params.get(target) else { continue };
-            // A value of no known kind for a number parameter may be a vector, which would move the
-            // values after it.
+            // A value of no known kind for a number parameter may be a vector, which the runtime
+            // spreads over the parameters after it, or which, with `strict`, leaves the values after
+            // it at other parameters than the call means.
             let takes_parts = taken.get(target).is_some_and(WrapperParam::takes_parts);
             if kinds[i] == ArgKind::Unknown && takes_parts && !fxv2 && args.len() - i < fun.params.len() - target {
+                break;
+            }
+            // A vector that is not spread is reported as what it holds, as a spread one is checked.
+            if whole && matches!(kinds[i], ArgKind::Vector(_)) && matches!(expected(param), Type::Number) {
+                let vector = native_arg_type(self.infer, &self.declared, arg).without_nil();
+                let why = match fxv2 {
+                    true => "the fxv2 natives that `use_experimental_fxv2_oal` turns on do not spread vectors",
+                    false => {
+                        "with `strict`, a vector is not spread, as the fxv2 natives do not spread it: pass its parts"
+                    }
+                };
+                out.push((
+                    arg.span,
+                    format!("Cannot assign `{vector}` to parameter `{}` of type `number`: {why}", param.name),
+                ));
                 break;
             }
             let message = match (&spread, kinds[i]) {
                 (Some(spread), ArgKind::Vector(parts)) if takes_parts => {
                     self.spread_mismatch(native, fun, args, i, parts, spread)
                 }
-                _ => native_mismatch(&self.classes, param, arg, given, self.infer.strict()).map(|message| {
-                    match fxv2 && matches!(kinds[i], ArgKind::Vector(_)) && matches!(expected(param), Type::Number) {
-                        true => format!(
-                            "{message}: the fxv2 natives that `use_experimental_fxv2_oal` turns on do not spread vectors"
-                        ),
-                        false => message,
-                    }
-                }),
+                _ => native_mismatch(&self.classes, param, arg, given, self.infer.strict()),
             };
             out.extend(message.map(|message| (arg.span, message)));
         }
